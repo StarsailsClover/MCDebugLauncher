@@ -1,0 +1,35 @@
+# Rust build artifacts
+/target
+Cargo.lock
+
+# Development files
+*.log
+*.output
+build_output.txt
+build.log
+
+# Test files
+test_*.py
+test_*.js
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Claude Code workspace
+.claude/
+SOUL.md
+USER.md
+memory/
+
+# Examples and documentation drafts
+examples/
+forge-*.log
+launch.log
