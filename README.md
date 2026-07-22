@@ -12,6 +12,7 @@ A command-line Minecraft launcher designed for rapid testing, mod development, a
 - **Agent-Friendly**: JSON-structured output for AI agents and automation tools
 - **Developer Tools**: Debug logging, performance profiling, headless mode support
 - **Instance Isolation**: Independent instances with separate mods, configs, and Java versions
+- **Automatic Java Detection**: Detects Java version requirements and provides upgrade instructions
 - **Enterprise-Grade**: Production-ready code quality with comprehensive error handling
 
 ## Quick Start

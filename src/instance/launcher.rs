@@ -89,6 +89,25 @@ impl InstanceLauncher {
         Ok(Self { java_path: java_runtime.path })
     }
 
+    /// Create launcher with specific Java version requirement
+    pub fn with_java_version(required_version: u8) -> Result<Self> {
+        let java_runtime = crate::version::java::JavaRuntime::detect()
+            .context("Failed to detect Java installation")?;
+
+        if !java_runtime.meets_requirement(required_version) {
+            anyhow::bail!(
+                "Minecraft requires Java {} or later, but found Java {}.\n\
+                Please install Java {} from: https://adoptium.net/temurin/releases/?version={}",
+                required_version,
+                java_runtime.major_version,
+                required_version,
+                required_version
+            );
+        }
+
+        Ok(Self { java_path: java_runtime.path })
+    }
+
     pub async fn launch(&self, name: &str) -> Result<()> {
         let instances_dir = crate::util::paths::get_instances_dir()?;
         let instance_dir = instances_dir.join(name);
@@ -102,11 +121,31 @@ impl InstanceLauncher {
         let config_data = fs::read_to_string(&config_path).await?;
         let config: InstanceConfig = serde_json::from_str(&config_data)?;
 
+        // Check Java version requirement
+        let version_dir = instance_dir.join("versions").join(&config.version);
+        let version_metadata = self.load_version_metadata(&version_dir, &config.version).await?;
+        let required_java = version_metadata.required_java_version();
+
+        let java_runtime = crate::version::java::JavaRuntime::detect()
+            .context("Failed to detect Java installation")?;
+
+        if !java_runtime.meets_requirement(required_java) {
+            anyhow::bail!(
+                "Minecraft {} requires Java {} or later, but found Java {}.\n\
+                Please install Java {} from: https://adoptium.net/temurin/releases/?version={}",
+                config.version,
+                required_java,
+                java_runtime.major_version,
+                required_java,
+                required_java
+            );
+        }
+
         tracing::info!("Launching instance '{}'...", name);
+        tracing::info!("Using Java {} (required: Java {})", java_runtime.major_version, required_java);
         tracing::info!("Building classpath and downloading libraries...");
 
         // Build classpath and get main class
-        let version_dir = instance_dir.join("versions").join(&config.version);
         let (classpath, main_class) = self.build_classpath(&version_dir, &config).await?;
 
         // Prepare game arguments
@@ -117,8 +156,6 @@ impl InstanceLauncher {
         fs::create_dir_all(&game_dir).await?;
         fs::create_dir_all(&assets_dir).await?;
         fs::create_dir_all(&natives_dir).await?;
-
-        let version_metadata = self.load_version_metadata(&version_dir, &config.version).await?;
 
         // Build launch command
         let mut cmd = Command::new(&self.java_path);
