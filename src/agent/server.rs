@@ -322,7 +322,7 @@ async fn execute_command(
                 timestamp: chrono::Utc::now().to_rfc3339(),
             });
 
-            match launcher.launch(&name).await {
+            match launcher.launch(&name, &crate::instance::launcher::LaunchOptions::default()).await {
                 Ok(_) => {
                     // Note: Current launcher.launch() returns (), not a process handle
                     // For now we'll report success without PID
