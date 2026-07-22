@@ -83,7 +83,7 @@ async def listen():
 
 **已测试配置：**
 - Vanilla Minecraft 1.21.1 ✅
-- Fabric Loader 0.16.11 ✅
+- Fabric Loader 0.19.3 ✅
 - Forge 52.1.2 ✅
 
 ## 贡献

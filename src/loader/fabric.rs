@@ -149,6 +149,15 @@ impl FabricInstaller {
             self.download_library(library, &libraries_dir).await?;
         }
 
+        // Download fabric-loader JAR itself
+        let loader_library = Library {
+            name: format!("net.fabricmc:fabric-loader:{}", loader_version),
+            url: String::from("https://maven.fabricmc.net/"),
+            sha1: None,
+            size: None,
+        };
+        self.download_library(&loader_library, &libraries_dir).await?;
+
         let version_json_path = target_dir.join("version.json");
 
         let main_class_str = match &profile.launcher_meta.main_class {
@@ -156,20 +165,29 @@ impl FabricInstaller {
             MainClass::Object { client, .. } => client.clone(),
         };
 
+        // Build libraries list: common + client + fabric-loader itself
+        let mut libraries = profile.launcher_meta.libraries.common.iter()
+            .chain(profile.launcher_meta.libraries.client.iter())
+            .map(|lib| {
+                serde_json::json!({
+                    "name": lib.name,
+                    "url": if lib.url.is_empty() { "https://maven.fabricmc.net/" } else { &lib.url }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        // Add fabric-loader JAR
+        libraries.push(serde_json::json!({
+            "name": format!("net.fabricmc:fabric-loader:{}", loader_version),
+            "url": "https://maven.fabricmc.net/"
+        }));
+
         let version_json = serde_json::json!({
             "id": format!("fabric-loader-{}-{}", loader_version, mc_version),
             "inheritsFrom": mc_version,
             "type": "release",
             "mainClass": main_class_str,
-            "libraries": profile.launcher_meta.libraries.common.iter()
-                .chain(profile.launcher_meta.libraries.client.iter())
-                .map(|lib| {
-                    serde_json::json!({
-                        "name": lib.name,
-                        "url": if lib.url.is_empty() { "https://maven.fabricmc.net/" } else { &lib.url }
-                    })
-                })
-                .collect::<Vec<_>>()
+            "libraries": libraries
         });
 
         fs::write(&version_json_path, serde_json::to_string_pretty(&version_json)?).await?;
