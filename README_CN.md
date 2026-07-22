@@ -70,14 +70,20 @@ async def listen():
 
 ## 状态
 
-**当前阶段**: Phase 5 - Agent API（进行中）
+**当前阶段**: Phase 7 完成 - 生产就绪
 
 - ✅ Phase 1: CLI 框架和版本管理
 - ✅ Phase 2: 实例管理和 Fabric 加载器
 - ✅ Phase 3: 启动功能与完整库支持
 - ✅ Phase 4: 诊断和日志分析
-- 🔄 Phase 5: Agent API 服务器与 WebSocket 事件
-- ⏳ Phase 6: 其他加载器（Forge、NeoForge、Quilt、OptiFine）
+- ✅ Phase 5: Agent API 服务器与 WebSocket 事件
+- ✅ Phase 6: Forge mod 加载器支持
+- ✅ Phase 7: NeoForge、Quilt 和 OptiFine 支持
+
+**已测试配置：**
+- Vanilla Minecraft 1.21.1 ✅
+- Fabric Loader 0.16.11 ✅
+- Forge 52.1.2 ✅
 
 ## 贡献
 
