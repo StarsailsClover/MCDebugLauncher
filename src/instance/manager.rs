@@ -122,6 +122,53 @@ impl InstanceManager {
 
                     installer.install_loader(&version_info.id, &forge_version, &version_dir).await?;
                 }
+                "neoforge" => {
+                    let installer = crate::loader::neoforge::NeoForgeInstaller::new(
+                        Some(loader_config.version.clone())
+                    );
+
+                    let neoforge_version = if loader_config.version == "latest" {
+                        let versions = crate::loader::neoforge::NeoForgeInstaller::fetch_versions(&version_info.id).await?;
+                        versions
+                            .first()
+                            .cloned()
+                            .with_context(|| format!("No NeoForge version found for Minecraft {}", version_info.id))?
+                    } else {
+                        loader_config.version.clone()
+                    };
+
+                    installer.install_loader(&version_info.id, &neoforge_version, &version_dir).await?;
+                }
+                "quilt" => {
+                    let installer = crate::loader::quilt::QuiltInstaller::new(
+                        Some(loader_config.version.clone())
+                    );
+
+                    let quilt_version = if loader_config.version == "latest" {
+                        let versions = crate::loader::quilt::QuiltInstaller::fetch_versions().await?;
+                        versions
+                            .first()
+                            .cloned()
+                            .context("No Quilt loader versions available")?
+                    } else {
+                        loader_config.version.clone()
+                    };
+
+                    installer.install_loader(&version_info.id, &quilt_version, &version_dir).await?;
+                }
+                "optifine" => {
+                    let installer = crate::loader::optifine::OptiFineInstaller::new(
+                        Some(loader_config.version.clone())
+                    );
+
+                    let optifine_version = if loader_config.version == "latest" {
+                        "latest".to_string()
+                    } else {
+                        loader_config.version.clone()
+                    };
+
+                    installer.install_loader(&version_info.id, &optifine_version, &version_dir).await?;
+                }
                 _ => anyhow::bail!("Unsupported loader type: {}", loader_config.loader_type),
             }
         }

@@ -157,6 +157,186 @@ impl JavaRuntime {
     pub fn meets_requirement(&self, required_version: u8) -> bool {
         self.major_version >= required_version
     }
+
+    /// Ensure a Java runtime satisfying `required_version` is available,
+    /// auto-downloading one from Adoptium if the system has none suitable.
+    ///
+    /// Resolution order:
+    ///   1. A previously auto-downloaded runtime in the java cache that meets
+    ///      the requirement (fast path, no process spawn beyond a version check).
+    ///   2. A system Java on PATH / common install locations that meets it.
+    ///   3. Download the matching Temurin JRE from Adoptium into the java cache.
+    ///
+    /// This is what launch code should call instead of `detect()` so a missing
+    /// or too-old Java no longer aborts the launch.
+    pub async fn ensure_version(required_version: u8) -> Result<Self> {
+        // 1. Cached auto-downloaded runtime for this major version.
+        if let Ok(cached) = Self::from_cache(required_version) {
+            if cached.meets_requirement(required_version) {
+                debug!("Using cached Java {}", cached.major_version);
+                return Ok(cached);
+            }
+        }
+
+        // 2. System Java, if it satisfies the requirement.
+        if let Ok(system) = Self::detect() {
+            if system.meets_requirement(required_version) {
+                debug!("Using system Java {}", system.major_version);
+                return Ok(system);
+            }
+            info!(
+                "System Java {} does not meet requirement (need {}), downloading...",
+                system.major_version, required_version
+            );
+        } else {
+            info!("No system Java found, downloading Java {}...", required_version);
+        }
+
+        // 3. Download from Adoptium.
+        Self::download(required_version).await
+    }
+
+    /// Locate a previously auto-downloaded runtime for the given major version.
+    fn from_cache(major_version: u8) -> Result<Self> {
+        let base = crate::util::paths::get_java_cache_dir()?.join(major_version.to_string());
+        if !base.exists() {
+            anyhow::bail!("No cached Java {}", major_version);
+        }
+        let java_path = Self::find_java_binary(&base)?;
+        Self::from_path(&java_path)
+    }
+
+    /// Recursively locate the `bin/java` (or `bin/java.exe`) executable within a
+    /// freshly extracted JDK/JRE archive. Adoptium archives contain a single
+    /// top-level version directory, so the binary sits one or two levels down.
+    fn find_java_binary(root: &std::path::Path) -> Result<PathBuf> {
+        #[cfg(target_os = "windows")]
+        let rel = std::path::Path::new("bin").join("java.exe");
+        #[cfg(not(target_os = "windows"))]
+        let rel = std::path::Path::new("bin").join("java");
+
+        // Direct hit: root/bin/java
+        let direct = root.join(&rel);
+        if direct.exists() {
+            return Ok(direct);
+        }
+
+        // Otherwise search immediate subdirectories (root/<jdk-dir>/bin/java).
+        // On macOS the layout is <jdk-dir>/Contents/Home/bin/java.
+        for entry in std::fs::read_dir(root)? {
+            let entry = entry?;
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let candidate = entry.path().join(&rel);
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let mac = entry
+                    .path()
+                    .join("Contents")
+                    .join("Home")
+                    .join(&rel);
+                if mac.exists() {
+                    return Ok(mac);
+                }
+            }
+        }
+
+        anyhow::bail!("Java executable not found under {:?}", root)
+    }
+
+    /// Download and extract the Temurin JRE for `major_version` from Adoptium
+    /// into the java cache, returning the resulting runtime.
+    async fn download(major_version: u8) -> Result<Self> {
+        let (os, arch, archive_ext) = Self::adoptium_platform()?;
+
+        // Adoptium's "latest binary" redirect resolves to the current GA build
+        // for the requested feature version, OS and architecture.
+        let url = format!(
+            "https://api.adoptium.net/v3/binary/latest/{}/ga/{}/{}/jre/hotspot/normal/eclipse",
+            major_version, os, arch
+        );
+
+        info!("Downloading Java {} from Adoptium ({}/{})", major_version, os, arch);
+
+        let response = reqwest::get(&url)
+            .await
+            .with_context(|| format!("Failed to download Java from {}", url))?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "Failed to download Java {}: HTTP {} (no Temurin build for {}/{}?)",
+                major_version,
+                response.status(),
+                os,
+                arch
+            );
+        }
+        let bytes = response.bytes().await.context("Failed to read Java archive")?;
+
+        let cache_dir = crate::util::paths::get_java_cache_dir()?;
+        let target_dir = cache_dir.join(major_version.to_string());
+
+        // Clean any partial previous extraction.
+        if target_dir.exists() {
+            let _ = std::fs::remove_dir_all(&target_dir);
+        }
+        std::fs::create_dir_all(&target_dir)
+            .with_context(|| format!("Failed to create Java dir {:?}", target_dir))?;
+
+        info!("Extracting Java runtime ({} bytes)...", bytes.len());
+        match archive_ext {
+            "zip" => Self::extract_zip(&bytes, &target_dir)?,
+            "tar.gz" => Self::extract_tar_gz(&bytes, &target_dir)?,
+            other => anyhow::bail!("Unsupported Java archive format: {}", other),
+        }
+
+        let java_path = Self::find_java_binary(&target_dir)?;
+        let runtime = Self::from_path(&java_path)?;
+        info!("Java {} installed at {:?}", runtime.major_version, runtime.path);
+        Ok(runtime)
+    }
+
+    /// Map the current platform to Adoptium's (os, arch, archive-extension)
+    /// naming.
+    fn adoptium_platform() -> Result<(&'static str, &'static str, &'static str)> {
+        let os = match std::env::consts::OS {
+            "windows" => "windows",
+            "linux" => "linux",
+            "macos" => "mac",
+            other => anyhow::bail!("Unsupported OS for Java download: {}", other),
+        };
+
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "x64",
+            "x86" => "x86",
+            "aarch64" => "aarch64",
+            other => anyhow::bail!("Unsupported architecture for Java download: {}", other),
+        };
+
+        let ext = if os == "windows" { "zip" } else { "tar.gz" };
+        Ok((os, arch, ext))
+    }
+
+    fn extract_zip(bytes: &[u8], target_dir: &std::path::Path) -> Result<()> {
+        let reader = std::io::Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(reader).context("Failed to read Java zip archive")?;
+        archive
+            .extract(target_dir)
+            .context("Failed to extract Java zip archive")?;
+        Ok(())
+    }
+
+    fn extract_tar_gz(bytes: &[u8], target_dir: &std::path::Path) -> Result<()> {
+        let gz = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes));
+        let mut archive = tar::Archive::new(gz);
+        archive
+            .unpack(target_dir)
+            .context("Failed to extract Java tar.gz archive")?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

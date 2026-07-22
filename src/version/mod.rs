@@ -4,6 +4,7 @@
 pub mod manifest;
 pub mod downloader;
 pub mod java;
+pub mod assets;
 
 pub use manifest::*;
 pub use downloader::*;

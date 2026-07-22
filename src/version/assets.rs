@@ -1,0 +1,155 @@
+// Minecraft asset downloader.
+//
+// Minecraft ships its textures, sounds, language files and other resources
+// separately from the client JAR. Each version references an "asset index"
+// (identified by an id such as "17") which maps virtual paths to content
+// hashes. The launcher must download:
+//   1. the index JSON -> <assets>/indexes/<id>.json
+//   2. every referenced object -> <assets>/objects/<first-2-hash-chars>/<hash>
+// from the Mojang resources CDN. Without these files Minecraft cannot find
+// "assets/indexes/<id>.json" and starts with no textures or sounds.
+
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+use tokio::fs;
+
+use crate::version::manifest::AssetIndex;
+
+const RESOURCES_BASE_URL: &str = "https://resources.download.minecraft.net";
+
+/// Maximum number of asset objects downloaded concurrently. The object CDN is
+/// happy to serve many small files in parallel; this bounds our open sockets.
+const MAX_CONCURRENT_DOWNLOADS: usize = 16;
+
+#[derive(Debug, Deserialize)]
+struct AssetIndexFile {
+    objects: HashMap<String, AssetObject>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct AssetObject {
+    hash: String,
+    #[allow(dead_code)]
+    size: u64,
+}
+
+/// Download the asset index and every referenced object into `assets_dir`.
+///
+/// This is idempotent: the index and each object are content-addressed by
+/// SHA1, so existing files are skipped and re-running only fetches what is
+/// missing. Safe to call on every launch.
+pub async fn download_assets(asset_index: &AssetIndex, assets_dir: &Path) -> Result<()> {
+    let indexes_dir = assets_dir.join("indexes");
+    let objects_dir = assets_dir.join("objects");
+    fs::create_dir_all(&indexes_dir).await?;
+    fs::create_dir_all(&objects_dir).await?;
+
+    // 1. Fetch (or reuse) the asset index JSON.
+    let index_path = indexes_dir.join(format!("{}.json", asset_index.id));
+    let index_content = if index_path.exists() {
+        fs::read_to_string(&index_path).await?
+    } else {
+        tracing::info!("Downloading asset index {}", asset_index.id);
+        let response = reqwest::get(&asset_index.url)
+            .await
+            .with_context(|| format!("Failed to download asset index from {}", asset_index.url))?;
+        if !response.status().is_success() {
+            anyhow::bail!("Failed to download asset index: HTTP {}", response.status());
+        }
+        let text = response.text().await?;
+        fs::write(&index_path, &text).await?;
+        text
+    };
+
+    let index: AssetIndexFile =
+        serde_json::from_str(&index_content).context("Failed to parse asset index JSON")?;
+
+    // 2. Determine which objects are missing.
+    let mut missing: Vec<AssetObject> = Vec::new();
+    for object in index.objects.values() {
+        let sub_dir = &object.hash[0..2];
+        let object_path = objects_dir.join(sub_dir).join(&object.hash);
+        if !object_path.exists() {
+            missing.push(object.clone());
+        }
+    }
+
+    if missing.is_empty() {
+        tracing::info!("All {} assets already present", index.objects.len());
+        return Ok(());
+    }
+
+    tracing::info!(
+        "Downloading {} missing assets ({} total)",
+        missing.len(),
+        index.objects.len()
+    );
+
+    // 3. Download missing objects with bounded concurrency.
+    let objects_dir = Arc::new(objects_dir.to_path_buf());
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_DOWNLOADS));
+    let mut tasks = Vec::new();
+
+    for object in missing {
+        let objects_dir = Arc::clone(&objects_dir);
+        let semaphore = Arc::clone(&semaphore);
+        tasks.push(tokio::spawn(async move {
+            let _permit = semaphore.acquire().await.unwrap();
+            download_object(&object, &objects_dir).await
+        }));
+    }
+
+    let mut failures = 0;
+    for task in tasks {
+        match task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                failures += 1;
+                tracing::warn!("Asset download failed: {}", e);
+            }
+            Err(e) => {
+                failures += 1;
+                tracing::warn!("Asset download task panicked: {}", e);
+            }
+        }
+    }
+
+    if failures > 0 {
+        anyhow::bail!("{} asset object(s) failed to download", failures);
+    }
+
+    tracing::info!("Assets downloaded successfully");
+    Ok(())
+}
+
+async fn download_object(object: &AssetObject, objects_dir: &Path) -> Result<()> {
+    let sub_dir = &object.hash[0..2];
+    let target_dir = objects_dir.join(sub_dir);
+    let target_path = target_dir.join(&object.hash);
+
+    if target_path.exists() {
+        return Ok(());
+    }
+
+    fs::create_dir_all(&target_dir).await?;
+
+    let url = format!("{}/{}/{}", RESOURCES_BASE_URL, sub_dir, object.hash);
+    let response = reqwest::get(&url)
+        .await
+        .with_context(|| format!("Failed to download asset from {}", url))?;
+    if !response.status().is_success() {
+        anyhow::bail!("Failed to download asset {}: HTTP {}", object.hash, response.status());
+    }
+
+    let bytes = response.bytes().await?;
+
+    if !crate::util::checksum::verify_sha1(&bytes, &object.hash) {
+        anyhow::bail!("SHA1 verification failed for asset {}", object.hash);
+    }
+
+    fs::write(&target_path, bytes).await?;
+    Ok(())
+}

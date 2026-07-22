@@ -13,16 +13,3 @@ pub use neoforge::*;
 pub use quilt::*;
 pub use optifine::*;
 
-use anyhow::Result;
-
-/// Trait for mod loader installers
-pub trait LoaderInstaller {
-    /// Install the mod loader for a specific Minecraft version
-    fn install(&self, mc_version: &str, target_dir: &str) -> Result<String>;
-
-    /// Get the loader version
-    fn version(&self) -> &str;
-
-    /// Get the loader type name
-    fn loader_type(&self) -> &str;
-}

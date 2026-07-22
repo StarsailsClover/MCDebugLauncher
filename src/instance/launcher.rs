@@ -84,9 +84,14 @@ pub struct InstanceLauncher {
 
 impl InstanceLauncher {
     pub fn new() -> Result<Self> {
-        let java_runtime = crate::version::java::JavaRuntime::detect()
-            .context("Failed to detect Java installation")?;
-        Ok(Self { java_path: java_runtime.path })
+        // Java is resolved (and auto-downloaded if necessary) inside launch()
+        // via JavaRuntime::ensure_version, so construction must not fail when the
+        // system has no Java yet. Probe for one opportunistically; fall back to a
+        // placeholder path that launch() overrides.
+        let java_path = crate::version::java::JavaRuntime::detect()
+            .map(|r| r.path)
+            .unwrap_or_else(|_| PathBuf::from("java"));
+        Ok(Self { java_path })
     }
 
     /// Create launcher with specific Java version requirement
@@ -126,27 +131,20 @@ impl InstanceLauncher {
         let version_metadata = self.load_version_metadata(&version_dir, &config.version).await?;
         let required_java = version_metadata.required_java_version();
 
-        let java_runtime = crate::version::java::JavaRuntime::detect()
-            .context("Failed to detect Java installation")?;
-
-        if !java_runtime.meets_requirement(required_java) {
-            anyhow::bail!(
-                "Minecraft {} requires Java {} or later, but found Java {}.\n\
-                Please install Java {} from: https://adoptium.net/temurin/releases/?version={}",
-                config.version,
-                required_java,
-                java_runtime.major_version,
-                required_java,
-                required_java
-            );
-        }
+        // Resolve a suitable Java runtime, auto-downloading one from Adoptium if
+        // the system has none that meets the version requirement. This replaces
+        // the previous hard failure on a missing/too-old Java.
+        let java_runtime = crate::version::java::JavaRuntime::ensure_version(required_java)
+            .await
+            .context("Failed to obtain a suitable Java runtime")?;
+        let java_path = java_runtime.path.clone();
 
         tracing::info!("Launching instance '{}'...", name);
         tracing::info!("Using Java {} (required: Java {})", java_runtime.major_version, required_java);
         tracing::info!("Building classpath and downloading libraries...");
 
         // Build classpath and get main class
-        let (classpath, main_class) = self.build_classpath(&version_dir, &config).await?;
+        let (classpath, main_class, module_path_entries) = self.build_classpath(&version_dir, &config).await?;
 
         // Prepare game arguments
         let game_dir = instance_dir.clone();
@@ -157,21 +155,58 @@ impl InstanceLauncher {
         fs::create_dir_all(&assets_dir).await?;
         fs::create_dir_all(&natives_dir).await?;
 
+        // Download game assets (textures, sounds, language files). Minecraft
+        // reads these from <assets>/indexes/<id>.json + <assets>/objects/...; if
+        // they are missing the game launches with no textures and logs
+        // "Can't open the resource index file". This is idempotent and only
+        // fetches what is missing.
+        if let Some(asset_index) = &version_metadata.asset_index {
+            tracing::info!("Verifying game assets...");
+            crate::version::assets::download_assets(asset_index, &assets_dir).await?;
+        }
+
+        // Load loader-specific JVM and game args from version.json
+        let libraries_dir = crate::util::paths::get_libraries_cache_dir()?;
+        let (loader_jvm_args, loader_game_args) = self.load_loader_args(&version_dir, &config, &libraries_dir).await?;
+
         // Build launch command
-        let mut cmd = Command::new(&self.java_path);
+        let mut cmd = Command::new(&java_path);
 
         // JVM arguments
         cmd.arg("-Xmx2G");
         cmd.arg("-Xms512M");
         cmd.arg(format!("-Djava.library.path={}", natives_dir.display()));
+
+        if !loader_jvm_args.is_empty() {
+            // Use loader-provided JVM args (NeoForge: includes correct -p, --add-opens, DlibraryDirectory, etc.)
+            for arg in &loader_jvm_args {
+                cmd.arg(arg);
+            }
+        } else if !module_path_entries.is_empty() {
+            // Forge (legacy): use our constructed module path
+            let sep = if cfg!(windows) { ";" } else { ":" };
+            cmd.arg("-p");
+            cmd.arg(module_path_entries.join(sep));
+            cmd.arg("--add-modules");
+            cmd.arg("ALL-MODULE-PATH");
+            cmd.arg("--add-opens");
+            cmd.arg("java.base/java.util.jar=cpw.mods.securejarhandler");
+            cmd.arg("--add-opens");
+            cmd.arg("java.base/java.lang.invoke=cpw.mods.securejarhandler");
+            cmd.arg("--add-exports");
+            cmd.arg("java.base/sun.security.util=cpw.mods.securejarhandler");
+            cmd.arg("--add-exports");
+            cmd.arg("jdk.naming.dns/com.sun.jndi.dns=java.naming");
+        }
+
         cmd.arg("-cp");
         cmd.arg(&classpath);
 
         // Main class
         cmd.arg(&main_class);
 
-        // Game arguments
-        self.add_game_arguments(&mut cmd, &config, &version_metadata, &game_dir, &assets_dir, &main_class, &version_dir)?;
+        // Game arguments (standard + loader-specific)
+        self.add_game_arguments(&mut cmd, &config, &version_metadata, &game_dir, &assets_dir, &main_class, &version_dir, &loader_game_args)?;
 
         cmd.current_dir(&game_dir);
         cmd.stdout(Stdio::inherit());
@@ -191,14 +226,30 @@ impl InstanceLauncher {
         Ok(())
     }
 
-    async fn build_classpath(&self, version_dir: &Path, config: &InstanceConfig) -> Result<(String, String)> {
+    async fn build_classpath(&self, version_dir: &Path, config: &InstanceConfig) -> Result<(String, String, Vec<String>)> {
         let libraries_dir = crate::util::paths::get_libraries_cache_dir()?;
         let mut classpath_entries = Vec::new();
+        // Special NeoForge JARs (patched client, extra resources, universal) that
+        // must bypass coordinate-level deduplication. The patched client and the
+        // universal JAR share the same Maven coordinate directory
+        // (net/neoforged/neoforge/<version>/) and differ only by classifier, so
+        // the coordinate-based dedup below would otherwise collapse them into one.
+        let mut deferred_jars: Vec<String> = Vec::new();
+        let mut module_path_entries = Vec::new();
         let mut main_class = String::new();
+        let mut is_neoforge = false;
 
-        // Add Minecraft client jar FIRST (required by Forge ModLauncher)
+        let loader_type = config.loader.as_ref().map(|l| l.loader_type.as_str());
+        let is_neoforge_loader = loader_type == Some("neoforge");
+
+        // Add Minecraft client jar FIRST (required by Forge ModLauncher).
+        // NeoForge is the exception: it does NOT use the raw obfuscated vanilla
+        // client. Instead it uses a deobfuscated + binary-patched client produced
+        // by the installer (neoforge-<version>-client.jar), added below.
         let client_jar = version_dir.join(format!("{}.jar", config.version));
-        classpath_entries.push(client_jar.display().to_string());
+        if !is_neoforge_loader {
+            classpath_entries.push(client_jar.display().to_string());
+        }
 
         // Load version.json if loader is present
         if config.loader.is_some() {
@@ -209,7 +260,67 @@ impl InstanceLauncher {
 
                 main_class = loader_json.main_class.clone();
 
-                // Add loader libraries
+                // Check if this is NeoForge (needs module path instead of classpath)
+                is_neoforge = main_class.contains("bootstraplauncher") || main_class.contains("neoforge");
+
+                // NeoForge: add the installer-produced game JARs. These come from
+                // the installer's processor pipeline, not from version.json's
+                // library list, so they are resolved by convention here.
+                if is_neoforge {
+                    // Extract NeoForge version from loader_json.id (e.g., "neoforge-21.1.1" -> "21.1.1")
+                    let neoforge_version = loader_json.id.strip_prefix("neoforge-")
+                        .unwrap_or(&loader_json.id);
+                    let neoforge_dir = libraries_dir
+                        .join("net")
+                        .join("neoforged")
+                        .join("neoforge")
+                        .join(neoforge_version);
+
+                    // Patched client: the deobfuscated + binary-patched Minecraft
+                    // client. Contains the Mojang-mapped classes (LoadingOverlay,
+                    // BlockEntityType, ...) that FML mixins and the game require.
+                    let patched_client = neoforge_dir.join(format!("neoforge-{}-client.jar", neoforge_version));
+                    if patched_client.exists() {
+                        tracing::debug!("Adding NeoForge patched client: {:?}", patched_client);
+                        deferred_jars.push(patched_client.display().to_string());
+                    } else {
+                        tracing::warn!("NeoForge patched client not found: {:?}", patched_client);
+                    }
+
+                    // Universal JAR: NeoForge API + mod-loading classes.
+                    let universal = neoforge_dir.join(format!("neoforge-{}-universal.jar", neoforge_version));
+                    if universal.exists() {
+                        tracing::debug!("Adding NeoForge universal JAR: {:?}", universal);
+                        deferred_jars.push(universal.display().to_string());
+                    } else {
+                        tracing::warn!("NeoForge universal JAR not found: {:?}", universal);
+                    }
+
+                    // Extra JAR: Minecraft assets/resources split out of the client
+                    // by the installer. The coordinate is
+                    // net.minecraft:client:<mcVersion>-<neoFormVersion>:extra and is
+                    // reconstructed from the --fml.mcVersion / --fml.neoFormVersion
+                    // game arguments in version.json.
+                    if let Some(neoform) = Self::neoform_version_from_args(&loader_json) {
+                        let extra = libraries_dir
+                            .join("net")
+                            .join("minecraft")
+                            .join("client")
+                            .join(&neoform)
+                            .join(format!("client-{}-extra.jar", neoform));
+                        if extra.exists() {
+                            tracing::debug!("Adding Minecraft extra JAR: {:?}", extra);
+                            deferred_jars.push(extra.display().to_string());
+                        } else {
+                            tracing::warn!("Minecraft extra JAR not found: {:?}", extra);
+                        }
+                    } else {
+                        tracing::warn!("Could not determine neoForm version for extra JAR");
+                    }
+                }
+
+                // Add loader libraries. For NeoForge, ALL libraries go on the classpath;
+                // the module path is fully specified by version.json's `-p` JVM argument.
                 for library in &loader_json.libraries {
                     // Check for Forge client library with empty URL
                     if library.name.contains(":client") {
@@ -233,6 +344,7 @@ impl InstanceLauncher {
                     }
 
                     if let Some(lib_path) = self.resolve_library_path(&library.name, &libraries_dir) {
+                        // Both NeoForge and Forge: add loader libraries to classpath
                         classpath_entries.push(lib_path);
                     }
                 }
@@ -290,6 +402,9 @@ impl InstanceLauncher {
                             }
                         }
                     } else {
+                        // All Minecraft base libraries go on the classpath.
+                        // For NeoForge, BootstrapLauncher reads the classpath and
+                        // constructs its module layers from these entries.
                         classpath_entries.push(lib_path.display().to_string());
                     }
                     continue;
@@ -304,16 +419,54 @@ impl InstanceLauncher {
             }
         }
 
+        // Deduplicate classpath entries by Maven coordinate (group:artifact),
+        // keeping the first occurrence. Loader libraries are added before the
+        // base Minecraft libraries, so the loader's version wins when both list
+        // the same artifact at different versions (e.g. log4j-slf4j2-impl 2.19.0
+        // from NeoForge vs 2.22.1 from Minecraft). Without coordinate-level
+        // deduplication, two different versions of the same automatic module end
+        // up on the classpath and crash BootstrapLauncher with either a
+        // "Duplicate key" error or a module "exports package ... to" conflict.
+        //
+        // A library path has the shape:
+        //   <libraries_dir>/<group_path>/<artifact>/<version>/<artifact>-<version>.jar
+        // so the parent of the version directory (the grandparent of the JAR
+        // file) uniquely identifies group:artifact.
+        let mut seen = std::collections::HashSet::new();
+        classpath_entries.retain(|entry| {
+            let path = Path::new(entry);
+            let coord_key = path
+                .parent()
+                .and_then(|version_dir| version_dir.parent())
+                .map(|artifact_dir| artifact_dir.to_string_lossy().to_string())
+                .unwrap_or_else(|| entry.clone());
+            seen.insert(coord_key)
+        });
+
+        // Append the deferred NeoForge JARs AFTER deduplication so the patched
+        // client and the universal JAR (which share a Maven coordinate directory
+        // and differ only by classifier) are both preserved on the classpath.
+        classpath_entries.extend(deferred_jars);
+
         let classpath = if cfg!(windows) {
             classpath_entries.join(";")
         } else {
             classpath_entries.join(":")
         };
 
+        let module_path = if cfg!(windows) {
+            module_path_entries.join(";")
+        } else {
+            module_path_entries.join(":")
+        };
+
         tracing::info!("Classpath built with {} entries", classpath_entries.len());
+        if !module_path_entries.is_empty() {
+            tracing::info!("Module path built with {} entries", module_path_entries.len());
+        }
         tracing::info!("Main class: {}", main_class);
 
-        Ok((classpath, main_class))
+        Ok((classpath, main_class, module_path_entries))
     }
 
     async fn download_library(&self, url: &str, path: &Path, expected_sha1: &str) -> Result<()> {
@@ -355,11 +508,14 @@ impl InstanceLauncher {
 
         let group = parts[0].replace('.', "/");
         let artifact = parts[1];
-        let version = parts[2];
+        // Strip @jar or @type suffix from version (Maven packaging type notation)
+        let version = parts[2].split('@').next().unwrap_or(parts[2]);
 
         // Handle natives (e.g., "org.lwjgl:lwjgl:3.3.1:natives-windows")
+        // or classifiers with @type (e.g., "artifact:version:classifier@jar")
         let jar_name = if parts.len() > 3 {
-            let classifier = parts[3];
+            // Strip @type from classifier if present
+            let classifier = parts[3].split('@').next().unwrap_or(parts[3]);
             format!("{}-{}-{}.jar", artifact, version, classifier)
         } else {
             format!("{}-{}.jar", artifact, version)
@@ -380,19 +536,70 @@ impl InstanceLauncher {
 
         let group = parts[0].replace('.', "/");
         let artifact = parts[1];
-        let version = parts[2];
+        // Strip @jar or @type suffix from version
+        let version = parts[2].split('@').next().unwrap_or(parts[2]);
+
+        // Handle classifier (e.g., "net.neoforged:mergetool:2.0.0:api@jar" ->
+        // mergetool-2.0.0-api.jar). Without this, classified artifacts like the
+        // mergetool `api` JAR (which contains net.neoforged.api.distmarker.OnlyIn)
+        // resolve to a non-existent path and never reach the classpath, causing
+        // NoClassDefFoundError at launch.
+        let jar_name = if parts.len() > 3 {
+            let classifier = parts[3].split('@').next().unwrap_or(parts[3]);
+            format!("{}-{}-{}.jar", artifact, version, classifier)
+        } else {
+            format!("{}-{}.jar", artifact, version)
+        };
 
         let path = libraries_dir
             .join(&group)
             .join(artifact)
             .join(version)
-            .join(format!("{}-{}.jar", artifact, version));
+            .join(jar_name);
 
         if path.exists() {
             Some(path.display().to_string())
         } else {
             None
         }
+    }
+
+    /// Reconstruct the neoForm-qualified Minecraft version used for the extra
+    /// resources JAR (net.minecraft:client:<mcVersion>-<neoFormVersion>:extra).
+    ///
+    /// NeoForge's version.json carries the two halves as separate game
+    /// arguments (`--fml.mcVersion 1.21.1` and `--fml.neoFormVersion
+    /// 20240808.144430`); the installer names the extracted resources JAR
+    /// `client-<mcVersion>-<neoFormVersion>-extra.jar`. We scan the raw game
+    /// argument list for both flags and join their values.
+    fn neoform_version_from_args(loader_json: &VersionJson) -> Option<String> {
+        let args = loader_json.arguments.as_ref()?;
+        let game = args.game.as_ref()?;
+
+        // Flatten the game arguments into a plain string sequence so we can look
+        // for a flag followed by its value.
+        let mut flat: Vec<String> = Vec::new();
+        for arg in game {
+            match arg {
+                ArgumentValue::String(s) => flat.push(s.clone()),
+                ArgumentValue::Object { value, .. } => match value {
+                    ArgumentValueInner::String(s) => flat.push(s.clone()),
+                    ArgumentValueInner::Array(arr) => flat.extend(arr.iter().cloned()),
+                },
+            }
+        }
+
+        let find_value = |flag: &str| -> Option<String> {
+            flat.iter()
+                .position(|a| a == flag)
+                .and_then(|i| flat.get(i + 1))
+                .cloned()
+        };
+
+        let mc_version = find_value("--fml.mcVersion")?;
+        let neoform_version = find_value("--fml.neoFormVersion")?;
+
+        Some(format!("{}-{}", mc_version, neoform_version))
     }
 
     fn check_rules(&self, rules: &[Rule]) -> bool {
@@ -422,6 +629,83 @@ impl InstanceLauncher {
         true
     }
 
+    async fn load_loader_args(
+        &self,
+        version_dir: &Path,
+        config: &InstanceConfig,
+        libraries_dir: &Path,
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        if config.loader.is_none() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let loader_json_path = version_dir.join("version.json");
+        if !loader_json_path.exists() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let loader_json_data = fs::read_to_string(&loader_json_path).await?;
+        let loader_json: VersionJson = serde_json::from_str(&loader_json_data)?;
+
+        let library_dir = libraries_dir.display().to_string();
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let version_name = &config.version;
+
+        let substitute = |s: &str| -> String {
+            s.replace("${library_directory}", &library_dir)
+             .replace("${classpath_separator}", sep)
+             .replace("${version_name}", version_name)
+        };
+
+        let jvm_args = if let Some(args) = &loader_json.arguments {
+            let mut result = Vec::new();
+            if let Some(jvm) = &args.jvm {
+                for arg in jvm {
+                    match arg {
+                        ArgumentValue::String(s) => result.push(substitute(s)),
+                        ArgumentValue::Object { rules, value } => {
+                            if self.check_rules(rules) {
+                                match value {
+                                    ArgumentValueInner::String(s) => result.push(substitute(s)),
+                                    ArgumentValueInner::Array(arr) => {
+                                        result.extend(arr.iter().map(|s| substitute(s)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            result
+        } else {
+            Vec::new()
+        };
+
+        let game_args = if let Some(args) = &loader_json.arguments {
+            let mut result = Vec::new();
+            if let Some(game) = &args.game {
+                for arg in game {
+                    match arg {
+                        ArgumentValue::String(s) => result.push(substitute(s)),
+                        ArgumentValue::Object { rules, value } => {
+                            if self.check_rules(rules) {
+                                match value {
+                                    ArgumentValueInner::String(s) => result.push(substitute(s)),
+                                    ArgumentValueInner::Array(arr) => {
+                                        result.extend(arr.iter().map(|s| substitute(s)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            result
+        } else {
+            Vec::new()
+        };
+
+        Ok((jvm_args, game_args))
+    }
+
     async fn load_version_metadata(&self, version_dir: &Path, version: &str) -> Result<VersionMetadata> {
         let json_path = version_dir.join(format!("{}.json", version));
         let json_data = fs::read_to_string(&json_path).await?;
@@ -438,6 +722,7 @@ impl InstanceLauncher {
         assets_dir: &Path,
         main_class: &str,
         version_dir: &Path,
+        loader_game_args: &[String],
     ) -> Result<()> {
         // Standard arguments
         cmd.arg("--username");
@@ -466,12 +751,33 @@ impl InstanceLauncher {
         cmd.arg("--versionType");
         cmd.arg("release");
 
-        // Add launchTarget and gameJar for Forge/NeoForge
-        if main_class.contains("forge") || main_class.contains("neoforge") {
-            cmd.arg("--launchTarget");
-            cmd.arg("forge_client");
+        let is_neoforge = main_class.contains("bootstraplauncher") || main_class.contains("neoforge");
+        let is_modded = main_class.contains("forge") || is_neoforge;
 
-            // Forge ModLauncher needs to know where the client JAR is
+        if is_neoforge && !loader_game_args.is_empty() {
+            // NeoForge: use the game args verbatim from version.json (they carry
+            // --launchTarget forgeclient, --fml.neoForgeVersion, --fml.mcVersion,
+            // --fml.neoFormVersion, --fml.fmlVersion). Do NOT inject --gameJar:
+            // NeoForge locates the patched client from the classpath through
+            // BootstrapLauncher's -DignoreList, and pointing --gameJar at the raw
+            // obfuscated vanilla jar (which isn't even on the classpath) makes
+            // ModLauncher fail to find the Mojang-mapped game classes.
+            for arg in loader_game_args {
+                cmd.arg(arg);
+            }
+        } else if is_modded && !loader_game_args.is_empty() {
+            // Newer Forge: use game args from version.json, then force --gameJar
+            // to the vanilla client (Forge's ModLauncher still consumes it).
+            for arg in loader_game_args {
+                cmd.arg(arg);
+            }
+            let client_jar = version_dir.join(format!("{}.jar", config.version));
+            cmd.arg("--gameJar");
+            cmd.arg(client_jar.display().to_string());
+        } else if is_modded {
+            // Legacy Forge: add launchTarget and gameJar manually
+            cmd.arg("--launchTarget");
+            cmd.arg("fmlclient");
             let client_jar = version_dir.join(format!("{}.jar", config.version));
             cmd.arg("--gameJar");
             cmd.arg(client_jar.display().to_string());

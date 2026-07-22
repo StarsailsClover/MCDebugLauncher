@@ -50,6 +50,12 @@ pub fn get_assets_cache_dir() -> Result<PathBuf> {
     Ok(get_cache_dir()?.join("assets"))
 }
 
+/// Get the Java runtimes cache directory. Auto-downloaded JDK/JRE builds are
+/// installed here, one subdirectory per major version (e.g. java/21).
+pub fn get_java_cache_dir() -> Result<PathBuf> {
+    Ok(get_cache_dir()?.join("java"))
+}
+
 /// Ensure a directory exists
 pub async fn ensure_dir(path: &PathBuf) -> Result<()> {
     tokio::fs::create_dir_all(path)

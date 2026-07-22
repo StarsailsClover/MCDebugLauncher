@@ -198,6 +198,10 @@ async fn main() -> Result<()> {
 
     info!("MCDebugLauncher v{}", env!("CARGO_PKG_VERSION"));
 
+    // Kick off a best-effort GitHub update check concurrently with the command.
+    // It is throttled by an on-disk cache and never blocks or fails the command.
+    let update_check = tokio::spawn(util::update::check_for_update());
+
     // Execute command
     match cli.command {
         Commands::Versions { type_filter, limit, search } => {
@@ -226,6 +230,18 @@ async fn main() -> Result<()> {
         }
         Commands::Info => {
             cmd_info(&cli.format).await?;
+        }
+    }
+
+    // Surface any available update after the command completes so the notice is
+    // the last thing the user sees. Non-JSON output only, to keep machine-
+    // readable output clean.
+    if cli.format != "json" {
+        if let Ok(Some(info)) = update_check.await {
+            eprintln!(
+                "\nA new version of MCDebugLauncher is available: {} -> {}\nDownload: {}\n",
+                info.current, info.latest, info.url
+            );
         }
     }
 
