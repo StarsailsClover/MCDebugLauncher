@@ -1,11 +1,11 @@
 [package]
 name = "mcdebug-launcher"
-version = "26.0.0-alpha.1"
+version = "26.0.0-alpha.2"
 edition = "2021"
 authors = ["Sails <sails@example.com>"]
 license = "Apache-2.0"
 description = "A command-line Minecraft launcher for developers, testers, and AI agents"
-repository = "https://github.com/yourusername/mcdebug-launcher"
+repository = "https://github.com/StarsailsClover/MCDebugLauncher"
 keywords = ["minecraft", "launcher", "cli", "mod", "testing"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -44,6 +44,9 @@ thiserror = "1.0"
 # File operations
 sha1 = "0.10"
 zip = "2.2"
+# Java runtime archive extraction (tar.gz on Linux/macOS)
+tar = "0.4"
+flate2 = "1.0"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }

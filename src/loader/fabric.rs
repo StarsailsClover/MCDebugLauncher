@@ -195,36 +195,3 @@ impl FabricInstaller {
         Ok(format!("fabric-loader-{}-{}", loader_version, mc_version))
     }
 }
-
-impl crate::loader::LoaderInstaller for FabricInstaller {
-    fn install(&self, mc_version: &str, target_dir: &str) -> Result<String> {
-        let target_path = Path::new(target_dir);
-
-        let loader_version = if let Some(v) = &self.version {
-            v.clone()
-        } else {
-            let runtime = tokio::runtime::Handle::current();
-            runtime.block_on(async {
-                let versions = Self::fetch_versions().await?;
-                versions
-                    .iter()
-                    .find(|v| v.stable)
-                    .map(|v| v.version.clone())
-                    .context("No stable Fabric loader version found")
-            })?
-        };
-
-        let runtime = tokio::runtime::Handle::current();
-        runtime.block_on(async {
-            self.install_loader(mc_version, &loader_version, target_path).await
-        })
-    }
-
-    fn version(&self) -> &str {
-        self.version.as_deref().unwrap_or("latest")
-    }
-
-    fn loader_type(&self) -> &str {
-        "fabric"
-    }
-}
