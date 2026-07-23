@@ -20,6 +20,16 @@ use crate::version::manifest::AssetIndex;
 
 const RESOURCES_BASE_URL: &str = "https://resources.download.minecraft.net";
 
+/// Return the asset objects CDN base URL. If the environment variable
+/// `MDL_ASSETS_MIRROR` is set, its value overrides the default Mojang CDN.
+/// This is useful in regions where `resources.download.minecraft.net` is
+/// unreliable; point to a mirror such as `https://bmclapi2.bangbang93.com`
+/// or any other compatible asset proxy.
+fn resources_base_url() -> String {
+    std::env::var("MDL_ASSETS_MIRROR")
+        .unwrap_or_else(|_| RESOURCES_BASE_URL.to_string())
+}
+
 /// Maximum number of asset objects downloaded concurrently. The object CDN is
 /// happy to serve many small files in parallel; this bounds our open sockets.
 const MAX_CONCURRENT_DOWNLOADS: usize = 16;
@@ -136,20 +146,48 @@ async fn download_object(object: &AssetObject, objects_dir: &Path) -> Result<()>
 
     fs::create_dir_all(&target_dir).await?;
 
-    let url = format!("{}/{}/{}", RESOURCES_BASE_URL, sub_dir, object.hash);
-    let response = reqwest::get(&url)
+    let url = format!("{}/{}/{}", resources_base_url(), sub_dir, object.hash);
+
+    // Retry up to 3 times with exponential backoff. CDN hiccups under concurrent
+    // load are common and a single retry usually recovers them.
+    let mut last_err = None;
+    for attempt in 0..3u32 {
+        if attempt > 0 {
+            let delay = std::time::Duration::from_millis(500 * 2u64.pow(attempt - 1));
+            tokio::time::sleep(delay).await;
+            tracing::debug!(
+                "Retrying asset {} (attempt {})",
+                &object.hash[..8],
+                attempt + 1
+            );
+        }
+
+        match try_download_asset(&url, &target_path, &object.hash).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                let _ = fs::remove_file(&target_path).await;
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err.unwrap())
+}
+
+async fn try_download_asset(url: &str, target_path: &Path, hash: &str) -> Result<()> {
+    let response = reqwest::get(url)
         .await
-        .with_context(|| format!("Failed to download asset from {}", url))?;
+        .with_context(|| format!("Failed to fetch asset from {}", url))?;
     if !response.status().is_success() {
-        anyhow::bail!("Failed to download asset {}: HTTP {}", object.hash, response.status());
+        anyhow::bail!("HTTP {} for asset {}", response.status(), &hash[..8]);
     }
 
     let bytes = response.bytes().await?;
 
-    if !crate::util::checksum::verify_sha1(&bytes, &object.hash) {
-        anyhow::bail!("SHA1 verification failed for asset {}", object.hash);
+    if !crate::util::checksum::verify_sha1(&bytes, hash) {
+        anyhow::bail!("SHA1 mismatch for asset {}", &hash[..8]);
     }
 
-    fs::write(&target_path, bytes).await?;
+    fs::write(target_path, bytes).await?;
     Ok(())
 }

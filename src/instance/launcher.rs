@@ -10,13 +10,182 @@ use tokio::fs;
 use crate::instance::config::InstanceConfig;
 use crate::version::manifest::VersionMetadata;
 
+// ---------------------------------------------------------------------------
+// Instance launch lock — cross-process queue via a PID lock file.
+//
+// Only one Minecraft instance should run at a time under MDL (the game is
+// memory-heavy and many of its resources, like the log file, are not designed
+// for concurrent access from multiple game processes). When a second `mdl
+// launch` is issued while another is still running the launcher waits,
+// printing a one-time notice, rather than refusing or silently overwriting.
+// ---------------------------------------------------------------------------
+
+/// Acquire the global launch lock, blocking (polling) if another MDL-managed
+/// instance is already running. Returns the path to the lock file so the
+/// caller can release it with `release_launch_lock`.
+async fn acquire_launch_lock() -> Result<PathBuf> {
+    let lock_path = crate::util::paths::get_data_dir()?.join("launching.lock");
+    let mut waiting_logged = false;
+
+    loop {
+        // Check whether an existing lock belongs to a live process.
+        if lock_path.exists() {
+            if let Ok(content) = fs::read_to_string(&lock_path).await {
+                if let Ok(pid) = content.trim().parse::<u32>() {
+                    if is_pid_running(pid) {
+                        if !waiting_logged {
+                            tracing::info!(
+                                "Another instance is already running (PID {}). \
+                                 Waiting for it to close...",
+                                pid
+                            );
+                            waiting_logged = true;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        continue;
+                    }
+                    // Stale lock from a crashed process — remove it.
+                    tracing::debug!("Removing stale launch lock (PID {} not running)", pid);
+                }
+            }
+        }
+
+        // Write our PID and proceed.
+        let our_pid = std::process::id();
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        fs::write(&lock_path, our_pid.to_string()).await
+            .context("Failed to write launch lock file")?;
+        return Ok(lock_path);
+    }
+}
+
+/// Release the launch lock acquired by `acquire_launch_lock`. Silently ignores
+/// errors (e.g. file already removed by an external cleanup).
+async fn release_launch_lock(lock_path: &Path) {
+    let _ = fs::remove_file(lock_path).await;
+}
+
+/// Check whether a process with `pid` is currently alive using sysinfo.
+fn is_pid_running(pid: u32) -> bool {
+    use sysinfo::System;
+    let mut sys = System::new();
+    sys.refresh_processes();
+    sys.process(sysinfo::Pid::from_u32(pid)).is_some()
+}
+
+// ---------------------------------------------------------------------------
+// Mod enumeration — read installed mod display names from jar manifests.
+// ---------------------------------------------------------------------------
+
+/// Metadata extracted from a mod's `fabric.mod.json` (or similar) manifest.
+#[derive(Debug)]
+struct ModInfo {
+    name: String,
+    version: String,
+}
+
+/// Read the `fabric.mod.json` manifest embedded in a mod JAR and return
+/// display metadata. Returns `None` when the file is absent or unparseable.
+fn read_fabric_mod_info(jar_path: &Path) -> Option<ModInfo> {
+    #[derive(serde::Deserialize)]
+    struct FabricModJson {
+        name: Option<String>,
+        id: String,
+        version: String,
+    }
+
+    let file = std::fs::File::open(jar_path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let mut entry = archive.by_name("fabric.mod.json").ok()?;
+    let mut contents = String::new();
+    std::io::Read::read_to_string(&mut entry, &mut contents).ok()?;
+    let meta: FabricModJson = serde_json::from_str(&contents).ok()?;
+    Some(ModInfo {
+        name: meta.name.unwrap_or(meta.id),
+        version: meta.version,
+    })
+}
+
+/// Enumerate all mod JARs in `mods_dir` and return display metadata for each.
+/// Non-Fabric JARs (lacking `fabric.mod.json`) are listed by filename only.
+fn enumerate_mods(mods_dir: &Path) -> Vec<ModInfo> {
+    let mut mods = Vec::new();
+    let entries = match std::fs::read_dir(mods_dir) {
+        Ok(e) => e,
+        Err(_) => return mods,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jar") {
+            continue;
+        }
+        if let Some(info) = read_fabric_mod_info(&path) {
+            mods.push(info);
+        } else {
+            // Non-Fabric JAR or unreadable: use the filename without extension.
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            mods.push(ModInfo { name: stem, version: String::new() });
+        }
+    }
+    mods.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    mods
+}
+
+/// Print a formatted mod list to the terminal and (on Windows) set the console
+/// window title so the operator can see the active test context at a glance.
+fn display_mod_list(instance_name: &str, mods: &[ModInfo]) {
+    if mods.is_empty() {
+        tracing::info!("No mods installed in instance '{}'", instance_name);
+        return;
+    }
+    tracing::info!("Loaded {} mod(s) in '{}':", mods.len(), instance_name);
+    for m in mods {
+        if m.version.is_empty() {
+            tracing::info!("  - {}", m.name);
+        } else {
+            tracing::info!("  - {} ({})", m.name, m.version);
+        }
+    }
+
+    // Set the OS console window title so the test context is visible at a glance.
+    let mod_names: Vec<&str> = mods.iter().map(|m| m.name.as_str()).collect();
+    let title = format!("MDL: {} [{}]", instance_name, mod_names.join(", "));
+    set_console_title(&title);
+}
+
+/// Set the console window title on Windows; no-op on other platforms.
+fn set_console_title(title: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        // Use the `cmd /C title` approach so we don't need winapi bindings.
+        let _ = Command::new("cmd")
+            .args(["/C", &format!("title {}", title)])
+            .status();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // ANSI escape sequence for terminal emulators that support it.
+        print!("\x1b]0;{}\x07", title);
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct VersionJson {
     id: String,
     #[serde(rename = "inheritsFrom")]
     inherits_from: Option<String>,
-    #[serde(rename = "mainClass")]
-    main_class: String,
+    // Option: some installer-produced version JSONs (e.g. certain NeoForge
+    // releases) omit mainClass at the top level and rely on the inheritsFrom
+    // chain to supply it. Deserializing as Option<String> with a default of
+    // None prevents a hard parse error in those cases.
+    #[serde(rename = "mainClass", default)]
+    main_class: Option<String>,
     #[serde(rename = "minecraftArguments")]
     minecraft_arguments: Option<String>,
     arguments: Option<Arguments>,
@@ -78,6 +247,22 @@ struct Artifact {
     size: u64,
 }
 
+/// Options controlling how an instance is launched. All fields are optional
+/// and fall back to sensible defaults when absent.
+#[derive(Debug, Default)]
+pub struct LaunchOptions {
+    /// In-game display name (default: "Player")
+    pub username: Option<String>,
+    /// Auto-connect to a server on launch ("host:port" or "host")
+    pub server: Option<String>,
+    /// Launch in fullscreen mode
+    pub fullscreen: bool,
+    /// Window width in pixels
+    pub width: Option<u32>,
+    /// Window height in pixels
+    pub height: Option<u32>,
+}
+
 pub struct InstanceLauncher {
     java_path: PathBuf,
 }
@@ -113,7 +298,7 @@ impl InstanceLauncher {
         Ok(Self { java_path: java_runtime.path })
     }
 
-    pub async fn launch(&self, name: &str) -> Result<()> {
+    pub async fn launch(&self, name: &str, options: &LaunchOptions) -> Result<()> {
         let instances_dir = crate::util::paths::get_instances_dir()?;
         let instance_dir = instances_dir.join(name);
 
@@ -121,7 +306,19 @@ impl InstanceLauncher {
             anyhow::bail!("Instance '{}' does not exist", name);
         }
 
-        // Load instance config
+        // Acquire the global launch lock. Blocks (with a log message) if another
+        // MDL-managed instance is already running, then proceeds when it exits.
+        let lock_path = acquire_launch_lock().await?;
+
+        // Run the actual launch inside a closure so we can always release the
+        // lock, even if an error is returned early.
+        let result = self.do_launch(name, &instance_dir, options).await;
+
+        release_launch_lock(&lock_path).await;
+        result
+    }
+
+    async fn do_launch(&self, name: &str, instance_dir: &Path, options: &LaunchOptions) -> Result<()> {
         let config_path = instance_dir.join("instance.json");
         let config_data = fs::read_to_string(&config_path).await?;
         let config: InstanceConfig = serde_json::from_str(&config_data)?;
@@ -169,6 +366,23 @@ impl InstanceLauncher {
         let libraries_dir = crate::util::paths::get_libraries_cache_dir()?;
         let (loader_jvm_args, loader_game_args) = self.load_loader_args(&version_dir, &config, &libraries_dir).await?;
 
+        // Enumerate installed mods and display them before launch so the
+        // operator can confirm the test context. Also sets the console window
+        // title to "MDL: <instance> [mod1, mod2, ...]" for easy identification.
+        let mods_dir = instance_dir.join("mods");
+        let mods = enumerate_mods(&mods_dir);
+        display_mod_list(name, &mods);
+
+        // Build the Minecraft window title from the instance name and mod list.
+        // Passed to the game via --title (supported since 1.14). Lets the user
+        // identify which test session a game window belongs to at a glance.
+        let window_title = if mods.is_empty() {
+            format!("MDL: {}", name)
+        } else {
+            let names: Vec<&str> = mods.iter().map(|m| m.name.as_str()).collect();
+            format!("MDL: {} [{}]", name, names.join(", "))
+        };
+
         // Build launch command
         let mut cmd = Command::new(&java_path);
 
@@ -206,7 +420,7 @@ impl InstanceLauncher {
         cmd.arg(&main_class);
 
         // Game arguments (standard + loader-specific)
-        self.add_game_arguments(&mut cmd, &config, &version_metadata, &game_dir, &assets_dir, &main_class, &version_dir, &loader_game_args)?;
+        self.add_game_arguments(&mut cmd, &config, &version_metadata, &game_dir, &assets_dir, &main_class, &version_dir, &loader_game_args, &window_title, options)?;
 
         cmd.current_dir(&game_dir);
         cmd.stdout(Stdio::inherit());
@@ -258,7 +472,13 @@ impl InstanceLauncher {
                 let loader_json_data = fs::read_to_string(&loader_json_path).await?;
                 let loader_json: VersionJson = serde_json::from_str(&loader_json_data)?;
 
-                main_class = loader_json.main_class.clone();
+                // Honour the loader's mainClass only when present. Some
+                // installer-produced JSONs omit the field and rely on
+                // inheritsFrom; in that case we fall through to the base-JSON
+                // fallback below.
+                if let Some(cls) = loader_json.main_class.clone() {
+                    main_class = cls;
+                }
 
                 // Check if this is NeoForge (needs module path instead of classpath)
                 is_neoforge = main_class.contains("bootstraplauncher") || main_class.contains("neoforge");
@@ -321,13 +541,22 @@ impl InstanceLauncher {
 
                 // Add loader libraries. For NeoForge, ALL libraries go on the classpath;
                 // the module path is fully specified by version.json's `-p` JVM argument.
+                //
+                // Libraries in loader version.json come in three flavours:
+                //   1. Forge-style with `downloads.artifact` carrying url + sha1.
+                //   2. Fabric/Quilt-style with only `name` + `url` (Maven repo base).
+                //   3. Forge client placeholder: `downloads.artifact.url` is empty —
+                //      copy the vanilla client JAR to the Maven-resolved path instead.
+                //
+                // All three must be downloaded when absent; previously only flavour 3
+                // was handled, causing Fabric's intermediary, ASM 9.7.x, and other
+                // loader-exclusive libraries to be silently skipped when not cached.
                 for library in &loader_json.libraries {
-                    // Check for Forge client library with empty URL
+                    // --- Flavour 3: Forge client placeholder (empty artifact URL) ---
                     if library.name.contains(":client") {
                         if let Some(downloads) = &library.downloads {
                             if let Some(artifact) = &downloads.artifact {
                                 if artifact.url.is_empty() {
-                                    // This is Forge's client JAR - copy Minecraft client to Maven path
                                     let target_path = self.get_library_path_from_name(&library.name, &libraries_dir);
                                     if !target_path.exists() {
                                         tracing::info!("Copying Minecraft client JAR to Forge Maven path");
@@ -343,8 +572,40 @@ impl InstanceLauncher {
                         }
                     }
 
+                    // --- Flavour 1: full artifact record with url + sha1 ---
+                    if let Some(downloads) = &library.downloads {
+                        if let Some(artifact) = &downloads.artifact {
+                            if !artifact.url.is_empty() {
+                                let lib_path = self.get_library_path_from_name(&library.name, &libraries_dir);
+                                if !lib_path.exists() {
+                                    tracing::info!("Downloading loader library: {}", library.name);
+                                    self.download_library(&artifact.url, &lib_path, &artifact.sha1).await?;
+                                }
+                                classpath_entries.push(lib_path.display().to_string());
+                                continue;
+                            }
+                        }
+                    }
+
+                    // --- Flavour 2: Fabric/Quilt-style — only Maven repo base URL ---
+                    if let Some(base_url) = &library.url {
+                        let lib_path = self.get_library_path_from_name(&library.name, &libraries_dir);
+                        if !lib_path.exists() {
+                            let maven_url = Self::maven_artifact_url(&library.name, base_url);
+                            if !maven_url.is_empty() {
+                                tracing::info!("Downloading loader library: {}", library.name);
+                                // No sha1 in this format; pass empty to skip checksum.
+                                self.download_library(&maven_url, &lib_path, "").await?;
+                            }
+                        }
+                        if lib_path.exists() {
+                            classpath_entries.push(lib_path.display().to_string());
+                            continue;
+                        }
+                    }
+
+                    // --- Fallback: already cached, resolve by coordinate only ---
                     if let Some(lib_path) = self.resolve_library_path(&library.name, &libraries_dir) {
-                        // Both NeoForge and Forge: add loader libraries to classpath
                         classpath_entries.push(lib_path);
                     }
                 }
@@ -356,9 +617,9 @@ impl InstanceLauncher {
         let base_json_data = fs::read_to_string(&base_json_path).await?;
         let base_json: VersionJson = serde_json::from_str(&base_json_data)?;
 
-        // Use base main class if no loader
+        // Use base main class if loader did not supply one.
         if main_class.is_empty() {
-            main_class = base_json.main_class.clone();
+            main_class = base_json.main_class.clone().unwrap_or_default();
         }
 
         // Prepare natives directory
@@ -477,6 +738,15 @@ impl InstanceLauncher {
             fs::create_dir_all(parent).await?;
         }
 
+        // An empty sha1 string means no checksum is available (e.g. Fabric-style
+        // library entries that only carry a Maven base URL). Pass None so the
+        // downloader skips verification instead of comparing against a blank hash.
+        let sha1_opt: Option<&str> = if expected_sha1.is_empty() {
+            None
+        } else {
+            Some(expected_sha1)
+        };
+
         // Retry up to 3 times with exponential backoff
         let mut last_error = None;
         for attempt in 0..3 {
@@ -486,7 +756,7 @@ impl InstanceLauncher {
                 tokio::time::sleep(delay).await;
             }
 
-            match download_file(url, path, Some(expected_sha1)).await {
+            match download_file(url, path, sha1_opt).await {
                 Ok(_) => return Ok(()),
                 Err(e) => {
                     last_error = Some(e);
@@ -498,6 +768,38 @@ impl InstanceLauncher {
         }
 
         Err(last_error.unwrap())
+    }
+
+    /// Construct a Maven artifact download URL from a coordinate string and a
+    /// repository base URL. Used for Fabric/Quilt-style library entries that
+    /// carry a `url` (repo root) but no per-artifact download record.
+    ///
+    /// Example:
+    ///   name:     "net.fabricmc:intermediary:1.21.4"
+    ///   base_url: "https://maven.fabricmc.net/"
+    ///   result:   "https://maven.fabricmc.net/net/fabricmc/intermediary/1.21.4/intermediary-1.21.4.jar"
+    fn maven_artifact_url(name: &str, base_url: &str) -> String {
+        let parts: Vec<&str> = name.split(':').collect();
+        if parts.len() < 3 {
+            return String::new();
+        }
+        let group_path = parts[0].replace('.', "/");
+        let artifact = parts[1];
+        let version = parts[2].split('@').next().unwrap_or(parts[2]);
+        let jar_name = if parts.len() > 3 {
+            let classifier = parts[3].split('@').next().unwrap_or(parts[3]);
+            format!("{}-{}-{}.jar", artifact, version, classifier)
+        } else {
+            format!("{}-{}.jar", artifact, version)
+        };
+        format!(
+            "{}/{}/{}/{}/{}",
+            base_url.trim_end_matches('/'),
+            group_path,
+            artifact,
+            version,
+            jar_name
+        )
     }
 
     fn get_library_path_from_name(&self, name: &str, libraries_dir: &Path) -> PathBuf {
@@ -723,10 +1025,12 @@ impl InstanceLauncher {
         main_class: &str,
         version_dir: &Path,
         loader_game_args: &[String],
+        window_title: &str,
+        options: &LaunchOptions,
     ) -> Result<()> {
         // Standard arguments
         cmd.arg("--username");
-        cmd.arg("Player");
+        cmd.arg(options.username.as_deref().unwrap_or("Player"));
         cmd.arg("--version");
         cmd.arg(&config.version);
         cmd.arg("--gameDir");
@@ -751,8 +1055,41 @@ impl InstanceLauncher {
         cmd.arg("--versionType");
         cmd.arg("release");
 
+        // Optional window / display options
+        if options.fullscreen {
+            cmd.arg("--fullscreen");
+        }
+        if let Some(w) = options.width {
+            cmd.arg("--width");
+            cmd.arg(w.to_string());
+        }
+        if let Some(h) = options.height {
+            cmd.arg("--height");
+            cmd.arg(h.to_string());
+        }
+        // Auto-connect to server: parse "host:port" or treat as host-only
+        if let Some(server) = &options.server {
+            let (host, port) = if let Some((h, p)) = server.rsplit_once(':') {
+                (h, p.parse::<u16>().unwrap_or(25565))
+            } else {
+                (server.as_str(), 25565u16)
+            };
+            cmd.arg("--server");
+            cmd.arg(host);
+            cmd.arg("--port");
+            cmd.arg(port.to_string());
+        }
+
         let is_neoforge = main_class.contains("bootstraplauncher") || main_class.contains("neoforge");
         let is_modded = main_class.contains("forge") || is_neoforge;
+
+        // Set the Minecraft window title to the instance name + loaded mods so
+        // the operator can identify the test session at a glance. Supported
+        // since Minecraft 1.14; silently ignored by older versions.
+        if !window_title.is_empty() {
+            cmd.arg("--title");
+            cmd.arg(window_title);
+        }
 
         if is_neoforge && !loader_game_args.is_empty() {
             // NeoForge: use the game args verbatim from version.json (they carry

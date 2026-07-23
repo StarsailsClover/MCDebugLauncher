@@ -159,6 +159,12 @@ enum Commands {
         level: Option<String>,
     },
 
+    /// Delete an instance
+    Delete {
+        /// Instance name
+        name: String,
+    },
+
     /// Start agent server
     Agent {
         /// Server port
@@ -224,6 +230,9 @@ async fn main() -> Result<()> {
         }
         Commands::Logs { name, follow, lines, level } => {
             cmd_logs(&name, follow, lines, level.as_deref()).await?;
+        }
+        Commands::Delete { name } => {
+            cmd_delete(&name).await?;
         }
         Commands::Agent { port, bind } => {
             cmd_agent(port, &bind).await?;
@@ -422,11 +431,19 @@ async fn cmd_list(format: &str) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_launch(name: &str, _username: Option<&str>, _server: Option<&str>, _fullscreen: bool, _width: Option<u32>, _height: Option<u32>, _detach: bool) -> Result<()> {
-    use instance::InstanceLauncher;
+async fn cmd_launch(name: &str, username: Option<&str>, server: Option<&str>, fullscreen: bool, width: Option<u32>, height: Option<u32>, _detach: bool) -> Result<()> {
+    use instance::{InstanceLauncher, launcher::LaunchOptions};
+
+    let options = LaunchOptions {
+        username: username.map(str::to_string),
+        server: server.map(str::to_string),
+        fullscreen,
+        width,
+        height,
+    };
 
     let launcher = InstanceLauncher::new()?;
-    launcher.launch(name).await?;
+    launcher.launch(name, &options).await?;
 
     Ok(())
 }
@@ -611,15 +628,64 @@ async fn cmd_logs(name: &str, follow: bool, lines: usize, level: Option<&str>) -
     Ok(())
 }
 
+async fn cmd_delete(name: &str) -> Result<()> {
+    use instance::InstanceManager;
+
+    let manager = InstanceManager::new()?;
+    manager.delete(name).await?;
+
+    println!("Instance '{}' deleted", name);
+    Ok(())
+}
+
 async fn cmd_agent(port: u16, bind_address: &str) -> Result<()> {
     use agent::server::AgentServer;
+
+    // Prevent multiple agent processes from running at the same time. A second
+    // instance would fail to bind the port anyway, but we emit a clear error
+    // with the existing process's PID and interface address instead of a raw
+    // "address already in use" OS error.
+    let lock_path = {
+        let data_dir = util::paths::get_data_dir()?;
+        tokio::fs::create_dir_all(&data_dir).await?;
+        data_dir.join("agent.lock")
+    };
+
+    if lock_path.exists() {
+        if let Ok(content) = tokio::fs::read_to_string(&lock_path).await {
+            if let Ok(pid) = content.trim().parse::<u32>() {
+                if agent_pid_running(pid) {
+                    eprintln!(
+                        "error: mdl agent is already running (PID {}).\n\
+                         Interface: http://{}:{}\n\
+                         Stop it with: kill {}",
+                        pid, bind_address, port, pid
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
+    tokio::fs::write(&lock_path, std::process::id().to_string()).await?;
 
     info!("Starting agent server on {}:{}", bind_address, port);
 
     let server = AgentServer::new();
-    server.start(port, bind_address).await?;
+    let result = server.start(port, bind_address).await;
 
-    Ok(())
+    // Always remove the lock on exit, whether the server stopped cleanly or not.
+    let _ = tokio::fs::remove_file(&lock_path).await;
+
+    result
+}
+
+/// Check whether a process with the given PID is currently running.
+fn agent_pid_running(pid: u32) -> bool {
+    use sysinfo::System;
+    let mut sys = System::new();
+    sys.refresh_processes();
+    sys.process(sysinfo::Pid::from_u32(pid)).is_some()
 }
 
 async fn cmd_info(format: &str) -> Result<()> {

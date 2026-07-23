@@ -101,6 +101,19 @@ impl InstanceManager {
                     };
 
                     installer.install_loader(&version_info.id, &loader_version, &version_dir).await?;
+
+                    // Install Fabric API into the instance's mods directory.
+                    // This is best-effort: a failure warns but does not abort
+                    // the instance creation.
+                    let mods_dir = instance_path.join("mods");
+                    if let Err(e) = crate::loader::fabric::FabricInstaller::install_fabric_api(
+                        &version_info.id,
+                        &mods_dir,
+                    )
+                    .await
+                    {
+                        tracing::warn!("Could not install Fabric API (install it manually): {}", e);
+                    }
                 }
                 "forge" => {
                     let installer = crate::loader::forge::ForgeInstaller::new(
