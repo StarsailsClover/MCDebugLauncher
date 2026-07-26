@@ -79,6 +79,43 @@ enum ModCommands {
 }
 
 #[derive(Subcommand)]
+enum ConfigCommands {
+    /// Get a configuration option
+    Get {
+        /// Instance name
+        instance: String,
+        /// Option key
+        key: String,
+    },
+
+    /// Set a configuration option
+    Set {
+        /// Instance name
+        instance: String,
+        /// Option key
+        key: String,
+        /// Option value
+        value: String,
+    },
+
+    /// Export configuration to JSON file
+    Export {
+        /// Instance name
+        instance: String,
+        /// Output file path
+        output: String,
+    },
+
+    /// Import configuration from JSON file
+    Import {
+        /// Instance name
+        instance: String,
+        /// Input file path
+        input: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum Commands {
     /// Manage Minecraft versions
     Versions {
@@ -210,6 +247,10 @@ enum Commands {
     #[command(subcommand)]
     Mod(ModCommands),
 
+    /// Manage configuration
+    #[command(subcommand)]
+    Config(ConfigCommands),
+
     /// Delete an instance
     Delete {
         /// Instance name
@@ -301,6 +342,22 @@ async fn main() -> Result<()> {
                 }
                 ModCommands::Disable { instance, mod_name } => {
                     cmd_mod_disable(&instance, &mod_name).await?;
+                }
+            }
+        }
+        Commands::Config(config_cmd) => {
+            match config_cmd {
+                ConfigCommands::Get { instance, key } => {
+                    cmd_config_get(&instance, &key).await?;
+                }
+                ConfigCommands::Set { instance, key, value } => {
+                    cmd_config_set(&instance, &key, &value).await?;
+                }
+                ConfigCommands::Export { instance, output } => {
+                    cmd_config_export(&instance, &output).await?;
+                }
+                ConfigCommands::Import { instance, input } => {
+                    cmd_config_import(&instance, &input).await?;
                 }
             }
         }
@@ -926,6 +983,57 @@ async fn cmd_mod_disable(instance: &str, mod_name: &str) -> Result<()> {
     mod_manager.disable_mod(instance, mod_name).await?;
 
     println!("Successfully disabled mod: {}", mod_name);
+    Ok(())
+}
+
+async fn cmd_config_get(instance: &str, key: &str) -> Result<()> {
+    use instance::ConfigManager;
+
+    let config_manager = ConfigManager::new()?;
+    let value = config_manager.get_option(instance, key).await?;
+
+    match value {
+        Some(v) => println!("{}", v),
+        None => println!("Option '{}' not found", key),
+    }
+    Ok(())
+}
+
+async fn cmd_config_set(instance: &str, key: &str, value: &str) -> Result<()> {
+    use instance::ConfigManager;
+
+    let config_manager = ConfigManager::new()?;
+    config_manager.set_option(instance, key, value).await?;
+
+    println!("Successfully set option: {}={}", key, value);
+    Ok(())
+}
+
+async fn cmd_config_export(instance: &str, output: &str) -> Result<()> {
+    use instance::ConfigManager;
+    use std::path::Path;
+
+    let config_manager = ConfigManager::new()?;
+    let config = config_manager.export_config(instance).await?;
+
+    let json = serde_json::to_string_pretty(&config)?;
+    tokio::fs::write(output, json).await?;
+
+    println!("Exported configuration to: {}", output);
+    Ok(())
+}
+
+async fn cmd_config_import(instance: &str, input: &str) -> Result<()> {
+    use instance::ConfigManager;
+    use std::path::Path;
+
+    let content = tokio::fs::read_to_string(input).await?;
+    let config: serde_json::Value = serde_json::from_str(&content)?;
+
+    let config_manager = ConfigManager::new()?;
+    config_manager.import_config(instance, &config).await?;
+
+    println!("Imported configuration from: {}", input);
     Ok(())
 }
 
