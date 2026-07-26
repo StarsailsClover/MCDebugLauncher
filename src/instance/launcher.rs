@@ -1,7 +1,7 @@
 // Instance launcher
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -957,7 +957,7 @@ impl InstanceLauncher {
              .replace("${version_name}", version_name)
         };
 
-        let jvm_args = if let Some(args) = &loader_json.arguments {
+        let mut jvm_args = if let Some(args) = &loader_json.arguments {
             let mut result = Vec::new();
             if let Some(jvm) = &args.jvm {
                 for arg in jvm {
@@ -980,6 +980,32 @@ impl InstanceLauncher {
         } else {
             Vec::new()
         };
+
+        // NeoForge 21.4+ fix: the installer-produced version.json may omit
+        // "neoforge-" from -DignoreList, causing BootstrapLauncher to load the
+        // patched client/universal JARs as named modules. When two JARs with
+        // overlapping packages are treated as named modules, the JVM raises a
+        // mixin_synthetic duplicate-module error at startup. Appending
+        // "neoforge-" to the ignore list tells BootstrapLauncher to keep those
+        // JARs on the unnamed module path (classpath) instead.
+        let loader_type = config.loader.as_ref().map(|l| l.loader_type.as_str());
+        if loader_type == Some("neoforge") {
+            let mut found = false;
+            for arg in &mut jvm_args {
+                if let Some(list) = arg.strip_prefix("-DignoreList=") {
+                    if !list.split(',').any(|e| e.trim() == "neoforge-") {
+                        arg.push_str(",neoforge-");
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            // If the installer omitted -DignoreList entirely, inject it so the
+            // JVM flag is always present for NeoForge instances.
+            if !found {
+                jvm_args.push("-DignoreList=neoforge-".to_string());
+            }
+        }
 
         let game_args = if let Some(args) = &loader_json.arguments {
             let mut result = Vec::new();
