@@ -430,7 +430,19 @@ impl InstanceLauncher {
         tracing::debug!("Command: {:?}", cmd);
 
         let mut child = cmd.spawn().context("Failed to spawn Minecraft process")?;
+        let pid = child.id();
+
+        // Write PID file for status tracking
+        let pid_dir = instance_dir.join("runtime");
+        tokio::fs::create_dir_all(&pid_dir).await?;
+        let pid_file = pid_dir.join("pid");
+        tokio::fs::write(&pid_file, pid.to_string()).await?;
+
         let status = child.wait().context("Failed to wait for Minecraft process")?;
+
+        // Clean up PID file when process exits
+        let pid_file = instance_dir.join("runtime").join("pid");
+        let _ = tokio::fs::remove_file(&pid_file).await;
 
         if !status.success() {
             anyhow::bail!("Minecraft exited with code: {:?}", status.code());
@@ -1199,6 +1211,16 @@ impl InstanceLauncher {
                 }
             }
         }
+
+        Ok(())
+    }
+
+    async fn write_pid_file(&self, instance_path: &Path, pid: u32) -> Result<()> {
+        let runtime_dir = instance_path.join("runtime");
+        tokio::fs::create_dir_all(&runtime_dir).await?;
+
+        let pid_file = runtime_dir.join("pid");
+        tokio::fs::write(&pid_file, pid.to_string()).await?;
 
         Ok(())
     }

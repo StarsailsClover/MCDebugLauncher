@@ -159,6 +159,12 @@ enum Commands {
         level: Option<String>,
     },
 
+    /// Get instance status
+    Status {
+        /// Instance name (optional, shows all if omitted)
+        name: Option<String>,
+    },
+
     /// Delete an instance
     Delete {
         /// Instance name
@@ -230,6 +236,9 @@ async fn main() -> Result<()> {
         }
         Commands::Logs { name, follow, lines, level } => {
             cmd_logs(&name, follow, lines, level.as_deref()).await?;
+        }
+        Commands::Status { name } => {
+            cmd_status(&cli.format, name.as_deref()).await?;
         }
         Commands::Delete { name } => {
             cmd_delete(&name).await?;
@@ -622,6 +631,84 @@ async fn cmd_logs(name: &str, follow: bool, lines: usize, level: Option<&str>) -
             }
 
             println!("{}", line);
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_status(format: &str, name: Option<&str>) -> Result<()> {
+    use instance::InstanceStatus;
+
+    let status = InstanceStatus::new()?;
+
+    if let Some(instance_name) = name {
+        // Show single instance status
+        let info = status.get_instance_status(instance_name).await?;
+
+        if format == "json" {
+            let json = serde_json::json!({
+                "status": "success",
+                "data": info
+            });
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        } else {
+            println!("Instance: {}", info.name);
+            println!("Status: {}", info.state);
+
+            if let Some(pid) = info.pid {
+                println!("PID: {}", pid);
+            }
+
+            if let Some(uptime) = info.uptime_seconds {
+                let hours = uptime / 3600;
+                let minutes = (uptime % 3600) / 60;
+                let seconds = uptime % 60;
+                println!("Uptime: {}h {}m {}s", hours, minutes, seconds);
+            }
+
+            if let Some(memory) = info.memory_mb {
+                println!("Memory: {} MB", memory);
+            }
+
+            if let Some(cpu) = info.cpu_percent {
+                println!("CPU: {:.1}%", cpu);
+            }
+        }
+    } else {
+        // Show all instances
+        let all_status = status.get_all_status().await?;
+
+        if format == "json" {
+            let json = serde_json::json!({
+                "status": "success",
+                "data": {
+                    "instances": all_status,
+                    "count": all_status.len()
+                }
+            });
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        } else {
+            if all_status.is_empty() {
+                println!("No instances found");
+            } else {
+                println!("NAME              STATE      PID       UPTIME        MEMORY");
+                println!("----------------------------------------------------------------");
+                for info in all_status {
+                    let pid_str = info.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
+                    let uptime_str = if let Some(uptime) = info.uptime_seconds {
+                        let hours = uptime / 3600;
+                        let minutes = (uptime % 3600) / 60;
+                        format!("{}h {}m", hours, minutes)
+                    } else {
+                        "-".to_string()
+                    };
+                    let memory_str = info.memory_mb.map(|m| format!("{} MB", m)).unwrap_or_else(|| "-".to_string());
+
+                    println!("{:<17} {:<10} {:<9} {:<13} {}",
+                        info.name, info.state, pid_str, uptime_str, memory_str);
+                }
+            }
         }
     }
 
