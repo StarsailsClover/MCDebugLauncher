@@ -79,6 +79,48 @@ enum ModCommands {
 }
 
 #[derive(Subcommand)]
+enum BackupCommands {
+    /// Create a backup of a world
+    Create {
+        /// Instance name
+        instance: String,
+        /// World name
+        world: String,
+        /// Optional backup name (defaults to world_timestamp)
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    /// List backups for an instance
+    List {
+        /// Instance name
+        instance: String,
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+
+    /// Restore a backup
+    Restore {
+        /// Instance name
+        instance: String,
+        /// Backup name
+        backup: String,
+        /// Target world name (defaults to original world name)
+        #[arg(long)]
+        target: Option<String>,
+    },
+
+    /// Delete a backup
+    Delete {
+        /// Instance name
+        instance: String,
+        /// Backup name
+        backup: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum ConfigCommands {
     /// Get a configuration option
     Get {
@@ -251,6 +293,10 @@ enum Commands {
     #[command(subcommand)]
     Config(ConfigCommands),
 
+    /// Manage world backups
+    #[command(subcommand)]
+    Backup(BackupCommands),
+
     /// Delete an instance
     Delete {
         /// Instance name
@@ -358,6 +404,22 @@ async fn main() -> Result<()> {
                 }
                 ConfigCommands::Import { instance, input } => {
                     cmd_config_import(&instance, &input).await?;
+                }
+            }
+        }
+        Commands::Backup(backup_cmd) => {
+            match backup_cmd {
+                BackupCommands::Create { instance, world, name } => {
+                    cmd_backup_create(&instance, &world, name.as_deref()).await?;
+                }
+                BackupCommands::List { instance, format } => {
+                    cmd_backup_list(&instance, &format).await?;
+                }
+                BackupCommands::Restore { instance, backup, target } => {
+                    cmd_backup_restore(&instance, &backup, target.as_deref()).await?;
+                }
+                BackupCommands::Delete { instance, backup } => {
+                    cmd_backup_delete(&instance, &backup).await?;
                 }
             }
         }
@@ -1034,6 +1096,65 @@ async fn cmd_config_import(instance: &str, input: &str) -> Result<()> {
     config_manager.import_config(instance, &config).await?;
 
     println!("Imported configuration from: {}", input);
+    Ok(())
+}
+
+async fn cmd_backup_create(instance: &str, world: &str, name: Option<&str>) -> Result<()> {
+    use instance::BackupManager;
+
+    let backup_manager = BackupManager::new()?;
+    let info = backup_manager.create_backup(instance, world, name.map(String::from)).await?;
+
+    println!("Created backup: {}", info.name);
+    println!("  Size: {} bytes", info.size_bytes);
+    println!("  Path: {}", info.path.display());
+    Ok(())
+}
+
+async fn cmd_backup_list(instance: &str, format: &str) -> Result<()> {
+    use instance::BackupManager;
+
+    let backup_manager = BackupManager::new()?;
+    let backups = backup_manager.list_backups(instance).await?;
+
+    if format == "json" {
+        let json = serde_json::to_string_pretty(&backups)?;
+        println!("{}", json);
+    } else {
+        if backups.is_empty() {
+            println!("No backups found for instance '{}'", instance);
+        } else {
+            println!("Backups for instance '{}':", instance);
+            println!();
+            for backup in backups {
+                println!("  {}", backup.name);
+                println!("    World: {}", backup.world);
+                println!("    Created: {}", backup.created_at);
+                println!("    Size: {} bytes", backup.size_bytes);
+                println!();
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_backup_restore(instance: &str, backup: &str, target: Option<&str>) -> Result<()> {
+    use instance::BackupManager;
+
+    let backup_manager = BackupManager::new()?;
+    backup_manager.restore_backup(instance, backup, target.map(String::from)).await?;
+
+    println!("Successfully restored backup: {}", backup);
+    Ok(())
+}
+
+async fn cmd_backup_delete(instance: &str, backup: &str) -> Result<()> {
+    use instance::BackupManager;
+
+    let backup_manager = BackupManager::new()?;
+    backup_manager.delete_backup(instance, backup).await?;
+
+    println!("Successfully deleted backup: {}", backup);
     Ok(())
 }
 
