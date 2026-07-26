@@ -38,6 +38,47 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum ModCommands {
+    /// List mods in an instance
+    List {
+        /// Instance name
+        instance: String,
+    },
+
+    /// Install a mod from a local file
+    Install {
+        /// Instance name
+        instance: String,
+        /// Path to mod JAR file
+        mod_path: String,
+    },
+
+    /// Remove a mod
+    Remove {
+        /// Instance name
+        instance: String,
+        /// Mod filename
+        mod_name: String,
+    },
+
+    /// Enable a disabled mod
+    Enable {
+        /// Instance name
+        instance: String,
+        /// Mod filename
+        mod_name: String,
+    },
+
+    /// Disable a mod
+    Disable {
+        /// Instance name
+        instance: String,
+        /// Mod filename
+        mod_name: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum Commands {
     /// Manage Minecraft versions
     Versions {
@@ -165,6 +206,10 @@ enum Commands {
         name: Option<String>,
     },
 
+    /// Manage mods
+    #[command(subcommand)]
+    Mod(ModCommands),
+
     /// Delete an instance
     Delete {
         /// Instance name
@@ -239,6 +284,25 @@ async fn main() -> Result<()> {
         }
         Commands::Status { name } => {
             cmd_status(&cli.format, name.as_deref()).await?;
+        }
+        Commands::Mod(mod_cmd) => {
+            match mod_cmd {
+                ModCommands::List { instance } => {
+                    cmd_mod_list(&cli.format, &instance).await?;
+                }
+                ModCommands::Install { instance, mod_path } => {
+                    cmd_mod_install(&instance, &mod_path).await?;
+                }
+                ModCommands::Remove { instance, mod_name } => {
+                    cmd_mod_remove(&instance, &mod_name).await?;
+                }
+                ModCommands::Enable { instance, mod_name } => {
+                    cmd_mod_enable(&instance, &mod_name).await?;
+                }
+                ModCommands::Disable { instance, mod_name } => {
+                    cmd_mod_disable(&instance, &mod_name).await?;
+                }
+            }
         }
         Commands::Delete { name } => {
             cmd_delete(&name).await?;
@@ -765,6 +829,104 @@ async fn cmd_agent(port: u16, bind_address: &str) -> Result<()> {
     let _ = tokio::fs::remove_file(&lock_path).await;
 
     result
+}
+
+async fn cmd_mod_list(format: &str, instance: &str) -> Result<()> {
+    use instance::ModManager;
+
+    let mod_manager = ModManager::new()?;
+    let mods = mod_manager.list_mods(instance).await?;
+
+    if format == "json" {
+        let json = serde_json::json!({
+            "status": "success",
+            "data": {
+                "instance": instance,
+                "mods": mods
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&json)?);
+    } else {
+        if mods.is_empty() {
+            println!("No mods installed in instance '{}'", instance);
+        } else {
+            println!("Mods in instance '{}':", instance);
+            println!();
+            println!("{:<40} {:>12}  {}", "NAME", "SIZE", "STATUS");
+            println!("{}", "-".repeat(60));
+
+            for mod_info in &mods {
+                let size_str = if mod_info.size_bytes < 1024 {
+                    format!("{} B", mod_info.size_bytes)
+                } else if mod_info.size_bytes < 1024 * 1024 {
+                    format!("{:.1} KB", mod_info.size_bytes as f64 / 1024.0)
+                } else {
+                    format!("{:.2} MB", mod_info.size_bytes as f64 / (1024.0 * 1024.0))
+                };
+
+                let status = if mod_info.enabled { "enabled" } else { "disabled" };
+
+                println!("{:<40} {:>12}  {}", mod_info.filename, size_str, status);
+            }
+
+            println!();
+            println!("Total: {} mod(s)", mods.len());
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_mod_install(instance: &str, mod_path: &str) -> Result<()> {
+    use anyhow::Context;
+    use instance::ModManager;
+    use std::path::Path;
+
+    let mod_manager = ModManager::new()?;
+    let path = Path::new(mod_path);
+
+    if !path.exists() {
+        anyhow::bail!("Mod file not found: {}", mod_path);
+    }
+
+    mod_manager.install_mod(instance, path).await?;
+
+    let filename = path.file_name()
+        .context("Invalid mod path")?
+        .to_string_lossy();
+
+    println!("Successfully installed mod: {}", filename);
+    Ok(())
+}
+
+async fn cmd_mod_remove(instance: &str, mod_name: &str) -> Result<()> {
+    use instance::ModManager;
+
+    let mod_manager = ModManager::new()?;
+    mod_manager.remove_mod(instance, mod_name).await?;
+
+    println!("Successfully removed mod: {}", mod_name);
+    Ok(())
+}
+
+async fn cmd_mod_enable(instance: &str, mod_name: &str) -> Result<()> {
+    use instance::ModManager;
+
+    let mod_manager = ModManager::new()?;
+    mod_manager.enable_mod(instance, mod_name).await?;
+
+    println!("Successfully enabled mod: {}", mod_name);
+    Ok(())
+}
+
+async fn cmd_mod_disable(instance: &str, mod_name: &str) -> Result<()> {
+    use instance::ModManager;
+
+    let mod_manager = ModManager::new()?;
+    mod_manager.disable_mod(instance, mod_name).await?;
+
+    println!("Successfully disabled mod: {}", mod_name);
+    Ok(())
 }
 
 /// Check whether a process with the given PID is currently running.
