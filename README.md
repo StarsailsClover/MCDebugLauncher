@@ -13,6 +13,7 @@ A command-line Minecraft launcher designed for rapid testing, mod development, a
 - **Developer Tools**: Debug logging, performance profiling, headless mode support
 - **Instance Isolation**: Independent instances with separate mods, configs, and Java versions
 - **Automatic Java Detection**: Detects Java version requirements and provides upgrade instructions
+- **Instance Management**: Mod management, configuration import/export, world backup/restore
 - **Enterprise-Grade**: Production-ready code quality with comprehensive error handling
 
 ## Quick Start
@@ -22,8 +23,14 @@ A command-line Minecraft launcher designed for rapid testing, mod development, a
 mdl create my-instance --mc-version 1.21.1 --loader fabric
 mdl launch my-instance
 
-# List all instances
-mdl list --format json
+# Manage mods
+mdl mod list my-instance
+mdl mod install my-instance fabric-api-0.92.0.jar
+
+# Backup and restore worlds
+mdl backup create my-instance world1
+mdl backup list my-instance
+mdl backup restore my-instance world1_20260727_120000
 
 # View logs and diagnostics
 mdl logs my-instance --follow
@@ -71,7 +78,7 @@ See [docs/specification.md](docs/specification.md) for complete API documentatio
 
 ## Status
 
-**Current Phase**: Phase 7 Complete - Production Ready
+**Current Version**: v26.0 Alpha 4
 
 - ✅ Phase 1: CLI framework and version management
 - ✅ Phase 2: Instance management and Fabric loader
@@ -80,11 +87,13 @@ See [docs/specification.md](docs/specification.md) for complete API documentatio
 - ✅ Phase 5: Agent API server with WebSocket events
 - ✅ Phase 6: Forge mod loader support
 - ✅ Phase 7: NeoForge, Quilt, and OptiFine support
+- ✅ Alpha 4: Mod management, configuration management, world backup/restore
 
 **Tested Configurations:**
 - Vanilla Minecraft 1.21.1 ✅
 - Fabric Loader 0.19.3 ✅
 - Forge 52.1.2 ✅
+- NeoForge 21.1.x ✅
 
 ## Contributing
 

@@ -13,6 +13,7 @@
 - **开发者工具**: 调试日志、性能分析、无头模式支持
 - **实例隔离**: 独立实例，拥有独立的 mod、配置和 Java 版本
 - **自动 Java 检测**: 检测 Java 版本要求并提供升级指引
+- **实例管理**: Mod 管理、配置导入导出、世界备份恢复
 - **企业级规范**: 生产级代码质量与全面的错误处理
 
 ## 快速开始
@@ -22,8 +23,14 @@
 mdl create my-instance --mc-version 1.21.1 --loader fabric
 mdl launch my-instance
 
-# 列出所有实例
-mdl list --format json
+# 管理 mod
+mdl mod list my-instance
+mdl mod install my-instance fabric-api-0.92.0.jar
+
+# 备份和恢复世界
+mdl backup create my-instance world1
+mdl backup list my-instance
+mdl backup restore my-instance world1_20260727_120000
 
 # 查看日志和诊断信息
 mdl logs my-instance --follow
@@ -71,7 +78,7 @@ async def listen():
 
 ## 状态
 
-**当前阶段**: Phase 7 完成 - 生产就绪
+**当前版本**: v26.0 Alpha 4
 
 - ✅ Phase 1: CLI 框架和版本管理
 - ✅ Phase 2: 实例管理和 Fabric 加载器
@@ -80,11 +87,13 @@ async def listen():
 - ✅ Phase 5: Agent API 服务器与 WebSocket 事件
 - ✅ Phase 6: Forge mod 加载器支持
 - ✅ Phase 7: NeoForge、Quilt 和 OptiFine 支持
+- ✅ Alpha 4: Mod 管理、配置管理、世界备份恢复
 
 **已测试配置：**
 - Vanilla Minecraft 1.21.1 ✅
 - Fabric Loader 0.19.3 ✅
 - Forge 52.1.2 ✅
+- NeoForge 21.1.x ✅
 
 ## 贡献
 
