@@ -301,7 +301,7 @@ async fn execute_command(
 
             // Launch the instance
             let manager = InstanceManager::new()?;
-            let instance = manager.get(name).await?;
+            let _instance = manager.get(name).await?;
 
             // Send progress events during launch
             let _ = event_tx.send(ServerEvent::LaunchProgress {

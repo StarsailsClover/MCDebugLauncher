@@ -1,6 +1,6 @@
 // Diagnostic collector - collects logs, crash reports, and system information
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;

@@ -1089,7 +1089,6 @@ async fn cmd_config_set(instance: &str, key: &str, value: &str) -> Result<()> {
 
 async fn cmd_config_export(instance: &str, output: &str) -> Result<()> {
     use instance::ConfigManager;
-    use std::path::Path;
 
     let config_manager = ConfigManager::new()?;
     let config = config_manager.export_config(instance).await?;
@@ -1103,7 +1102,6 @@ async fn cmd_config_export(instance: &str, output: &str) -> Result<()> {
 
 async fn cmd_config_import(instance: &str, input: &str) -> Result<()> {
     use instance::ConfigManager;
-    use std::path::Path;
 
     let content = tokio::fs::read_to_string(input).await?;
     let config: serde_json::Value = serde_json::from_str(&content)?;

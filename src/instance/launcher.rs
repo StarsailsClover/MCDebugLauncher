@@ -461,7 +461,7 @@ impl InstanceLauncher {
         // (net/neoforged/neoforge/<version>/) and differ only by classifier, so
         // the coordinate-based dedup below would otherwise collapse them into one.
         let mut deferred_jars: Vec<String> = Vec::new();
-        let mut module_path_entries = Vec::new();
+        let module_path_entries = Vec::new();
         let mut main_class = String::new();
         let mut is_neoforge = false;
 
@@ -771,7 +771,7 @@ impl InstanceLauncher {
             classpath_entries.join(":")
         };
 
-        let module_path = if cfg!(windows) {
+        let _module_path = if cfg!(windows) {
             module_path_entries.join(";")
         } else {
             module_path_entries.join(":")
