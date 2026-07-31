@@ -517,6 +517,10 @@ impl InstanceLauncher {
                         deferred_jars.push(patched_client.display().to_string());
                     } else {
                         tracing::warn!("NeoForge patched client not found: {:?}", patched_client);
+                        // CRITICAL FIX: If patched client is missing, fall back to vanilla
+                        // client JAR to ensure net.minecraft.client.main.Main is available
+                        tracing::warn!("Falling back to vanilla client JAR as emergency classpath entry");
+                        classpath_entries.insert(0, client_jar.display().to_string());
                     }
 
                     // Universal JAR: NeoForge API + mod-loading classes.

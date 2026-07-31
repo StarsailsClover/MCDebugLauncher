@@ -316,6 +316,16 @@ enum Commands {
 
     /// Get system information
     Info,
+
+    /// Update MDL to the latest version
+    Update {
+        /// Check for updates without installing
+        #[arg(long)]
+        check: bool,
+    },
+
+    /// Add MDL to system PATH
+    Setup,
 }
 
 #[tokio::main]
@@ -431,6 +441,12 @@ async fn main() -> Result<()> {
         }
         Commands::Info => {
             cmd_info(&cli.format).await?;
+        }
+        Commands::Update { check } => {
+            cmd_update(check).await?;
+        }
+        Commands::Setup => {
+            cmd_setup().await?;
         }
     }
 
@@ -1205,6 +1221,67 @@ async fn cmd_info(format: &str) -> Result<()> {
             }
         }
     }
+
+    Ok(())
+}
+
+async fn cmd_update(check_only: bool) -> Result<()> {
+    info!("Checking for updates...");
+
+    match util::selfupdate::check_for_update().await {
+        Ok(Some(new_version)) => {
+            println!("New version available: {} -> {}", env!("CARGO_PKG_VERSION"), new_version);
+            println!("Download: https://github.com/StarsailsClover/MCDebugLauncher/releases/tag/v{}", new_version);
+
+            if !check_only {
+                println!("\nDo you want to download and install this update? (y/N)");
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+
+                if input.trim().eq_ignore_ascii_case("y") {
+                    util::selfupdate::perform_update(&new_version).await?;
+                    println!("\nUpdate downloaded successfully!");
+                    println!("Please restart MDL to complete the update.");
+                } else {
+                    println!("Update skipped.");
+                }
+            }
+        }
+        Ok(None) => {
+            println!("You are already running the latest version ({})", env!("CARGO_PKG_VERSION"));
+        }
+        Err(e) => {
+            eprintln!("Failed to check for updates: {}", e);
+            eprintln!("Please check manually at: https://github.com/StarsailsClover/MCDebugLauncher/releases");
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_setup() -> Result<()> {
+    println!("Setting up MDL...");
+
+    // Add to PATH
+    util::selfupdate::add_to_path()?;
+
+    // Check for updates
+    println!("\nChecking for updates...");
+    match util::selfupdate::check_for_update().await {
+        Ok(Some(new_version)) => {
+            println!("A newer version is available: v{}", new_version);
+            println!("Run 'mdl update' to upgrade.");
+        }
+        Ok(None) => {
+            println!("MDL is up to date (v{})", env!("CARGO_PKG_VERSION"));
+        }
+        Err(_) => {
+            // Silent fail for setup
+        }
+    }
+
+    println!("\nSetup complete!");
+    println!("You can now use 'mdl' from any terminal window.");
 
     Ok(())
 }
