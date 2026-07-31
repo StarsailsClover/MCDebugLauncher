@@ -551,7 +551,13 @@ impl InstanceLauncher {
                     // Patched client: the deobfuscated + binary-patched Minecraft
                     // client. Contains the Mojang-mapped classes (LoadingOverlay,
                     // BlockEntityType, ...) that FML mixins and the game require.
-                    let patched_client = neoforge_dir.join(format!("neoforge-{}-client.jar", neoforge_version));
+                    // NeoForge installer places it at net/neoforged/minecraft-client-patched/<version>/
+                    let patched_client = libraries_dir
+                        .join("net")
+                        .join("neoforged")
+                        .join("minecraft-client-patched")
+                        .join(neoforge_version)
+                        .join(format!("minecraft-client-patched-{}.jar", neoforge_version));
                     if patched_client.exists() {
                         tracing::debug!("Adding NeoForge patched client: {:?}", patched_client);
                         deferred_jars.push(patched_client.display().to_string());
