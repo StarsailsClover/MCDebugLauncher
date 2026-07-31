@@ -38,6 +38,126 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum ModCommands {
+    /// List mods in an instance
+    List {
+        /// Instance name
+        instance: String,
+    },
+
+    /// Install a mod from a local file
+    Install {
+        /// Instance name
+        instance: String,
+        /// Path to mod JAR file
+        mod_path: String,
+    },
+
+    /// Remove a mod
+    Remove {
+        /// Instance name
+        instance: String,
+        /// Mod filename
+        mod_name: String,
+    },
+
+    /// Enable a disabled mod
+    Enable {
+        /// Instance name
+        instance: String,
+        /// Mod filename
+        mod_name: String,
+    },
+
+    /// Disable a mod
+    Disable {
+        /// Instance name
+        instance: String,
+        /// Mod filename
+        mod_name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum BackupCommands {
+    /// Create a backup of a world
+    Create {
+        /// Instance name
+        instance: String,
+        /// World name
+        world: String,
+        /// Optional backup name (defaults to world_timestamp)
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    /// List backups for an instance
+    List {
+        /// Instance name
+        instance: String,
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+
+    /// Restore a backup
+    Restore {
+        /// Instance name
+        instance: String,
+        /// Backup name
+        backup: String,
+        /// Target world name (defaults to original world name)
+        #[arg(long)]
+        target: Option<String>,
+    },
+
+    /// Delete a backup
+    Delete {
+        /// Instance name
+        instance: String,
+        /// Backup name
+        backup: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommands {
+    /// Get a configuration option
+    Get {
+        /// Instance name
+        instance: String,
+        /// Option key
+        key: String,
+    },
+
+    /// Set a configuration option
+    Set {
+        /// Instance name
+        instance: String,
+        /// Option key
+        key: String,
+        /// Option value
+        value: String,
+    },
+
+    /// Export configuration to JSON file
+    Export {
+        /// Instance name
+        instance: String,
+        /// Output file path
+        output: String,
+    },
+
+    /// Import configuration from JSON file
+    Import {
+        /// Instance name
+        instance: String,
+        /// Input file path
+        input: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum Commands {
     /// Manage Minecraft versions
     Versions {
@@ -159,6 +279,24 @@ enum Commands {
         level: Option<String>,
     },
 
+    /// Get instance status
+    Status {
+        /// Instance name (optional, shows all if omitted)
+        name: Option<String>,
+    },
+
+    /// Manage mods
+    #[command(subcommand)]
+    Mod(ModCommands),
+
+    /// Manage configuration
+    #[command(subcommand)]
+    Config(ConfigCommands),
+
+    /// Manage world backups
+    #[command(subcommand)]
+    Backup(BackupCommands),
+
     /// Delete an instance
     Delete {
         /// Instance name
@@ -178,6 +316,16 @@ enum Commands {
 
     /// Get system information
     Info,
+
+    /// Update MDL to the latest version
+    Update {
+        /// Check for updates without installing
+        #[arg(long)]
+        check: bool,
+    },
+
+    /// Add MDL to system PATH
+    Setup,
 }
 
 #[tokio::main]
@@ -231,6 +379,60 @@ async fn main() -> Result<()> {
         Commands::Logs { name, follow, lines, level } => {
             cmd_logs(&name, follow, lines, level.as_deref()).await?;
         }
+        Commands::Status { name } => {
+            cmd_status(&cli.format, name.as_deref()).await?;
+        }
+        Commands::Mod(mod_cmd) => {
+            match mod_cmd {
+                ModCommands::List { instance } => {
+                    cmd_mod_list(&cli.format, &instance).await?;
+                }
+                ModCommands::Install { instance, mod_path } => {
+                    cmd_mod_install(&instance, &mod_path).await?;
+                }
+                ModCommands::Remove { instance, mod_name } => {
+                    cmd_mod_remove(&instance, &mod_name).await?;
+                }
+                ModCommands::Enable { instance, mod_name } => {
+                    cmd_mod_enable(&instance, &mod_name).await?;
+                }
+                ModCommands::Disable { instance, mod_name } => {
+                    cmd_mod_disable(&instance, &mod_name).await?;
+                }
+            }
+        }
+        Commands::Config(config_cmd) => {
+            match config_cmd {
+                ConfigCommands::Get { instance, key } => {
+                    cmd_config_get(&instance, &key).await?;
+                }
+                ConfigCommands::Set { instance, key, value } => {
+                    cmd_config_set(&instance, &key, &value).await?;
+                }
+                ConfigCommands::Export { instance, output } => {
+                    cmd_config_export(&instance, &output).await?;
+                }
+                ConfigCommands::Import { instance, input } => {
+                    cmd_config_import(&instance, &input).await?;
+                }
+            }
+        }
+        Commands::Backup(backup_cmd) => {
+            match backup_cmd {
+                BackupCommands::Create { instance, world, name } => {
+                    cmd_backup_create(&instance, &world, name.as_deref()).await?;
+                }
+                BackupCommands::List { instance, format } => {
+                    cmd_backup_list(&instance, &format).await?;
+                }
+                BackupCommands::Restore { instance, backup, target } => {
+                    cmd_backup_restore(&instance, &backup, target.as_deref()).await?;
+                }
+                BackupCommands::Delete { instance, backup } => {
+                    cmd_backup_delete(&instance, &backup).await?;
+                }
+            }
+        }
         Commands::Delete { name } => {
             cmd_delete(&name).await?;
         }
@@ -239,6 +441,12 @@ async fn main() -> Result<()> {
         }
         Commands::Info => {
             cmd_info(&cli.format).await?;
+        }
+        Commands::Update { check } => {
+            cmd_update(check).await?;
+        }
+        Commands::Setup => {
+            cmd_setup().await?;
         }
     }
 
@@ -628,6 +836,84 @@ async fn cmd_logs(name: &str, follow: bool, lines: usize, level: Option<&str>) -
     Ok(())
 }
 
+async fn cmd_status(format: &str, name: Option<&str>) -> Result<()> {
+    use instance::InstanceStatus;
+
+    let status = InstanceStatus::new()?;
+
+    if let Some(instance_name) = name {
+        // Show single instance status
+        let info = status.get_instance_status(instance_name).await?;
+
+        if format == "json" {
+            let json = serde_json::json!({
+                "status": "success",
+                "data": info
+            });
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        } else {
+            println!("Instance: {}", info.name);
+            println!("Status: {}", info.state);
+
+            if let Some(pid) = info.pid {
+                println!("PID: {}", pid);
+            }
+
+            if let Some(uptime) = info.uptime_seconds {
+                let hours = uptime / 3600;
+                let minutes = (uptime % 3600) / 60;
+                let seconds = uptime % 60;
+                println!("Uptime: {}h {}m {}s", hours, minutes, seconds);
+            }
+
+            if let Some(memory) = info.memory_mb {
+                println!("Memory: {} MB", memory);
+            }
+
+            if let Some(cpu) = info.cpu_percent {
+                println!("CPU: {:.1}%", cpu);
+            }
+        }
+    } else {
+        // Show all instances
+        let all_status = status.get_all_status().await?;
+
+        if format == "json" {
+            let json = serde_json::json!({
+                "status": "success",
+                "data": {
+                    "instances": all_status,
+                    "count": all_status.len()
+                }
+            });
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        } else {
+            if all_status.is_empty() {
+                println!("No instances found");
+            } else {
+                println!("NAME              STATE      PID       UPTIME        MEMORY");
+                println!("----------------------------------------------------------------");
+                for info in all_status {
+                    let pid_str = info.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string());
+                    let uptime_str = if let Some(uptime) = info.uptime_seconds {
+                        let hours = uptime / 3600;
+                        let minutes = (uptime % 3600) / 60;
+                        format!("{}h {}m", hours, minutes)
+                    } else {
+                        "-".to_string()
+                    };
+                    let memory_str = info.memory_mb.map(|m| format!("{} MB", m)).unwrap_or_else(|| "-".to_string());
+
+                    println!("{:<17} {:<10} {:<9} {:<13} {}",
+                        info.name, info.state, pid_str, uptime_str, memory_str);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 async fn cmd_delete(name: &str) -> Result<()> {
     use instance::InstanceManager;
 
@@ -680,6 +966,214 @@ async fn cmd_agent(port: u16, bind_address: &str) -> Result<()> {
     result
 }
 
+async fn cmd_mod_list(format: &str, instance: &str) -> Result<()> {
+    use instance::ModManager;
+
+    let mod_manager = ModManager::new()?;
+    let mods = mod_manager.list_mods(instance).await?;
+
+    if format == "json" {
+        let json = serde_json::json!({
+            "status": "success",
+            "data": {
+                "instance": instance,
+                "mods": mods
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&json)?);
+    } else {
+        if mods.is_empty() {
+            println!("No mods installed in instance '{}'", instance);
+        } else {
+            println!("Mods in instance '{}':", instance);
+            println!();
+            println!("{:<40} {:>12}  {}", "NAME", "SIZE", "STATUS");
+            println!("{}", "-".repeat(60));
+
+            for mod_info in &mods {
+                let size_str = if mod_info.size_bytes < 1024 {
+                    format!("{} B", mod_info.size_bytes)
+                } else if mod_info.size_bytes < 1024 * 1024 {
+                    format!("{:.1} KB", mod_info.size_bytes as f64 / 1024.0)
+                } else {
+                    format!("{:.2} MB", mod_info.size_bytes as f64 / (1024.0 * 1024.0))
+                };
+
+                let status = if mod_info.enabled { "enabled" } else { "disabled" };
+
+                println!("{:<40} {:>12}  {}", mod_info.filename, size_str, status);
+            }
+
+            println!();
+            println!("Total: {} mod(s)", mods.len());
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_mod_install(instance: &str, mod_path: &str) -> Result<()> {
+    use anyhow::Context;
+    use instance::ModManager;
+    use std::path::Path;
+
+    let mod_manager = ModManager::new()?;
+    let path = Path::new(mod_path);
+
+    if !path.exists() {
+        anyhow::bail!("Mod file not found: {}", mod_path);
+    }
+
+    mod_manager.install_mod(instance, path).await?;
+
+    let filename = path.file_name()
+        .context("Invalid mod path")?
+        .to_string_lossy();
+
+    println!("Successfully installed mod: {}", filename);
+    Ok(())
+}
+
+async fn cmd_mod_remove(instance: &str, mod_name: &str) -> Result<()> {
+    use instance::ModManager;
+
+    let mod_manager = ModManager::new()?;
+    mod_manager.remove_mod(instance, mod_name).await?;
+
+    println!("Successfully removed mod: {}", mod_name);
+    Ok(())
+}
+
+async fn cmd_mod_enable(instance: &str, mod_name: &str) -> Result<()> {
+    use instance::ModManager;
+
+    let mod_manager = ModManager::new()?;
+    mod_manager.enable_mod(instance, mod_name).await?;
+
+    println!("Successfully enabled mod: {}", mod_name);
+    Ok(())
+}
+
+async fn cmd_mod_disable(instance: &str, mod_name: &str) -> Result<()> {
+    use instance::ModManager;
+
+    let mod_manager = ModManager::new()?;
+    mod_manager.disable_mod(instance, mod_name).await?;
+
+    println!("Successfully disabled mod: {}", mod_name);
+    Ok(())
+}
+
+async fn cmd_config_get(instance: &str, key: &str) -> Result<()> {
+    use instance::ConfigManager;
+
+    let config_manager = ConfigManager::new()?;
+    let value = config_manager.get_option(instance, key).await?;
+
+    match value {
+        Some(v) => println!("{}", v),
+        None => println!("Option '{}' not found", key),
+    }
+    Ok(())
+}
+
+async fn cmd_config_set(instance: &str, key: &str, value: &str) -> Result<()> {
+    use instance::ConfigManager;
+
+    let config_manager = ConfigManager::new()?;
+    config_manager.set_option(instance, key, value).await?;
+
+    println!("Successfully set option: {}={}", key, value);
+    Ok(())
+}
+
+async fn cmd_config_export(instance: &str, output: &str) -> Result<()> {
+    use instance::ConfigManager;
+    use std::path::Path;
+
+    let config_manager = ConfigManager::new()?;
+    let config = config_manager.export_config(instance).await?;
+
+    let json = serde_json::to_string_pretty(&config)?;
+    tokio::fs::write(output, json).await?;
+
+    println!("Exported configuration to: {}", output);
+    Ok(())
+}
+
+async fn cmd_config_import(instance: &str, input: &str) -> Result<()> {
+    use instance::ConfigManager;
+    use std::path::Path;
+
+    let content = tokio::fs::read_to_string(input).await?;
+    let config: serde_json::Value = serde_json::from_str(&content)?;
+
+    let config_manager = ConfigManager::new()?;
+    config_manager.import_config(instance, &config).await?;
+
+    println!("Imported configuration from: {}", input);
+    Ok(())
+}
+
+async fn cmd_backup_create(instance: &str, world: &str, name: Option<&str>) -> Result<()> {
+    use instance::BackupManager;
+
+    let backup_manager = BackupManager::new()?;
+    let info = backup_manager.create_backup(instance, world, name.map(String::from)).await?;
+
+    println!("Created backup: {}", info.name);
+    println!("  Size: {} bytes", info.size_bytes);
+    println!("  Path: {}", info.path.display());
+    Ok(())
+}
+
+async fn cmd_backup_list(instance: &str, format: &str) -> Result<()> {
+    use instance::BackupManager;
+
+    let backup_manager = BackupManager::new()?;
+    let backups = backup_manager.list_backups(instance).await?;
+
+    if format == "json" {
+        let json = serde_json::to_string_pretty(&backups)?;
+        println!("{}", json);
+    } else {
+        if backups.is_empty() {
+            println!("No backups found for instance '{}'", instance);
+        } else {
+            println!("Backups for instance '{}':", instance);
+            println!();
+            for backup in backups {
+                println!("  {}", backup.name);
+                println!("    World: {}", backup.world);
+                println!("    Created: {}", backup.created_at);
+                println!("    Size: {} bytes", backup.size_bytes);
+                println!();
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_backup_restore(instance: &str, backup: &str, target: Option<&str>) -> Result<()> {
+    use instance::BackupManager;
+
+    let backup_manager = BackupManager::new()?;
+    backup_manager.restore_backup(instance, backup, target.map(String::from)).await?;
+
+    println!("Successfully restored backup: {}", backup);
+    Ok(())
+}
+
+async fn cmd_backup_delete(instance: &str, backup: &str) -> Result<()> {
+    use instance::BackupManager;
+
+    let backup_manager = BackupManager::new()?;
+    backup_manager.delete_backup(instance, backup).await?;
+
+    println!("Successfully deleted backup: {}", backup);
+    Ok(())
+}
+
 /// Check whether a process with the given PID is currently running.
 fn agent_pid_running(pid: u32) -> bool {
     use sysinfo::System;
@@ -727,6 +1221,67 @@ async fn cmd_info(format: &str) -> Result<()> {
             }
         }
     }
+
+    Ok(())
+}
+
+async fn cmd_update(check_only: bool) -> Result<()> {
+    info!("Checking for updates...");
+
+    match util::selfupdate::check_for_update().await {
+        Ok(Some(new_version)) => {
+            println!("New version available: {} -> {}", env!("CARGO_PKG_VERSION"), new_version);
+            println!("Download: https://github.com/StarsailsClover/MCDebugLauncher/releases/tag/v{}", new_version);
+
+            if !check_only {
+                println!("\nDo you want to download and install this update? (y/N)");
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+
+                if input.trim().eq_ignore_ascii_case("y") {
+                    util::selfupdate::perform_update(&new_version).await?;
+                    println!("\nUpdate downloaded successfully!");
+                    println!("Please restart MDL to complete the update.");
+                } else {
+                    println!("Update skipped.");
+                }
+            }
+        }
+        Ok(None) => {
+            println!("You are already running the latest version ({})", env!("CARGO_PKG_VERSION"));
+        }
+        Err(e) => {
+            eprintln!("Failed to check for updates: {}", e);
+            eprintln!("Please check manually at: https://github.com/StarsailsClover/MCDebugLauncher/releases");
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_setup() -> Result<()> {
+    println!("Setting up MDL...");
+
+    // Add to PATH
+    util::selfupdate::add_to_path()?;
+
+    // Check for updates
+    println!("\nChecking for updates...");
+    match util::selfupdate::check_for_update().await {
+        Ok(Some(new_version)) => {
+            println!("A newer version is available: v{}", new_version);
+            println!("Run 'mdl update' to upgrade.");
+        }
+        Ok(None) => {
+            println!("MDL is up to date (v{})", env!("CARGO_PKG_VERSION"));
+        }
+        Err(_) => {
+            // Silent fail for setup
+        }
+    }
+
+    println!("\nSetup complete!");
+    println!("You can now use 'mdl' from any terminal window.");
 
     Ok(())
 }

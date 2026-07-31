@@ -6,6 +6,7 @@ pub mod checksum;
 pub mod archive;
 pub mod paths;
 pub mod update;
+pub mod selfupdate;
 
 pub use http::*;
 pub use checksum::*;

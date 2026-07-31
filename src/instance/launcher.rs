@@ -1,7 +1,7 @@
 // Instance launcher
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -430,7 +430,19 @@ impl InstanceLauncher {
         tracing::debug!("Command: {:?}", cmd);
 
         let mut child = cmd.spawn().context("Failed to spawn Minecraft process")?;
+        let pid = child.id();
+
+        // Write PID file for status tracking
+        let pid_dir = instance_dir.join("runtime");
+        tokio::fs::create_dir_all(&pid_dir).await?;
+        let pid_file = pid_dir.join("pid");
+        tokio::fs::write(&pid_file, pid.to_string()).await?;
+
         let status = child.wait().context("Failed to wait for Minecraft process")?;
+
+        // Clean up PID file when process exits
+        let pid_file = instance_dir.join("runtime").join("pid");
+        let _ = tokio::fs::remove_file(&pid_file).await;
 
         if !status.success() {
             anyhow::bail!("Minecraft exited with code: {:?}", status.code());
@@ -505,6 +517,10 @@ impl InstanceLauncher {
                         deferred_jars.push(patched_client.display().to_string());
                     } else {
                         tracing::warn!("NeoForge patched client not found: {:?}", patched_client);
+                        // CRITICAL FIX: If patched client is missing, fall back to vanilla
+                        // client JAR to ensure net.minecraft.client.main.Main is available
+                        tracing::warn!("Falling back to vanilla client JAR as emergency classpath entry");
+                        classpath_entries.insert(0, client_jar.display().to_string());
                     }
 
                     // Universal JAR: NeoForge API + mod-loading classes.
@@ -957,7 +973,7 @@ impl InstanceLauncher {
              .replace("${version_name}", version_name)
         };
 
-        let jvm_args = if let Some(args) = &loader_json.arguments {
+        let mut jvm_args = if let Some(args) = &loader_json.arguments {
             let mut result = Vec::new();
             if let Some(jvm) = &args.jvm {
                 for arg in jvm {
@@ -980,6 +996,32 @@ impl InstanceLauncher {
         } else {
             Vec::new()
         };
+
+        // NeoForge 21.4+ fix: the installer-produced version.json may omit
+        // "neoforge-" from -DignoreList, causing BootstrapLauncher to load the
+        // patched client/universal JARs as named modules. When two JARs with
+        // overlapping packages are treated as named modules, the JVM raises a
+        // mixin_synthetic duplicate-module error at startup. Appending
+        // "neoforge-" to the ignore list tells BootstrapLauncher to keep those
+        // JARs on the unnamed module path (classpath) instead.
+        let loader_type = config.loader.as_ref().map(|l| l.loader_type.as_str());
+        if loader_type == Some("neoforge") {
+            let mut found = false;
+            for arg in &mut jvm_args {
+                if let Some(list) = arg.strip_prefix("-DignoreList=") {
+                    if !list.split(',').any(|e| e.trim() == "neoforge-") {
+                        arg.push_str(",neoforge-");
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            // If the installer omitted -DignoreList entirely, inject it so the
+            // JVM flag is always present for NeoForge instances.
+            if !found {
+                jvm_args.push("-DignoreList=neoforge-".to_string());
+            }
+        }
 
         let game_args = if let Some(args) = &loader_json.arguments {
             let mut result = Vec::new();
@@ -1173,6 +1215,16 @@ impl InstanceLauncher {
                 }
             }
         }
+
+        Ok(())
+    }
+
+    async fn write_pid_file(&self, instance_path: &Path, pid: u32) -> Result<()> {
+        let runtime_dir = instance_path.join("runtime");
+        tokio::fs::create_dir_all(&runtime_dir).await?;
+
+        let pid_file = runtime_dir.join("pid");
+        tokio::fs::write(&pid_file, pid.to_string()).await?;
 
         Ok(())
     }
