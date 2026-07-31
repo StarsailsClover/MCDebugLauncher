@@ -5,6 +5,35 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.0.0-alpha.5] - 2026-07-31
+
+### Fixed
+- **Critical**: NeoForge "Missing main class net.minecraft.client.main.Main" fatal startup error
+  - Added fallback to vanilla client JAR when NeoForge patched client is missing
+  - Ensures Minecraft core classes are always available on classpath
+  - Prevents mod loading failures in NeoForge instances
+
+### Added
+- **Self-Update System**
+  - `mdl update --check` - Check for new versions without installing
+  - `mdl update` - Interactive update with automatic backup
+  - GitHub API integration for release checking
+  - Semantic version comparison
+  - Automatic binary download and replacement
+  - Backup creation (.exe.bak) before update
+  - Windows update script generation for safe replacement
+
+- **Environment Setup**
+  - `mdl setup` - Add MDL to system PATH automatically
+  - PowerShell integration for Windows PATH modification
+  - Duplicate-entry detection
+  - Update check during setup
+
+### Changed
+- Window title now displays loaded mods (feature was already implemented, now documented)
+- Console title on Windows shows: `MDL: <instance> [mod1, mod2, ...]`
+- Game window title shows same format via `--title` parameter
+
 ## [26.0.0-alpha.4] - 2026-07-27
 
 ### Added
