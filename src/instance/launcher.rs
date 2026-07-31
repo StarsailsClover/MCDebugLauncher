@@ -502,6 +502,46 @@ impl InstanceLauncher {
                     // Extract NeoForge version from loader_json.id (e.g., "neoforge-21.1.1" -> "21.1.1")
                     let neoforge_version = loader_json.id.strip_prefix("neoforge-")
                         .unwrap_or(&loader_json.id);
+
+                    // CRITICAL FIX: Check if the installed NeoForge version matches
+                    // the version specified in instance.json. If they differ, the
+                    // user may have manually edited instance.json expecting an upgrade,
+                    // or the installer selected a different version (e.g., beta instead
+                    // of stable due to incorrect sorting).
+                    if let Some(expected_version) = config.loader.as_ref().and_then(|l| {
+                        if l.version == "latest" {
+                            None // "latest" is always valid
+                        } else {
+                            Some(l.version.as_str())
+                        }
+                    }) {
+                        if expected_version != neoforge_version {
+                            tracing::error!(
+                                "NeoForge version mismatch! Expected {} (from instance.json) but found {} (from version.json)",
+                                expected_version,
+                                neoforge_version
+                            );
+                            tracing::error!(
+                                "This usually happens when:\n\
+                                1. You manually edited instance.json to upgrade NeoForge\n\
+                                2. The initial installation selected a beta version instead of stable\n\
+                                \n\
+                                To fix this, delete the instance and recreate it with the correct version:\n\
+                                  mdl delete {} && mdl create {} --mc-version {} --loader neoforge --loader-version {}",
+                                config.name,
+                                config.name,
+                                config.version,
+                                expected_version
+                            );
+                            anyhow::bail!(
+                                "NeoForge version mismatch: expected {} but found {}. \
+                                Please recreate the instance with the correct version.",
+                                expected_version,
+                                neoforge_version
+                            );
+                        }
+                    }
+
                     let neoforge_dir = libraries_dir
                         .join("net")
                         .join("neoforged")

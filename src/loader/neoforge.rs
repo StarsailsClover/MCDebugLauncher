@@ -54,6 +54,53 @@ impl NeoForgeInstaller {
         Self { version }
     }
 
+    /// Compare two NeoForge version strings for sorting (semantic versioning).
+    /// Returns Ordering for use with sort_by.
+    /// Examples: "21.10.64" > "21.10.0-beta", "21.10.10" > "21.10.9"
+    fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+        // Split version into numeric parts and pre-release suffix
+        let parse_version = |v: &str| -> (Vec<u32>, Option<String>) {
+            let (numeric, prerelease) = if let Some(pos) = v.find('-') {
+                (&v[..pos], Some(v[pos + 1..].to_string()))
+            } else {
+                (v, None)
+            };
+
+            let parts: Vec<u32> = numeric
+                .split('.')
+                .filter_map(|s| s.parse::<u32>().ok())
+                .collect();
+
+            (parts, prerelease)
+        };
+
+        let (a_parts, a_pre) = parse_version(a);
+        let (b_parts, b_pre) = parse_version(b);
+
+        // Compare numeric parts
+        for (a_num, b_num) in a_parts.iter().zip(b_parts.iter()) {
+            match a_num.cmp(b_num) {
+                std::cmp::Ordering::Equal => continue,
+                other => return other,
+            }
+        }
+
+        // If all common parts are equal, longer version is greater
+        match a_parts.len().cmp(&b_parts.len()) {
+            std::cmp::Ordering::Equal => {},
+            other => return other,
+        }
+
+        // Numeric parts are equal; compare pre-release.
+        // Stable (no pre-release) > any pre-release
+        match (a_pre, b_pre) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Greater, // stable > pre-release
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (Some(a_pr), Some(b_pr)) => a_pr.cmp(&b_pr), // lexicographic
+        }
+    }
+
     pub async fn fetch_versions(mc_version: &str) -> Result<Vec<String>> {
         let response = reqwest::get(NEOFORGE_METADATA_URL)
             .await
@@ -77,10 +124,14 @@ impl NeoForgeInstaller {
             format!("{}.0.", &mc_parts[1])
         };
 
-        let versions: Vec<String> = metadata.versioning.versions.versions
+        let mut versions: Vec<String> = metadata.versioning.versions.versions
             .into_iter()
             .filter(|v| v.starts_with(&neoforge_prefix))
             .collect();
+
+        // Sort versions in descending order (newest first) using semantic versioning.
+        // This ensures "21.10.64" comes before "21.10.0-beta" when selecting "latest".
+        versions.sort_by(|a, b| Self::compare_versions(b, a));
 
         Ok(versions)
     }
@@ -360,5 +411,62 @@ impl NeoForgeInstaller {
 
         tracing::info!("NeoForge installer completed successfully");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_version_comparison() {
+        // Stable versions should be greater than pre-releases
+        assert_eq!(
+            NeoForgeInstaller::compare_versions("21.10.64", "21.10.0-beta"),
+            std::cmp::Ordering::Greater
+        );
+
+        // Higher numeric versions
+        assert_eq!(
+            NeoForgeInstaller::compare_versions("21.10.64", "21.10.10"),
+            std::cmp::Ordering::Greater
+        );
+
+        assert_eq!(
+            NeoForgeInstaller::compare_versions("21.11.0", "21.10.99"),
+            std::cmp::Ordering::Greater
+        );
+
+        // Equal versions
+        assert_eq!(
+            NeoForgeInstaller::compare_versions("21.10.0", "21.10.0"),
+            std::cmp::Ordering::Equal
+        );
+
+        // Pre-release comparison
+        assert_eq!(
+            NeoForgeInstaller::compare_versions("21.10.0-beta", "21.10.0-alpha"),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn test_version_sorting() {
+        let mut versions = vec![
+            "21.10.0-beta".to_string(),
+            "21.10.64".to_string(),
+            "21.10.10".to_string(),
+            "21.10.0-alpha".to_string(),
+            "21.11.0".to_string(),
+        ];
+
+        versions.sort_by(|a, b| NeoForgeInstaller::compare_versions(b, a));
+
+        // Should be sorted: 21.11.0, 21.10.64, 21.10.10, 21.10.0-beta, 21.10.0-alpha
+        assert_eq!(versions[0], "21.11.0");
+        assert_eq!(versions[1], "21.10.64");
+        assert_eq!(versions[2], "21.10.10");
+        assert_eq!(versions[3], "21.10.0-beta");
+        assert_eq!(versions[4], "21.10.0-alpha");
     }
 }
