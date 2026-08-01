@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::util::checksum::verify_sha1;
 
