@@ -5,6 +5,31 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.0.0-alpha.5.1] - 2026-08-01
+
+### Fixed
+- **Critical**: NeoForge version selection now correctly prioritizes stable releases over pre-releases
+  - Fixed `fetch_versions()` to use semantic version sorting instead of alphabetical
+  - Instance creation with `--loader-version latest` now selects highest stable version (e.g., 21.10.64 instead of 21.10.0-beta)
+  - Added version mismatch detection at launch time with clear error messages
+  - Prevents cryptic "Missing main class" errors caused by version mismatches
+
+- **Critical**: NeoForge patched client path correction
+  - Fixed launcher to look for patched client at correct Maven path: `net/neoforged/minecraft-client-patched/<version>/`
+  - Previous path (`net/neoforged/neoforge/<version>/neoforge-<version>-client.jar`) was incorrect
+  - Eliminates "NeoForge patched client not found" warnings during launch
+  - Ensures deobfuscated Minecraft classes are available for mod loading
+
+### Changed
+- Code quality improvements: removed 24 unused import warnings
+- Reduced compiler warnings from 58 to 34
+
+### Technical Notes
+Alpha 5's NeoForge fixes were incomplete. This release addresses the root causes:
+1. Version selection was alphabetical, causing beta versions to be selected over stable releases
+2. Patched client lookup used wrong Maven coordinates from pre-installer implementation
+Users experiencing NeoForge 21.10+ launch failures should recreate instances with this version.
+
 ## [26.0.0-alpha.5] - 2026-07-31
 
 ### Fixed
