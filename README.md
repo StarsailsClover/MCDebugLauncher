@@ -79,6 +79,7 @@ See [docs/specification.md](docs/specification.md) for complete API documentatio
 ## Contributing
 
 Contributions are welcome! Please read our contribution guidelines before submitting pull requests.
+[LINUX.DO Community](https://linux.do/)
 
 ## Acknowledgments
 
