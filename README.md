@@ -76,25 +76,6 @@ See [docs/specification.md](docs/specification.md) for complete API documentatio
 - [Specification](docs/specification.md) - Complete CLI and API reference
 - [Research Document](docs/RESEARCH.md) - Technical analysis and architecture decisions
 
-## Status
-
-**Current Version**: v26.0 Alpha 4
-
-- ✅ Phase 1: CLI framework and version management
-- ✅ Phase 2: Instance management and Fabric loader
-- ✅ Phase 3: Launch functionality with full library support
-- ✅ Phase 4: Diagnostics and log analysis
-- ✅ Phase 5: Agent API server with WebSocket events
-- ✅ Phase 6: Forge mod loader support
-- ✅ Phase 7: NeoForge, Quilt, and OptiFine support
-- ✅ Alpha 4: Mod management, configuration management, world backup/restore
-
-**Tested Configurations:**
-- Vanilla Minecraft 1.21.1 ✅
-- Fabric Loader 0.19.3 ✅
-- Forge 52.1.2 ✅
-- NeoForge 21.1.x ✅
-
 ## Contributing
 
 Contributions are welcome! Please read our contribution guidelines before submitting pull requests.
