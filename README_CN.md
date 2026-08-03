@@ -76,25 +76,6 @@ async def listen():
 - [规范文档](docs/specification.md) - 完整的 CLI 和 API 参考
 - [研究文档](docs/RESEARCH_CN.md) - 技术分析和架构决策
 
-## 状态
-
-**当前版本**: v26.0 Alpha 4
-
-- ✅ Phase 1: CLI 框架和版本管理
-- ✅ Phase 2: 实例管理和 Fabric 加载器
-- ✅ Phase 3: 启动功能与完整库支持
-- ✅ Phase 4: 诊断和日志分析
-- ✅ Phase 5: Agent API 服务器与 WebSocket 事件
-- ✅ Phase 6: Forge mod 加载器支持
-- ✅ Phase 7: NeoForge、Quilt 和 OptiFine 支持
-- ✅ Alpha 4: Mod 管理、配置管理、世界备份恢复
-
-**已测试配置：**
-- Vanilla Minecraft 1.21.1 ✅
-- Fabric Loader 0.19.3 ✅
-- Forge 52.1.2 ✅
-- NeoForge 21.1.x ✅
-
 ## 贡献
 
 欢迎贡献！在提交 Pull Request 之前，请阅读我们的贡献指南。
