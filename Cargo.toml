@@ -1,6 +1,6 @@
 [package]
 name = "mcdebug-launcher"
-version = "26.0.0-alpha.6"
+version = "26.0.0-alpha.7"
 edition = "2021"
 authors = ["Sails <sails@example.com>"]
 license = "Apache-2.0"
@@ -43,6 +43,7 @@ thiserror = "1.0"
 
 # File operations
 sha1 = "0.10"
+sha2 = "0.10"
 zip = "2.2"
 # Java runtime archive extraction (tar.gz on Linux/macOS)
 tar = "0.4"

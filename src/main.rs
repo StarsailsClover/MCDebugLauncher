@@ -160,7 +160,7 @@ enum ConfigCommands {
 
 #[derive(Subcommand)]
 enum GameCommands {
-    /// Query the game state via the companion mod (in-world, pause, screen, ...)
+    /// Query the game state via the Despotes mod (in-world, screen, player, ...)
     Status {
         /// Instance name
         instance: String,
@@ -318,6 +318,14 @@ enum Commands {
         /// Skip installation
         #[arg(long)]
         no_install: bool,
+
+        /// Do not offer/install the Despotes control mod after creation
+        #[arg(long)]
+        no_despotes: bool,
+
+        /// Also consider Despotes pre-releases when no stable build applies
+        #[arg(long)]
+        despotes_prerelease: bool,
     },
 
     /// List instances
@@ -353,7 +361,7 @@ enum Commands {
         #[arg(long)]
         detach: bool,
 
-        /// Enable agent control: installs the MDL companion mod (Fabric/Quilt),
+        /// Enable agent control via Despotes (must be installed in the instance),
         /// disables pause-on-lost-focus, and starts the in-game control server.
         #[arg(long)]
         agent: bool,
@@ -484,8 +492,8 @@ async fn main() -> Result<()> {
         Commands::VersionInfo { version, show_libraries, show_assets } => {
             cmd_version_info(&cli.format, &version, show_libraries, show_assets).await?;
         }
-        Commands::Create { name, mc_version, loader, loader_version, memory, no_install } => {
-            cmd_create(&name, &mc_version, loader.as_deref(), loader_version.as_deref(), memory.as_deref(), no_install).await?;
+        Commands::Create { name, mc_version, loader, loader_version, memory, no_install, no_despotes, despotes_prerelease } => {
+            cmd_create(&name, &mc_version, loader.as_deref(), loader_version.as_deref(), memory.as_deref(), no_install, no_despotes, despotes_prerelease).await?;
         }
         Commands::List => {
             cmd_list(&cli.format).await?;
@@ -721,7 +729,7 @@ async fn cmd_version_info(format: &str, version_id: &str, show_libraries: bool, 
     Ok(())
 }
 
-async fn cmd_create(name: &str, version: &str, loader: Option<&str>, loader_version: Option<&str>, _memory: Option<&str>, no_install: bool) -> Result<()> {
+async fn cmd_create(name: &str, version: &str, loader: Option<&str>, loader_version: Option<&str>, _memory: Option<&str>, no_install: bool, no_despotes: bool, despotes_prerelease: bool) -> Result<()> {
     use instance::{InstanceManager, config::{InstanceConfig, LoaderConfig}};
 
     let loader_config = if let Some(loader_type) = loader {
@@ -741,6 +749,15 @@ async fn cmd_create(name: &str, version: &str, loader: Option<&str>, loader_vers
 
     let manager = InstanceManager::new()?;
     let instance = manager.create(config, !no_install).await?;
+
+    // Offer the Despotes control mod (skip when not requested).
+    if !no_despotes && !no_install {
+        let loader_type = loader.as_deref();
+        if let Err(e) = maybe_offer_despotes(&instance.path, loader_type, version, despotes_prerelease).await {
+            tracing::warn!("Despotes setup skipped: {}", e);
+            eprintln!("Warning: Despotes setup skipped: {e}");
+        }
+    }
 
     println!("Instance '{}' created successfully", instance.name);
     println!("Path: {}", instance.path.display());
@@ -816,7 +833,7 @@ async fn cmd_launch(name: &str, username: Option<&str>, server: Option<&str>, fu
         println!("Instance '{}' launched in background (PID {})", name, outcome.pid);
         println!("  Game log: <instance>/logs/launch_detached.log");
         if agent {
-            println!("  Agent control: companion mod installing; use 'mdl game status {}' once in-game", name);
+            println!("  Agent control: use 'mdl game status {}' once in-game", name);
         }
     }
 
@@ -1472,7 +1489,7 @@ async fn cmd_game_status(format: &str, instance: &str) -> Result<()> {
 
     if !game::client::is_available(&dir).await {
         anyhow::bail!(
-            "Agent control is not available for instance '{}'.              The game must be running with the MDL companion mod installed.              Launch it with: mdl launch {} --detach --agent",
+            "Agent control is not available for instance '{}'.              The game must be running with the Despotes mod installed.              Launch it with: mdl launch {} --detach --agent",
             instance, instance
         );
     }
@@ -1507,7 +1524,7 @@ async fn cmd_game_screenshot(instance: &str, output: Option<&str>, timeout: u64)
             .ok()
             .and_then(|c| c.trim().parse().ok());
 
-        let image = game::capture::capture_instance_png(instance, pid, timeout)?;
+        let (image, source) = game::capture::capture_instance_best(&dir, instance, pid, timeout)?;
         let elapsed = start.elapsed();
 
         let out_path = match output {
@@ -1524,11 +1541,12 @@ async fn cmd_game_screenshot(instance: &str, output: Option<&str>, timeout: u64)
         std::fs::write(&out_path, &image.png_bytes)?;
 
         println!(
-            "Screenshot saved: {} ({}x{}, {:.0} ms)",
+            "Screenshot saved: {} ({}x{}, {:.0} ms, source: {})",
             out_path.display(),
             image.width,
             image.height,
-            elapsed.as_secs_f64() * 1000.0
+            elapsed.as_secs_f64() * 1000.0,
+            source
         );
         Ok(())
     }
@@ -1603,4 +1621,162 @@ fn cmd_game_windows(format: &str) -> Result<()> {
         }
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Despotes offer during instance creation (Alpha 7)
+// ---------------------------------------------------------------------------
+
+fn format_bytes(n: u64) -> String {
+    if n >= 1024 * 1024 {
+        format!("{:.2} MB", n as f64 / (1024.0 * 1024.0))
+    } else if n >= 1024 {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    } else {
+        format!("{n} B")
+    }
+}
+
+fn read_choice_line() -> String {
+    let mut input = String::new();
+    match std::io::stdin().read_line(&mut input) {
+        Ok(0) => String::new(), // EOF / non-interactive stdin
+        Ok(_) => input.trim().to_string(),
+        Err(_) => String::new(),
+    }
+}
+
+/// True when stdin is attached to a terminal (interactive prompts allowed).
+fn stdin_is_interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
+}
+
+/// After an instance is created, detect the best Despotes build and let the
+/// user pick one by number.
+///
+/// Policy:
+/// - Stable ("Latest Release") applicable assets are listed first.
+/// - Pre-releases are offered only when `allow_prerelease_flag` is set, or
+///   when no applicable stable exists — and installing a pre-release always
+///   requires an explicit interactive confirmation.
+/// - When no applicable stable exists, the latest applicable pre-release is
+///   the fallback candidate.
+async fn maybe_offer_despotes(
+    instance_dir: &std::path::Path,
+    loader: Option<&str>,
+    requested_version: &str,
+    allow_prerelease_flag: bool,
+) -> anyhow::Result<()> {
+    use game::despotes;
+    use std::io::Write;
+
+    let Some(dloader) = despotes::despotes_loader_for(loader) else {
+        println!(
+            "
+Despotes control mod: not applicable to loader '{}'. Skipping.",
+            loader.unwrap_or("none")
+        );
+        return Ok(());
+    };
+
+    // Resolve the concrete Minecraft version (handles `release`/`latest`).
+    let mc_version = {
+        let manifest = crate::version::manifest::VersionManifest::fetch().await?;
+        manifest
+            .find_version(requested_version)
+            .map(|v| v.id.clone())
+            .unwrap_or_else(|| requested_version.to_string())
+    };
+
+    println!(
+        "
+Checking Despotes releases for {}/{} ...",
+        dloader.slug(),
+        mc_version
+    );
+    let releases = despotes::fetch_releases().await?;
+
+    let stable = despotes::list_applicable(&releases, dloader.slug(), &mc_version, false);
+
+    let chosen = if stable.is_empty() {
+        // No applicable stable release: the newest applicable pre-release is
+        // the fallback, but using it requires explicit confirmation.
+        let Some((rel, asset)) =
+            despotes::select_release(&releases, dloader.slug(), &mc_version, true)
+        else {
+            println!("No applicable Despotes package found for {}/{}.", dloader.slug(), mc_version);
+            return Ok(());
+        };
+        println!("No stable Despotes release applies to this instance.");
+        println!(
+            "Latest applicable pre-release: {} ({}, {})",
+            rel.tag,
+            asset.name,
+            format_bytes(asset.size)
+        );
+        if !stdin_is_interactive() {
+            println!("Non-interactive session: pre-releases require explicit opt-in. Skipping.");
+            return Ok(());
+        }
+        print!("Install this pre-release? [y/N] ");
+        let _ = std::io::stdout().flush();
+        if !read_choice_line().eq_ignore_ascii_case("y") {
+            println!("Skipped Despotes pre-release.");
+            return Ok(());
+        }
+        Some((rel, asset))
+    } else if !stdin_is_interactive() {
+        // Non-interactive: auto-select the newest applicable stable build.
+        let pick = stable.into_iter().next().unwrap();
+        println!(
+            "Non-interactive session: auto-selected {} ({})",
+            pick.0.tag, pick.1.name
+        );
+        Some(pick)
+    } else {
+        let mut list = stable;
+        if allow_prerelease_flag {
+            for item in despotes::list_applicable(&releases, dloader.slug(), &mc_version, true) {
+                if item.0.prerelease {
+                    list.push(item);
+                }
+            }
+        }
+        println!("Despotes packages applicable to this instance:");
+        for (i, (rel, asset)) in list.iter().enumerate() {
+            let kind = if rel.prerelease { "pre-release" } else { "release" };
+            println!(
+                "  [{}] {}  {}  ({}, {})",
+                i + 1,
+                rel.tag,
+                kind,
+                asset.name,
+                format_bytes(asset.size)
+            );
+        }
+        println!("  [0] Skip (do not install Despotes)");
+        print!("Select a package number and press Enter [1]: ");
+        let _ = std::io::stdout().flush();
+        let raw = read_choice_line();
+        let idx = if raw.is_empty() {
+            1
+        } else {
+            raw.parse::<usize>().unwrap_or(0)
+        };
+        if idx == 0 || idx > list.len() {
+            println!("Skipped Despotes installation.");
+            return Ok(());
+        }
+        list.into_iter().nth(idx - 1)
+    };
+
+    let Some((rel, asset)) = chosen else {
+        return Ok(());
+    };
+
+    let cached = despotes::download_asset(&asset).await?;
+    let installed = despotes::install_into(instance_dir, &cached).await?;
+    println!("Installed Despotes {} ({}) into mods/", rel.tag, installed);
+    Ok(())
 }
