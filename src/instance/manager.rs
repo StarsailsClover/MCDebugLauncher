@@ -114,6 +114,18 @@ impl InstanceManager {
                     {
                         tracing::warn!("Could not install Fabric API (install it manually): {}", e);
                     }
+
+                    // Also install Mod Menu (modmenu) so users get a
+                    // convenient in-game mod list UI. Best-effort like
+                    // the Fabric API install above.
+                    if let Err(e) = crate::loader::fabric::FabricInstaller::install_mod_menu(
+                        &version_info.id,
+                        &mods_dir,
+                    )
+                    .await
+                    {
+                        tracing::warn!("Could not install Mod Menu (install it manually): {}", e);
+                    }
                 }
                 "forge" => {
                     let installer = crate::loader::forge::ForgeInstaller::new(

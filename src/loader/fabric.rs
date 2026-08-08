@@ -9,6 +9,8 @@ const FABRIC_META_URL: &str = "https://meta.fabricmc.net/v2/versions";
 const MODRINTH_API_URL: &str = "https://api.modrinth.com/v2";
 // Modrinth project ID for Fabric API
 const FABRIC_API_PROJECT_ID: &str = "P7dR8mSH";
+// Modrinth project ID for Mod Menu (https://modrinth.com/mod/modmenu)
+const MODMENU_PROJECT_ID: &str = "mOgUt4GM";
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct FabricLoaderVersion {
@@ -301,6 +303,68 @@ impl FabricInstaller {
         fs::write(&target, &bytes).await?;
 
         tracing::info!("Fabric API {} installed ({} bytes)", latest.version_number, bytes.len());
+        Ok(())
+    }
+
+    /// Install Mod Menu (modmenu) from Modrinth into the instance's mods
+    /// directory. Best-effort helper used right after instance creation; a
+    /// failure warns but must never abort the creation. Skips when an
+    /// existing modmenu file is already present.
+    pub async fn install_mod_menu(mc_version: &str, mods_dir: &std::path::Path) -> Result<()> {
+        Self::download_modrinth_mod(MODMENU_PROJECT_ID, "modmenu", mc_version, mods_dir).await
+    }
+
+    /// Generic Modrinth download for a Fabric mod identified by project id.
+    async fn download_modrinth_mod(
+        project_id: &str,
+        display_name: &str,
+        mc_version: &str,
+        mods_dir: &std::path::Path,
+    ) -> Result<()> {
+        let url = format!(
+            "{}/project/{}/version?game_versions=[\"{}\"]&loaders=[\"fabric\"]",
+            MODRINTH_API_URL, project_id, mc_version
+        );
+
+        let response = reqwest::get(&url)
+            .await
+            .with_context(|| format!("Failed to query Modrinth for {}", display_name))?;
+        if !response.status().is_success() {
+            anyhow::bail!("Modrinth API returned HTTP {}", response.status());
+        }
+        let versions: Vec<ModrinthVersion> = response
+            .json()
+            .await
+            .with_context(|| format!("Failed to parse Modrinth {} versions", display_name))?;
+
+        let latest = versions
+            .first()
+            .with_context(|| format!("No {} version for Minecraft {} on Modrinth", display_name, mc_version))?;
+
+        let file = latest
+            .files
+            .iter()
+            .find(|f| f.primary)
+            .or_else(|| latest.files.first())
+            .with_context(|| format!("{} version has no downloadable files", display_name))?;
+
+        fs::create_dir_all(mods_dir).await?;
+        let target = mods_dir.join(&file.filename);
+        if target.exists() {
+            tracing::debug!("{} already present: {}", display_name, file.filename);
+            return Ok(());
+        }
+
+        tracing::info!("Downloading {} {}...", display_name, latest.version_number);
+        let dl = reqwest::get(&file.url)
+            .await
+            .with_context(|| format!("Failed to download {} from {}", display_name, file.url))?;
+        if !dl.status().is_success() {
+            anyhow::bail!("Failed to download {}: HTTP {}", display_name, dl.status());
+        }
+        let bytes = dl.bytes().await.with_context(|| format!("Failed to read {} response", display_name))?;
+        fs::write(&target, &bytes).await?;
+        tracing::info!("{} {} installed ({} bytes)", display_name, latest.version_number, bytes.len());
         Ok(())
     }
 }

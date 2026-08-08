@@ -264,12 +264,12 @@ pub struct LaunchOptions {
     /// Return immediately after spawning the game process instead of waiting
     /// for it to exit. Required for agent workflows and the agent API.
     pub detach: bool,
-    /// Enable agent control: installs the MDL companion mod (Fabric),
+    /// Enable agent control via the Despotes mod (must be installed in the
     /// passes the control-server port to the game via a JVM property, and
     /// disables pause-on-lost-focus so the game keeps running while the
     /// user focuses other applications.
     pub agent: bool,
-    /// TCP port for the companion control server (default 25590).
+    /// TCP port for the Despotes control server (default 25585).
     pub agent_port: Option<u16>,
 }
 
@@ -400,38 +400,34 @@ impl InstanceLauncher {
         // 2. Force pauseOnLostFocus:false so the game keeps running while the
         //    user focuses other apps — a hard requirement for agent control.
         // 3. Record the requested control port for post-launch discovery.
-        let agent_port = options.agent_port.unwrap_or(crate::game::DEFAULT_COMPANION_PORT);
+        // Agent mode (Alpha 7): prepare the instance for programmatic control
+        // via the Despotes mod (https://github.com/NDBlockConnect/Despotes),
+        // which replaced MDL's old bundled companion:
+        // 1. Verify Despotes is present (it is offered at `create` time).
+        // 2. Force pauseOnLostFocus:false so the game keeps running while the
+        //    user focuses other apps — a hard requirement for agent control.
+        // 3. Record the requested control port for post-launch discovery.
+        let agent_port = options.agent_port.unwrap_or(crate::game::DEFAULT_DESPOTES_PORT);
         if options.agent {
-            let loader_type = config.loader.as_ref().map(|l| l.loader_type.as_str());
-            match loader_type {
-                Some("fabric") | Some("quilt") => {
-                    match crate::game::install::install(instance_dir).await {
-                        Ok(jar) => tracing::info!("Agent control enabled via companion mod: {}", jar),
-                        Err(e) => tracing::warn!(
-                            "Agent control requested but companion mod unavailable: {}. \
-                             The game will launch without in-game control support.",
-                            e
-                        ),
-                    }
-                }
-                other => tracing::warn!(
-                    "Agent control requires a Fabric or Quilt instance, but this instance uses '{}'. \
-                     Screenshots remain available; in-game input is not.",
-                    other.unwrap_or("vanilla")
-                ),
+            if crate::game::despotes::is_installed(instance_dir) {
+                tracing::info!("Agent control enabled via Despotes");
+            } else {
+                tracing::warn!(
+                    "Agent control requested but Despotes is not installed in this instance. \
+                     Create the instance with Despotes (see `mdl create`) or install its JAR \
+                     into mods/. The game will launch without in-game control support."
+                );
             }
             match crate::game::options::ensure_no_pause_on_lost_focus(instance_dir) {
                 Ok(true) => tracing::info!("Set pauseOnLostFocus:false (game keeps running when unfocused)"),
                 Ok(false) => tracing::debug!("pauseOnLostFocus already disabled"),
                 Err(e) => tracing::warn!("Failed to set pauseOnLostFocus: {}", e),
             }
-            // Remove stale port file from a previous run; the companion mod
-            // rewrites it once its control server is accepting connections.
-            let stale = instance_dir.join("runtime").join(crate::game::COMPANION_PORT_FILE);
-            let _ = fs::remove_file(&stale).await;
+            // Record the requested Despotes port so `mdl game ...` commands can
+            // locate the control server after launch.
             let runtime_dir = instance_dir.join("runtime");
             fs::create_dir_all(&runtime_dir).await?;
-            fs::write(runtime_dir.join("requested_port"), agent_port.to_string()).await?;
+            fs::write(runtime_dir.join(crate::game::DESPOTES_PORT_FILE), agent_port.to_string()).await?;
         }
 
         // Enumerate installed mods and display them before launch so the
@@ -459,13 +455,9 @@ impl InstanceLauncher {
         cmd.arg("-Xms512M");
         cmd.arg(format!("-Djava.library.path={}", natives_dir.display()));
         if options.agent {
-            // Hand the control-server port to the companion mod via a JVM
-            // system property. The mod binds this port (or falls back to an
-            // ephemeral one) and reports the actual port in runtime/agent.port.
-            cmd.arg(format!("-D{}={}", crate::game::COMPANION_PORT_PROPERTY, agent_port));
-            // Tell the companion to treat the window as always focused so
-            // injected input keeps working while the user focuses other apps.
-            cmd.arg("-Dmdl.agent.keepFocus=true");
+            // Hand the control-server port to Despotes via its documented
+            // system property override (-Ddespotes.port=NNNN).
+            cmd.arg(format!("-D{}={}", crate::game::DESPOTES_PORT_PROPERTY, agent_port));
         }
 
         if !loader_jvm_args.is_empty() {
