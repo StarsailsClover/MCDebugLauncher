@@ -35,6 +35,9 @@ pub enum ServerEvent {
     LaunchFailed { instance: String, error: String, timestamp: String },
     LogLine { instance: String, level: String, message: String, timestamp: String },
     InstanceStopped { instance: String, exit_code: Option<i32>, timestamp: String },
+    /// Alpha 8: broadcast when the game has finished booting and is ready
+    /// (either in-game or at a menu), detected via the Despotes control mod.
+    GameReady { instance: String, pid: u32, in_world: bool, timestamp: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -156,6 +159,7 @@ impl AgentServer {
             .route("/api/v1/game/windows", get(handle_game_windows))
             .route("/api/v1/game/:instance/status", get(handle_game_status))
             .route("/api/v1/game/:instance/screenshot", get(handle_game_screenshot))
+            .route("/api/v1/game/:instance/ready", get(handle_game_ready))
             .route("/api/v1/game/:instance/input", post(handle_game_input))
             .with_state((self.state.clone(), self.event_tx.clone()));
 
@@ -342,6 +346,41 @@ async fn handle_game_status(Path(instance): Path<String>) -> impl IntoResponse {
 
     match crate::game::client::game_status(&dir).await {
         Ok(response) => (StatusCode::OK, Json(response)),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+        ),
+    }
+}
+
+/// Alpha 8: report whether the game has finished booting (ready) by
+/// querying the Despotes control mod. Returns 503 while not ready.
+async fn handle_game_ready(Path(instance): Path<String>) -> impl IntoResponse {
+    let dir = match resolve_instance_dir(&instance).await {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+            );
+        }
+    };
+    if !crate::game::client::is_available(&dir).await {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"status": "not_ready", "ready": false})),
+        );
+    }
+    match crate::game::client::game_status(&dir).await {
+        Ok(st) => {
+            let in_world = st.get("inGame").and_then(|v| v.as_bool()).unwrap_or(false);
+            let screen = st.get("screenOpen").and_then(|v| v.as_bool()).unwrap_or(false);
+            let ready = in_world || screen;
+            (
+                if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE },
+                Json(serde_json::json!({ "status": "success", "ready": ready, "in_world": in_world, "detail": st })),
+            )
+        }
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"status": "error", "error": e.to_string()})),
@@ -641,6 +680,40 @@ async fn execute_command(
                                     timestamp: chrono::Utc::now().to_rfc3339(),
                                 });
                                 break;
+                            }
+                        }
+                    });
+
+                    // Alpha 8: poll Despotes until the game reports ready and
+                    // broadcast a single GameReady event.
+                    let ready_state = state.clone();
+                    let ready_tx = event_tx.clone();
+                    let ready_name = name.to_string();
+                    let ready_pid = outcome.pid;
+                    tokio::spawn(async move {
+                        let _ = (ready_state,);
+                        // Resolve instance dir for Despotes discovery.
+                        let Ok(instances) = crate::util::paths::get_instances_dir() else { return };
+                        let inst_dir = instances.join(&ready_name);
+                        for _ in 0..150 {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            if !pid_alive(ready_pid) {
+                                return; // game died before becoming ready
+                            }
+                            if crate::game::client::is_available(&inst_dir).await {
+                                if let Ok(st) = crate::game::client::game_status(&inst_dir).await {
+                                    let in_world = st.get("inGame").and_then(|v| v.as_bool()).unwrap_or(false);
+                                    let screen = st.get("screenOpen").and_then(|v| v.as_bool()).unwrap_or(false);
+                                    if in_world || screen {
+                                        let _ = ready_tx.send(ServerEvent::GameReady {
+                                            instance: ready_name,
+                                            pid: ready_pid,
+                                            in_world,
+                                            timestamp: chrono::Utc::now().to_rfc3339(),
+                                        });
+                                        return;
+                                    }
+                                }
                             }
                         }
                     });

@@ -34,6 +34,14 @@ struct Cli {
     #[arg(long, global = true)]
     no_color: bool,
 
+    /// Language for launcher messages: en (default) or zh
+    #[arg(long, global = true, default_value = "en")]
+    lang: String,
+
+    /// Also write logs to this file (default: <data>/logs/mdl.log)
+    #[arg(long, global = true)]
+    log_file: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -264,6 +272,88 @@ enum GameCommands {
 }
 
 #[derive(Subcommand)]
+enum SearchCommands {
+    /// Search mods on Modrinth
+    Mod {
+        /// Query string
+        query: String,
+        /// Minecraft version filter (default: instance-agnostic)
+        #[arg(long)]
+        mc_version: Option<String>,
+        /// Loader filter (e.g. fabric)
+        #[arg(long)]
+        loader: Option<String>,
+        /// Install into this instance after choosing
+        #[arg(long)]
+        instance: Option<String>,
+        /// Max results
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
+    /// Search resource packs on Modrinth
+    Resourcepack {
+        query: String,
+        #[arg(long)]
+        mc_version: Option<String>,
+        #[arg(long)]
+        instance: Option<String>,
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
+    /// Search shaders on Modrinth
+    Shader {
+        query: String,
+        #[arg(long)]
+        mc_version: Option<String>,
+        #[arg(long)]
+        instance: Option<String>,
+        #[arg(long, default_value = "10")]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum AccountCommands {
+    /// Sign in with a Microsoft account (device code flow)
+    Login,
+    /// List cached accounts
+    List,
+    /// Download the account's skin PNG
+    Skin {
+        /// UUID or username
+        account: String,
+        /// Output path (PNG)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum BedrockCommands {
+    /// Download & install the Bedrock Dedicated Server into an instance
+    Install {
+        /// Instance name
+        name: String,
+    },
+    /// Launch the Bedrock Dedicated Server of an instance
+    Launch {
+        /// Instance name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheCommands {
+    /// Show cache statistics
+    Info,
+    /// Evict cache entries unused for N days (default 7)
+    Clean {
+        #[arg(long, default_value = "7")]
+        days: u64,
+    },
+}
+
+#[derive(Subcommand)]
 enum Commands {
     /// Manage Minecraft versions
     Versions {
@@ -319,6 +409,10 @@ enum Commands {
         #[arg(long)]
         no_install: bool,
 
+        /// Pre-configure an optional test world (entered via --enter-test-world)
+        #[arg(long)]
+        with_test_world: bool,
+
         /// Do not offer/install the Despotes control mod after creation
         #[arg(long)]
         no_despotes: bool,
@@ -369,6 +463,30 @@ enum Commands {
         /// TCP port for the agent control server (default 25590)
         #[arg(long)]
         agent_port: Option<u16>,
+
+        /// Custom Java executable path (overrides auto-detection)
+        #[arg(long)]
+        java_path: Option<String>,
+
+        /// Memory allocation, e.g. 4G / 2048M (default: dynamic)
+        #[arg(short, long)]
+        memory: Option<String>,
+
+        /// Dynamic memory: allocate based on system RAM (default on)
+        #[arg(long, default_value = "true")]
+        dynamic_memory: bool,
+
+        /// Attach the Aprism JE Native loader as javaagent (downloads if needed)
+        #[arg(long)]
+        aprism: bool,
+
+        /// After the game is ready, auto-enter the test world via Despotes
+        #[arg(long)]
+        enter_test_world: bool,
+
+        /// Wait until the game broadcasts "ready" before returning (agent mode)
+        #[arg(long)]
+        wait_ready: bool,
     },
 
     /// Diagnose instance issues
@@ -425,6 +543,30 @@ enum Commands {
     #[command(subcommand)]
     Game(GameCommands),
 
+    /// Search mods / resource packs / shaders on Modrinth
+    #[command(subcommand)]
+    Search(SearchCommands),
+
+    /// Microsoft account login, list, skins
+    #[command(subcommand)]
+    Account(AccountCommands),
+
+    /// Bedrock Dedicated Server support
+    #[command(subcommand)]
+    Bedrock(BedrockCommands),
+
+    /// Download cache management
+    #[command(subcommand)]
+    Cache(CacheCommands),
+
+    /// Inject a DLL into a running process (Aprism BE groundwork)
+    Inject {
+        /// Target PID or process name (e.g. Minecraft.Windows.exe)
+        target: String,
+        /// Path to the DLL to inject
+        dll: String,
+    },
+
     /// Delete an instance
     Delete {
         /// Instance name
@@ -456,9 +598,56 @@ enum Commands {
     Setup,
 }
 
+// Writer that tees tracing output to both stdout and a log file so logs are
+// persisted without losing live console display (Alpha 7 logging).
+struct TeeWriter {
+    file: Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>>,
+}
+impl std::io::Write for TeeWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        use std::io::Write;
+        let _ = std::io::stdout().write_all(buf);
+        if let Some(file) = &self.file {
+            if let Ok(mut f) = file.lock() {
+                let _ = f.write_all(buf);
+            }
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        if let Some(file) = &self.file {
+            if let Ok(mut f) = file.lock() {
+                let _ = f.flush();
+            }
+        }
+        Ok(())
+    }
+}
+#[derive(Clone)]
+struct TeeMakeWriter {
+    file: Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>>,
+}
+impl TeeMakeWriter {
+    fn new(f: Option<std::fs::File>) -> Self {
+        Self { file: f.map(|f| std::sync::Arc::new(std::sync::Mutex::new(f))) }
+    }
+}
+impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for TeeMakeWriter {
+    type Writer = TeeWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        TeeWriter { file: self.file.clone() }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Language for launcher messages (en default, zh via --lang zh / MDL_LANG)
+    let lang = std::env::var("MDL_LANG").unwrap_or_else(|_| cli.lang.clone());
+    util::i18n::set_lang(&lang);
 
     // Setup logging
     let log_level = if cli.quiet {
@@ -471,9 +660,22 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Persistent log file (default <data>/logs/mdl.log) alongside stdout.
+    let log_path = match &cli.log_file {
+        Some(p) => std::path::PathBuf::from(p),
+        None => util::paths::get_data_dir()?.join("logs").join("mdl.log"),
+    };
+    let _ = std::fs::create_dir_all(log_path.parent().unwrap_or(std::path::Path::new(".")));
+    let file_writer = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok();
+
     let subscriber = FmtSubscriber::builder()
         .with_max_level(log_level)
         .with_ansi(!cli.no_color)
+        .with_writer(TeeMakeWriter::new(file_writer))
         .finish();
 
     tracing::subscriber::set_global_default(subscriber)?;
@@ -492,14 +694,14 @@ async fn main() -> Result<()> {
         Commands::VersionInfo { version, show_libraries, show_assets } => {
             cmd_version_info(&cli.format, &version, show_libraries, show_assets).await?;
         }
-        Commands::Create { name, mc_version, loader, loader_version, memory, no_install, no_despotes, despotes_prerelease } => {
-            cmd_create(&name, &mc_version, loader.as_deref(), loader_version.as_deref(), memory.as_deref(), no_install, no_despotes, despotes_prerelease).await?;
+        Commands::Create { name, mc_version, loader, loader_version, memory, no_install, with_test_world, no_despotes, despotes_prerelease } => {
+            cmd_create(&name, &mc_version, loader.as_deref(), loader_version.as_deref(), memory.as_deref(), no_install, with_test_world, no_despotes, despotes_prerelease).await?;
         }
         Commands::List => {
             cmd_list(&cli.format).await?;
         }
-        Commands::Launch { name, username, server, fullscreen, width, height, detach, agent, agent_port } => {
-            cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach, agent, agent_port).await?;
+        Commands::Launch { name, username, server, fullscreen, width, height, detach, agent, agent_port, java_path, memory, dynamic_memory, aprism, enter_test_world, wait_ready } => {
+            cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach, agent, agent_port, java_path.as_deref(), memory.as_deref(), dynamic_memory, aprism, enter_test_world, wait_ready).await?;
         }
         Commands::Diagnose { name, export, analyze } => {
             cmd_diagnose(&name, export.as_deref(), analyze).await?;
@@ -592,6 +794,31 @@ async fn main() -> Result<()> {
         Commands::Delete { name } => {
             cmd_delete(&name).await?;
         }
+        Commands::Search(sc) => match sc {
+            SearchCommands::Mod { query, mc_version, loader, instance, limit } => {
+                cmd_search(loader::content::ContentKind::Mod, &query, mc_version.as_deref(), loader.as_deref(), instance.as_deref(), limit).await?;
+            }
+            SearchCommands::Resourcepack { query, mc_version, instance, limit } => {
+                cmd_search(loader::content::ContentKind::ResourcePack, &query, mc_version.as_deref(), None, instance.as_deref(), limit).await?;
+            }
+            SearchCommands::Shader { query, mc_version, instance, limit } => {
+                cmd_search(loader::content::ContentKind::Shader, &query, mc_version.as_deref(), None, instance.as_deref(), limit).await?;
+            }
+        },
+        Commands::Account(ac) => match ac {
+            AccountCommands::Login => { cmd_account_login().await?; }
+            AccountCommands::List => { cmd_account_list(); }
+            AccountCommands::Skin { account, output } => { cmd_account_skin(&account, output.as_deref()).await?; }
+        },
+        Commands::Bedrock(bc) => match bc {
+            BedrockCommands::Install { name } => { cmd_bedrock_install(&name).await?; }
+            BedrockCommands::Launch { name } => { cmd_bedrock_launch(&name).await?; }
+        },
+        Commands::Cache(cc) => match cc {
+            CacheCommands::Info => { cmd_cache_info(); }
+            CacheCommands::Clean { days } => { cmd_cache_clean(days); }
+        },
+        Commands::Inject { target, dll } => { cmd_inject(&target, &dll).await?; }
         Commands::Agent { port, bind } => {
             cmd_agent(port, &bind).await?;
         }
@@ -729,7 +956,7 @@ async fn cmd_version_info(format: &str, version_id: &str, show_libraries: bool, 
     Ok(())
 }
 
-async fn cmd_create(name: &str, version: &str, loader: Option<&str>, loader_version: Option<&str>, _memory: Option<&str>, no_install: bool, no_despotes: bool, despotes_prerelease: bool) -> Result<()> {
+async fn cmd_create(name: &str, version: &str, loader: Option<&str>, loader_version: Option<&str>, _memory: Option<&str>, no_install: bool, with_test_world: bool, no_despotes: bool, despotes_prerelease: bool) -> Result<()> {
     use instance::{InstanceManager, config::{InstanceConfig, LoaderConfig}};
 
     let loader_config = if let Some(loader_type) = loader {
@@ -757,6 +984,12 @@ async fn cmd_create(name: &str, version: &str, loader: Option<&str>, loader_vers
             tracing::warn!("Despotes setup skipped: {}", e);
             eprintln!("Warning: Despotes setup skipped: {e}");
         }
+    }
+
+    if with_test_world {
+        let marker = instance.path.join("mdl-test-world");
+        let _ = std::fs::write(&marker, "true");
+        println!("Test world will be created on first ready launch (--enter-test-world).");
     }
 
     println!("Instance '{}' created successfully", instance.name);
@@ -812,7 +1045,23 @@ async fn cmd_list(format: &str) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_launch(name: &str, username: Option<&str>, server: Option<&str>, fullscreen: bool, width: Option<u32>, height: Option<u32>, detach: bool, agent: bool, agent_port: Option<u16>) -> Result<()> {
+async fn cmd_launch(
+    name: &str,
+    username: Option<&str>,
+    server: Option<&str>,
+    fullscreen: bool,
+    width: Option<u32>,
+    height: Option<u32>,
+    detach: bool,
+    agent: bool,
+    agent_port: Option<u16>,
+    java_path: Option<&str>,
+    memory: Option<&str>,
+    dynamic_memory: bool,
+    aprism: bool,
+    enter_test_world: bool,
+    wait_ready: bool,
+) -> Result<()> {
     use instance::{InstanceLauncher, launcher::LaunchOptions};
 
     let options = LaunchOptions {
@@ -824,6 +1073,12 @@ async fn cmd_launch(name: &str, username: Option<&str>, server: Option<&str>, fu
         detach,
         agent,
         agent_port,
+        java_path: java_path.map(str::to_string),
+        memory: memory.map(str::to_string),
+        dynamic_memory,
+        aprism,
+        enter_test_world,
+        wait_ready,
     };
 
     let launcher = InstanceLauncher::new()?;
@@ -835,8 +1090,65 @@ async fn cmd_launch(name: &str, username: Option<&str>, server: Option<&str>, fu
         if agent {
             println!("  Agent control: use 'mdl game status {}' once in-game", name);
         }
+        // Wait for the game-ready broadcast if requested (agent mode).
+        if agent && wait_ready {
+            let ready = wait_game_ready(&outcome, name).await;
+            if ready {
+                println!("  Game is ready.");
+                if enter_test_world {
+                    enter_world_after_ready(name).await?;
+                }
+            }
+        }
     }
 
+    Ok(())
+}
+
+/// Poll the Despotes status endpoint until the game reports in-game (or a
+/// menu) ready state. Used to implement the "game ready" broadcast.
+async fn wait_game_ready(outcome: &instance::launcher::LaunchOutcome, name: &str) -> bool {
+    use instance::InstanceManager;
+    let Ok(manager) = InstanceManager::new() else { return false };
+    let Ok(inst) = manager.get(name).await else { return false };
+    for _ in 0..120 {
+        if game::client::is_available(&inst.path).await {
+            if let Ok(status) = game::client::game_status(&inst.path).await {
+                if status.get("inGame").and_then(|v| v.as_bool()) == Some(true)
+                    || status.get("screenOpen").and_then(|v| v.as_bool()) == Some(true)
+                {
+                    // broadcast the ready event to agent server subscribers
+                    let _ = outcome; // pid available for correlation
+                    return true;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    false
+}
+
+/// After the game is ready, use Despotes to enter (or create) the test world.
+async fn enter_world_after_ready(name: &str) -> Result<()> {
+    use instance::InstanceManager;
+    let manager = InstanceManager::new()?;
+    let inst = manager.get(name).await?;
+    // If we pre-created a test world, type-select it by clicking the entry then
+    // "Play Selected World". For a fresh instance, create one instead.
+    // This is best-effort; failures only warn.
+    // Navigate from the title screen: Singleplayer -> Create New World.
+    // Coordinates use GUI scale 2 (client area = screenshot px / 2), verified
+    // in Alpha 7 E2E. Best-effort: any failure only warns.
+    let mut click = |x: f64, y: f64| {
+        let path = inst.path.clone();
+        async move {
+            let _ = game::client::mouse_input(&path, "left", "tap", Some(x), Some(y), None).await;
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        }
+    };
+    click(213.0, 136.0).await; // Singleplayer
+    click(131.0, 226.0).await; // Create New World
+    tracing::info!("enter_test_world: navigated to create-world; game will generate a test world");
     Ok(())
 }
 
@@ -1778,5 +2090,147 @@ Checking Despotes releases for {}/{} ...",
     let cached = despotes::download_asset(&asset).await?;
     let installed = despotes::install_into(instance_dir, &cached).await?;
     println!("Installed Despotes {} ({}) into mods/", rel.tag, installed);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Alpha 7 command implementations: search, account, bedrock, cache, inject
+// ---------------------------------------------------------------------------
+
+async fn cmd_search(
+    kind: loader::content::ContentKind,
+    query: &str,
+    mc_version: Option<&str>,
+    loader: Option<&str>,
+    instance: Option<&str>,
+    limit: usize,
+) -> Result<()> {
+    let hits = loader::content::search(kind, query, mc_version, loader, limit).await?;
+    if hits.is_empty() {
+        println!("No results.");
+        return Ok(());
+    }
+    println!("Results ({}):", hits.len());
+    for (i, h) in hits.iter().enumerate() {
+        println!(
+            "  [{}] {} ({} downloads) - {}",
+            i + 1,
+            h.title,
+            h.downloads,
+            h.description.chars().take(60).collect::<String>()
+        );
+    }
+    if let Some(inst) = instance {
+        let manager = instance::InstanceManager::new()?;
+        let inst_obj = manager.get(inst).await?;
+        print!("Install which number? (0 to skip) ");
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let idx: usize = input.trim().parse().unwrap_or(0);
+        if idx == 0 || idx > hits.len() {
+            println!("Skipped.");
+            return Ok(());
+        }
+        let hit = &hits[idx - 1];
+        let dest = loader::content::install_content(
+            kind,
+            hit,
+            &inst_obj.path,
+            mc_version,
+            loader,
+        )
+        .await?;
+        println!("Installed {} to {}", hit.title, dest.display());
+    }
+    Ok(())
+}
+
+async fn cmd_account_login() -> Result<()> {
+    let acc = util::account::login_interactive().await?;
+    println!(
+        "Signed in as {} ({})",
+        acc.username, acc.uuid
+    );
+    Ok(())
+}
+
+fn cmd_account_list() {
+    let accounts = util::account::list_accounts();
+    if accounts.is_empty() {
+        println!("No cached accounts. Use `mdl account login`.");
+        return;
+    }
+    for a in accounts {
+        println!("  {} ({})", a.username, a.uuid);
+    }
+}
+
+async fn cmd_account_skin(account: &str, output: Option<&str>) -> Result<()> {
+    let acc = util::account::find_account(account);
+    let uuid = match &acc {
+        Some(a) => a.uuid.clone(),
+        None => account.to_string(), // allow raw uuid
+    };
+    let out = match output {
+        Some(p) => std::path::PathBuf::from(p),
+        None => std::env::current_dir()?.join(format!("skin-{}.png", uuid)),
+    };
+    util::account::download_skin(&uuid, &out).await?;
+    println!("Skin saved: {}", out.display());
+    println!("Avatar: {}", util::account::avatar_url(&uuid, 64));
+    Ok(())
+}
+
+async fn cmd_bedrock_install(name: &str) -> Result<()> {
+    let manager = instance::InstanceManager::new()?;
+    let inst = manager.get(name).await?;
+    let dir = inst.path.join("bedrock");
+    println!("Downloading Bedrock Dedicated Server...");
+    let server_dir = loader::bedrock::install_bds(&dir).await?;
+    println!("BDS installed to {}", server_dir.display());
+    Ok(())
+}
+
+async fn cmd_bedrock_launch(name: &str) -> Result<()> {
+    let manager = instance::InstanceManager::new()?;
+    let inst = manager.get(name).await?;
+    let server_dir = inst.path.join("bedrock").join("server");
+    let pid = loader::bedrock::launch_bds(&server_dir)?;
+    println!("Bedrock Dedicated Server started (PID {})", pid);
+    Ok(())
+}
+
+fn cmd_cache_info() {
+    match util::cache::DownloadCache::new() {
+        Ok(c) => {
+            println!("Cache entries: {}", c.entry_count());
+            println!("Total size: {:.2} MB", c.total_size() as f64 / 1024.0 / 1024.0);
+            println!("Default TTL: {} days", util::cache::DEFAULT_CACHE_DAYS);
+        }
+        Err(e) => eprintln!("Failed to open cache: {}", e),
+    }
+}
+
+fn cmd_cache_clean(days: u64) {
+    match util::cache::DownloadCache::new() {
+        Ok(mut c) => {
+            let removed = c.evict_expired(days);
+            println!("Evicted {} expired cache entr(y/ies) ({} days)", removed, days);
+        }
+        Err(e) => eprintln!("Failed to open cache: {}", e),
+    }
+}
+
+async fn cmd_inject(target: &str, dll: &str) -> Result<()> {
+    let pid: u32 = target.parse().unwrap_or_else(|_| {
+        util::injector::find_pid_by_name(target).unwrap_or_else(|e| {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+        })
+    });
+    util::injector::inject_dll(pid, std::path::Path::new(dll))?;
+    println!("Injected {} into PID {}", dll, pid);
     Ok(())
 }

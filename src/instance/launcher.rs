@@ -271,6 +271,18 @@ pub struct LaunchOptions {
     pub agent: bool,
     /// TCP port for the Despotes control server (default 25585).
     pub agent_port: Option<u16>,
+    /// Custom Java executable path (overrides auto-detection).
+    pub java_path: Option<String>,
+    /// Explicit memory allocation like "4G"/"2048M".
+    pub memory: Option<String>,
+    /// Allocate memory dynamically from system RAM when `memory` is unset.
+    pub dynamic_memory: bool,
+    /// Attach the Aprism JE Native loader as a javaagent.
+    pub aprism: bool,
+    /// After the game is ready, auto-enter (or create) the test world via Despotes.
+    pub enter_test_world: bool,
+    /// Block until the game broadcasts ready (agent mode).
+    pub wait_ready: bool,
 }
 
 /// Result of a successful launch.
@@ -357,16 +369,22 @@ impl InstanceLauncher {
         let version_metadata = self.load_version_metadata(&version_dir, &config.version).await?;
         let required_java = version_metadata.required_java_version();
 
-        // Resolve a suitable Java runtime, auto-downloading one from Adoptium if
-        // the system has none that meets the version requirement. This replaces
-        // the previous hard failure on a missing/too-old Java.
-        let java_runtime = crate::version::java::JavaRuntime::ensure_version(required_java)
-            .await
-            .context("Failed to obtain a suitable Java runtime")?;
-        let java_path = java_runtime.path.clone();
+        // Resolve a suitable Java runtime. A user-supplied --java-path wins;
+        // otherwise auto-download one from Adoptium when the system lacks a
+        // runtime meeting the version requirement.
+        let java_path: std::path::PathBuf;
+        if let Some(custom) = &options.java_path {
+            java_path = std::path::PathBuf::from(custom);
+            tracing::info!("Using custom Java: {}", java_path.display());
+        } else {
+            let java_runtime = crate::version::java::JavaRuntime::ensure_version(required_java)
+                .await
+                .context("Failed to obtain a suitable Java runtime")?;
+            java_path = java_runtime.path.clone();
+            tracing::info!("Using Java {} (required: Java {})", java_runtime.major_version, required_java);
+        }
 
         tracing::info!("Launching instance '{}'...", name);
-        tracing::info!("Using Java {} (required: Java {})", java_runtime.major_version, required_java);
         tracing::info!("Building classpath and downloading libraries...");
 
         // Build classpath and get main class
@@ -450,9 +468,39 @@ impl InstanceLauncher {
         // Build launch command
         let mut cmd = Command::new(&java_path);
 
-        // JVM arguments
-        cmd.arg("-Xmx2G");
-        cmd.arg("-Xms512M");
+        // JVM arguments: memory. An explicit --memory wins; otherwise a
+        // dynamic allocation derived from system RAM (half of total, capped
+        // 8G) is used; final fallback is 2G.
+        let (xmx, xms) = match &options.memory {
+            Some(m) => (m.clone(), "512M".to_string()),
+            None if options.dynamic_memory => {
+                use sysinfo::System;
+                let mut sys = System::new();
+                sys.refresh_memory();
+                let total_mb = sys.total_memory() / 1024 / 1024;
+                let alloc = ((total_mb / 2).min(8192)).max(2048);
+                (format!("{}M", alloc), "512M".to_string())
+            }
+            None => ("2G".to_string(), "512M".to_string()),
+        };
+        cmd.arg(format!("-Xmx{}", xmx));
+        cmd.arg(format!("-Xms{}", xms));
+        // Dynamic performance tuning: pick GC by allocation tier.
+        if options.dynamic_memory {
+            let mb: u64 = if let Some(v) = xmx.strip_suffix('G') {
+                v.parse::<u64>().unwrap_or(2) * 1024
+            } else if let Some(v) = xmx.strip_suffix('M') {
+                v.parse::<u64>().unwrap_or(2048)
+            } else {
+                2048
+            };
+            if mb >= 4096 {
+                cmd.arg("-XX:+UseG1GC");
+                cmd.arg("-XX:MaxGCPauseMillis=50");
+            } else {
+                cmd.arg("-XX:+UseSerialGC");
+            }
+        }
         cmd.arg(format!("-Djava.library.path={}", natives_dir.display()));
         if options.agent {
             // Hand the control-server port to Despotes via its documented
@@ -1369,4 +1417,19 @@ impl InstanceLauncher {
 
         Ok(())
     }
+}
+
+/// Download (cache) and attach the Aprism JE javaagent for a MC version.
+async fn attach_aprism(
+    cmd: &mut Command,
+    mc_version: &str,
+    instance_dir: &std::path::Path,
+) -> Result<String> {
+    let releases = crate::loader::aprism::fetch_releases().await?;
+    let (release, asset) = crate::loader::aprism::select_release(&releases, mc_version, true)
+        .context("No applicable Aprism JE artifact for this Minecraft version")?;
+    let jar = crate::loader::aprism::download_asset(&asset).await?;
+    let arg = crate::loader::aprism::javaagent_arg(&jar, &release.tag, mc_version, instance_dir);
+    cmd.arg(&arg);
+    Ok(format!("{} ({})", release.tag, jar.display()))
 }

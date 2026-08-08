@@ -7,3 +7,8 @@ pub mod archive;
 pub mod paths;
 pub mod update;
 pub mod selfupdate;
+pub mod mirrors;
+pub mod cache;
+pub mod injector;
+pub mod i18n;
+pub mod account;
