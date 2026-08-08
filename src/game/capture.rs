@@ -159,6 +159,53 @@ pub fn capture_window_png(resolved: window::ResolvedWindow, timeout_secs: u64) -
     }
 }
 
+/// Capture a screenshot with channel fallback:
+/// 1. Despotes in-game framebuffer capture (works even when minimized,
+///    returns the pure client area).
+/// 2. Windows.Graphics.Capture window capture (fallback when Despotes is
+///    not present/running).
+/// Returns the image plus which source produced it.
+pub fn capture_instance_best(
+    instance_dir: &std::path::Path,
+    instance_name: &str,
+    pid: Option<u32>,
+    timeout_secs: u64,
+) -> Result<(CapturedImage, &'static str)> {
+    if let Ok(bytes) = futures_lite_block(super::client::capture_image(instance_dir)) {
+        if let Some((w, h)) = png_dimensions(&bytes) {
+            return Ok((
+                CapturedImage { width: w, height: h, png_bytes: bytes },
+                "despotes",
+            ));
+        }
+    }
+    let img = capture_instance_png(instance_name, pid, timeout_secs)?;
+    Ok((img, "wgc"))
+}
+
+/// Decode PNG header dimensions without full rasterization.
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    use image::io::Limits;
+    use image::ImageDecoder;
+    let mut opts = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?;
+    opts.limits(Limits::no_limits());
+    let reader = opts.into_decoder().ok()?;
+    let (w, h) = reader.dimensions();
+    Some((w, h))
+}
+
+fn futures_lite_block<F: std::future::Future<Output = T>, T>(fut: F) -> T {
+    // Block on a tokio runtime handle when available; otherwise spin up a
+    // temporary runtime. This helper is called from blocking CLI paths.
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(fut))
+    } else {
+        tokio::runtime::Runtime::new().unwrap().block_on(fut)
+    }
+}
+
 /// Locate the instance's game window and capture one PNG frame.
 pub fn capture_instance_png(
     instance_name: &str,

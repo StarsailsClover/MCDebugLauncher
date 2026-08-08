@@ -1,155 +1,162 @@
-// TCP protocol client for the MDL companion mod.
+// HTTP client for the Despotes control mod (https://github.com/NDBlockConnect/Despotes).
 //
-// The companion mod runs inside the Minecraft process and exposes a local
-// TCP server (JSON lines protocol). Because input is injected from inside
-// the game process, operations never touch the user's real keyboard/mouse
-// and work regardless of which window has focus.
+// Despotes runs a local HTTP server inside the Minecraft process
+// (127.0.0.1, default port 25585). MDL drives the game through it:
 //
-// Protocol: newline-delimited JSON. MDL sends one request object per line
-// and the mod answers with one response object per line:
+//   POST /despotes/v1/actions   -> key / type / move / look / click / use / screenshot
+//   POST /despotes/v1/query     -> status / screen / inventory / pending
+//   GET  /despotes/v1/screenshot-> binary image (png)
+//   GET  /despotes/v1/status    -> JSON status
 //
-//   -> {"cmd":"key","key":"w","action":"press"}
-//   <- {"status":"ok"}
+// Responses use the envelope:
+//   { "ok": true,  "result": {...} }
+//   { "ok": false, "error": { "code": ..., "message": ... } }
 //
-//   -> {"cmd":"status"}
-//   <- {"status":"ok","in_world":true,"paused":false,...}
-//
-//   <- {"status":"error","message":"unknown key: xyz"}
+// Because Despotes injects input inside the game process, operations never
+// touch the user's real keyboard/mouse and work without window focus.
 
 use anyhow::{Context, Result, bail};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
-
-use super::COMPANION_PORT_FILE;
 
 /// Default timeout for a single command round-trip.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Resolve the companion port for an instance.
+/// Resolve the Despotes HTTP port for an instance.
 ///
-/// The companion mod writes the port it actually bound to
-/// `runtime/agent.port` after startup. We prefer that file; when absent we
-/// fall back to the `mdl.agent.port` JVM property the launcher passed
-/// (stored in `runtime/requested_port` by the launcher), and finally to the
-/// default port.
+/// The launcher passes the port to the game via `-Ddespotes.port` and
+/// records it in `runtime/despotes.port`. When that file is absent we fall
+/// back to the Despotes default port.
 pub async fn resolve_port(instance_dir: &Path) -> Result<u16> {
-    let port_file = instance_dir.join("runtime").join(COMPANION_PORT_FILE);
+    let port_file = instance_dir.join("runtime").join(super::DESPOTES_PORT_FILE);
     if port_file.exists() {
         let content = tokio::fs::read_to_string(&port_file)
             .await
-            .context("Failed to read companion port file")?;
+            .context("Failed to read Despotes port file")?;
         if let Ok(port) = content.trim().parse::<u16>() {
             return Ok(port);
         }
     }
-
-    let requested = instance_dir.join("runtime").join("requested_port");
-    if requested.exists() {
-        if let Ok(content) = tokio::fs::read_to_string(&requested).await {
-            if let Ok(port) = content.trim().parse::<u16>() {
-                return Ok(port);
-            }
-        }
-    }
-
-    Ok(super::DEFAULT_COMPANION_PORT)
+    Ok(super::DEFAULT_DESPOTES_PORT)
 }
 
-/// Check whether the companion mod server is reachable for this instance.
+/// Base URL of the Despotes HTTP server for this instance.
+pub async fn base_url(instance_dir: &Path) -> Result<String> {
+    let port = resolve_port(instance_dir).await?;
+    Ok(format!("http://127.0.0.1:{}", port))
+}
+
+/// Check whether the Despotes control server is reachable for this instance.
 pub async fn is_available(instance_dir: &Path) -> bool {
-    let port = match resolve_port(instance_dir).await {
-        Ok(p) => p,
-        Err(_) => return false,
+    let Ok(url) = base_url(instance_dir).await else {
+        return false;
     };
-    let addr = format!("127.0.0.1:{}", port);
+    let client = crate::util::http::create_http_client().ok();
+    let Some(client) = client else { return false };
     let probe = tokio::time::timeout(
-        Duration::from_millis(750),
-        TcpStream::connect(&addr),
+        Duration::from_millis(1000),
+        client.get(format!("{}/despotes/v1/status", url)).send(),
     )
     .await;
-    matches!(probe, Ok(Ok(_)))
+    matches!(probe, Ok(Ok(resp)) if resp.status().is_success())
 }
 
-/// Send a single command to the companion mod and return the parsed
-/// response. Opens a fresh connection per call — the companion keeps no
-/// session state, so this is safe and keeps each request isolated.
-pub async fn send_command(instance_dir: &Path, command: Value) -> Result<Value> {
-    let port = resolve_port(instance_dir).await?;
-    let addr = format!("127.0.0.1:{}", port);
+async fn post_json(instance_dir: &Path, path: &str, body: &Value) -> Result<Value> {
+    let url = base_url(instance_dir).await?;
+    let full = format!("{}{}", url, path);
 
-    let stream = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(&addr))
+    let client = crate::util::http::create_http_client()?;
+    let response = tokio::time::timeout(
+        DEFAULT_TIMEOUT,
+        client
+            .post(&full)
+            .header("Content-Type", "application/json")
+            .body(body.to_string())
+            .send(),
+    )
+    .await
+    .context("Timeout connecting to Despotes")?
+    .with_context(|| {
+        format!(
+            "Cannot reach the Despotes control server at {}. Is the game \
+             running with Despotes installed?",
+            url
+        )
+    })?;
+
+    if !response.status().is_success() {
+        bail!("Despotes returned HTTP {}", response.status());
+    }
+    let envelope: Value = response
+        .json()
         .await
-        .context("Timeout connecting to companion mod")?
-        .with_context(|| {
-            format!(
-                "Cannot connect to the MDL companion mod at {}. \
-                 The instance may not be running, or the companion mod \
-                 (mdl-agent-companion) is not installed/enabled.",
-                addr
-            )
-        })?;
-    stream.set_nodelay(true)?;
+        .context("Invalid JSON response from Despotes")?;
 
-    let (read_half, mut write_half) = stream.into_split();
-    let mut payload = serde_json::to_string(&command)?;
-    payload.push('\n');
-    write_half.write_all(payload.as_bytes()).await?;
-
-    let mut reader = BufReader::new(read_half);
-    let mut line = String::new();
-
-    let read_result = tokio::time::timeout(DEFAULT_TIMEOUT, reader.read_line(&mut line)).await;
-    let n = match read_result {
-        Ok(Ok(n)) => n,
-        Ok(Err(e)) => return Err(e).context("Failed to read companion response"),
-        Err(_) => bail!("Timeout waiting for companion mod response"),
-    };
-    if n == 0 {
-        bail!("Companion mod closed the connection without responding");
-    }
-
-    let response: Value = serde_json::from_str(line.trim())
-        .context("Invalid JSON response from companion mod")?;
-
-    if response.get("status").and_then(Value::as_str) == Some("error") {
-        let msg = response
-            .get("message")
+    if envelope.get("ok").and_then(Value::as_bool) == Some(false) {
+        let msg = envelope
+            .pointer("/error/message")
             .and_then(Value::as_str)
-            .unwrap_or("unknown companion error");
-        bail!("Companion mod error: {}", msg);
+            .or_else(|| envelope.pointer("/error/code").and_then(Value::as_str))
+            .unwrap_or("unknown Despotes error");
+        bail!("Despotes error: {}", msg);
     }
-    Ok(response)
+    Ok(envelope.get("result").cloned().unwrap_or(json!({})))
+}
+
+async fn send_action(instance_dir: &Path, command: Value) -> Result<Value> {
+    post_json(instance_dir, "/despotes/v1/actions", &command).await
+}
+
+async fn send_query(instance_dir: &Path, query: Value) -> Result<Value> {
+    post_json(instance_dir, "/despotes/v1/query", &query).await
+}
+
+/// Map a friendly MDL key name onto a Minecraft key identifier.
+fn to_mc_key(key: &str) -> String {
+    if key.starts_with("key.") {
+        return key.to_string();
+    }
+    match key.to_ascii_lowercase().as_str() {
+        "space" => "key.keyboard.space".into(),
+        "escape" | "esc" => "key.keyboard.escape".into(),
+        "shift" | "sneak" => "key.keyboard.left.shift".into(),
+        "ctrl" | "sprint" => "key.keyboard.left.ctrl".into(),
+        "enter" | "return" => "key.keyboard.enter".into(),
+        other => format!("key.keyboard.{}", other),
+    }
 }
 
 // ---------------------------------------------------------------------------
 // High-level command helpers
 // ---------------------------------------------------------------------------
 
-/// Query game state from the companion (in-world flag, pause state, screen,
-/// player position, FPS, ...).
+/// Query game state from Despotes (in-game flag, screen, player position,
+/// FPS, window focus, ...).
 pub async fn game_status(instance_dir: &Path) -> Result<Value> {
-    send_command(instance_dir, json!({"cmd": "status"})).await
+    send_query(instance_dir, json!({"type": "status"})).await
 }
 
 /// Press, release, or tap a keyboard key inside the game.
 ///
-/// `key` uses Minecraft/KeyBind names ("w", "a", "space", "escape",
-/// "inventory" (E), ...). `action` is one of press | release | tap.
-/// `hold_ms` only applies to `tap` and sets how long the key stays down.
+/// `key` uses friendly names ("w", "a", "space", "escape", "e", ...) or raw
+/// Minecraft key ids ("key.keyboard.w"). `action` is press | release | tap.
+/// `hold_ms` applies to `tap` (converted to ticks at 20 tps).
 pub async fn key_input(
     instance_dir: &Path,
     key: &str,
     action: &str,
     hold_ms: Option<u64>,
 ) -> Result<Value> {
-    let mut cmd = json!({"cmd": "key", "key": key, "action": action});
+    let mut cmd = json!({
+        "type": "key",
+        "keys": [to_mc_key(key)],
+        "op": action,
+    });
     if let Some(ms) = hold_ms {
-        cmd["hold_ms"] = json!(ms);
+        cmd["holdTicks"] = json!(ms.max(50) / 50);
     }
-    send_command(instance_dir, cmd).await
+    send_action(instance_dir, cmd).await
 }
 
 /// Rotate the player's view to an absolute yaw/pitch (degrees), or adjust
@@ -160,17 +167,22 @@ pub async fn look(
     pitch: f32,
     relative: bool,
 ) -> Result<Value> {
-    send_command(
+    send_action(
         instance_dir,
-        json!({"cmd": "look", "yaw": yaw, "pitch": pitch, "relative": relative}),
+        json!({
+            "type": "look",
+            "mode": if relative { "delta" } else { "absolute" },
+            "yaw": yaw,
+            "pitch": pitch,
+        }),
     )
     .await
 }
 
 /// Perform a mouse action. `button` is left | right | middle; `action` is
-/// press | release | tap; optional `x`/`y` are GUI coordinates (pixels at
-/// the game's GUI scale, origin top-left). When omitted, the game's current
-/// cursor position is used.
+/// press | release | tap. When GUI coordinates `x`/`y` are given, a screen
+/// click is issued; otherwise it maps to world interaction (attack / useItem /
+/// pickBlock) on whatever the crosshair is over.
 pub async fn mouse_input(
     instance_dir: &Path,
     button: &str,
@@ -179,114 +191,176 @@ pub async fn mouse_input(
     y: Option<f64>,
     hold_ms: Option<u64>,
 ) -> Result<Value> {
-    let mut cmd = json!({"cmd": "click", "button": button, "action": action});
-    if let Some(x) = x {
-        cmd["x"] = json!(x);
+    if let (Some(x), Some(y)) = (x, y) {
+        let button_code = match button {
+            "right" => 1,
+            "middle" => 2,
+            _ => 0,
+        };
+        let op = match action {
+            "press" => "press",
+            "release" => "release",
+            _ => "click",
+        };
+        let mut cmd = json!({
+            "type": "click",
+            "x": x,
+            "y": y,
+            "button": button_code,
+            "op": op,
+        });
+        if op == "click" {
+            if let Some(ms) = hold_ms {
+                cmd["holdTicks"] = json!(ms.max(50) / 50);
+            }
+        }
+        return send_action(instance_dir, cmd).await;
     }
-    if let Some(y) = y {
-        cmd["y"] = json!(y);
+
+    // World interaction without coordinates.
+    let what = match button {
+        "right" => "useItem",
+        "middle" => "pickBlock",
+        _ => "attack",
+    };
+    if action == "release" {
+        // No release semantics for world use; treat as a no-op tap.
     }
-    if let Some(ms) = hold_ms {
-        cmd["hold_ms"] = json!(ms);
-    }
-    send_command(instance_dir, cmd).await
+    send_action(
+        instance_dir,
+        json!({ "type": "use", "what": what }),
+    )
+    .await
 }
 
-/// Scroll the mouse wheel by `amount` steps (positive = up/away).
+/// Scroll the hotbar by `amount` steps (positive = up) by selecting the
+/// matching hotbar slot, mirroring the vanilla wheel.
 pub async fn scroll(instance_dir: &Path, amount: f64) -> Result<Value> {
-    send_command(instance_dir, json!({"cmd": "scroll", "amount": amount})).await
+    let inv = send_query(instance_dir, json!({"type": "inventory"})).await?;
+    let current = inv.get("selectedSlot").and_then(Value::as_u64).unwrap_or(0) as i64;
+    let size = 9i64;
+    let delta = -amount.round() as i64; // wheel up (positive) = previous slot
+    let next = ((current + delta).rem_euclid(size)) as u32 + 1;
+    key_input(instance_dir, &next.to_string(), "tap", None).await
 }
 
-/// Send a chat message or server command (leading "/" preserved and
-/// interpreted as a command by the game).
+/// Send a chat message or server command. Leading "/" is interpreted as a
+/// command by the game.
 pub async fn chat(instance_dir: &Path, message: &str) -> Result<Value> {
-    send_command(instance_dir, json!({"cmd": "chat", "message": message})).await
+    send_action(
+        instance_dir,
+        json!({
+            "type": "type",
+            "target": if message.starts_with('/') { "command" } else { "chat" },
+            "text": message,
+            "submit": true,
+        }),
+    )
+    .await
+}
+
+/// Fetch a screenshot from Despotes' in-game framebuffer capture. Returns
+/// the raw PNG bytes.
+#[cfg(any())] // superseded by capture_image below; kept for API parity
+pub async fn _screenshot_raw(instance_dir: &Path) -> Result<Vec<u8>> {
+    capture_image(instance_dir).await
+}
+
+/// Fetch a screenshot (PNG bytes) from the Despotes framebuffer capture.
+pub async fn capture_image(instance_dir: &Path) -> Result<Vec<u8>> {
+    let url = base_url(instance_dir).await?;
+    let client = crate::util::http::create_http_client()?;
+    let response = tokio::time::timeout(
+        DEFAULT_TIMEOUT,
+        client
+            .get(format!("{}/despotes/v1/screenshot", url))
+            .send(),
+    )
+    .await
+    .context("Timeout fetching Despotes screenshot")?
+    .context("Failed to fetch Despotes screenshot")?;
+    if !response.status().is_success() {
+        bail!("Despotes screenshot returned HTTP {}", response.status());
+    }
+    Ok(response.bytes().await?.to_vec())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn test_to_mc_key() {
+        assert_eq!(to_mc_key("w"), "key.keyboard.w");
+        assert_eq!(to_mc_key("space"), "key.keyboard.space");
+        assert_eq!(to_mc_key("escape"), "key.keyboard.escape");
+        assert_eq!(to_mc_key("key.keyboard.e"), "key.keyboard.e");
+        assert_eq!(to_mc_key("1"), "key.keyboard.1");
+    }
 
     #[tokio::test]
-    async fn test_resolve_port_prefers_port_file() {
+    async fn test_resolve_port_default_and_file() {
         let dir = tempfile::tempdir().unwrap();
-        let runtime = dir.path().join("runtime");
-        tokio::fs::create_dir_all(&runtime).await.unwrap();
-
-        // no files -> default
         assert_eq!(
             resolve_port(dir.path()).await.unwrap(),
-            super::super::DEFAULT_COMPANION_PORT
+            super::super::DEFAULT_DESPOTES_PORT
         );
-
-        // requested_port fallback
-        tokio::fs::write(runtime.join("requested_port"), "25591")
-            .await
-            .unwrap();
-        assert_eq!(resolve_port(dir.path()).await.unwrap(), 25591);
-
-        // agent.port wins
-        tokio::fs::write(runtime.join("agent.port"), "25592")
+        let runtime = dir.path().join("runtime");
+        tokio::fs::create_dir_all(&runtime).await.unwrap();
+        tokio::fs::write(runtime.join("despotes.port"), "25592")
             .await
             .unwrap();
         assert_eq!(resolve_port(dir.path()).await.unwrap(), 25592);
     }
 
-    #[tokio::test]
-    async fn test_send_command_error_response() {
-        // Stand up a fake companion that always answers with an error.
+    /// Spin up a one-shot HTTP server that replies with `body` to any POST.
+    async fn one_shot_http(body: &'static str) -> u16 {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             if let Ok((mut socket, _)) = listener.accept().await {
-                let mut line = String::new();
-                let mut reader = BufReader::new(&mut socket);
-                let _ = reader.read_line(&mut line).await;
-                let _ = socket
-                    .write_all(b"{\"status\":\"error\",\"message\":\"test failure\"}\n")
-                    .await;
-            }
-        });
-
-        let dir = tempfile::tempdir().unwrap();
-        let runtime = dir.path().join("runtime");
-        tokio::fs::create_dir_all(&runtime).await.unwrap();
-        tokio::fs::write(runtime.join("agent.port"), port.to_string())
-            .await
-            .unwrap();
-
-        let err = send_command(dir.path(), json!({"cmd":"status"}))
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("test failure"));
-    }
-
-    #[tokio::test]
-    async fn test_send_command_success_response() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut line = String::new();
-                let mut reader = BufReader::new(&mut socket);
-                let _ = reader.read_line(&mut line).await;
+                let mut buf = vec![0u8; 4096];
+                let _ = socket.read(&mut buf).await;
                 let response = format!(
-                    "{{\"status\":\"ok\",\"echo\":{}}}\n",
-                    line.trim()
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
                 );
                 let _ = socket.write_all(response.as_bytes()).await;
             }
         });
+        port
+    }
 
+    #[tokio::test]
+    async fn test_send_action_success_envelope() {
+        let port = one_shot_http(r#"{"ok":true,"result":{"executed":"key"}}"#).await;
         let dir = tempfile::tempdir().unwrap();
         let runtime = dir.path().join("runtime");
         tokio::fs::create_dir_all(&runtime).await.unwrap();
-        tokio::fs::write(runtime.join("agent.port"), port.to_string())
+        tokio::fs::write(runtime.join("despotes.port"), port.to_string())
             .await
             .unwrap();
 
-        let resp = send_command(dir.path(), json!({"cmd":"status"})).await.unwrap();
-        assert_eq!(resp["status"], "ok");
-        assert_eq!(resp["echo"]["cmd"], "status");
+        let resp = key_input(dir.path(), "w", "tap", None).await.unwrap();
+        assert_eq!(resp["executed"], "key");
+    }
+
+    #[tokio::test]
+    async fn test_send_action_error_envelope() {
+        let port = one_shot_http(
+            r#"{"ok":false,"error":{"code":"NOT_IN_GAME","message":"not in game"}}"#,
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = dir.path().join("runtime");
+        tokio::fs::create_dir_all(&runtime).await.unwrap();
+        tokio::fs::write(runtime.join("despotes.port"), port.to_string())
+            .await
+            .unwrap();
+
+        let err = key_input(dir.path(), "w", "tap", None).await.unwrap_err();
+        assert!(err.to_string().contains("not in game"));
     }
 }
