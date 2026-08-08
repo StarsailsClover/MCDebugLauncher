@@ -5,6 +5,29 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.0.0-alpha.8] - 2026-08-09
+
+### Added
+- **Mirror sources with live probing** — built-in Chinese mirror (BMCLAPI) + official; probes are ranked by latency and cached 10 min; every download prefers the best mirror and falls back down the list (flexible source switching).
+- **Chunked parallel downloads** — large artifacts split into 4 parallel HTTP Range chunks when the server supports it; single-shot otherwise; auto-fallback across sources on failure.
+- **Download cache (7-day copy-install)** — downloaded versions/mods/etc. are stored once and instances install a *copy*; entries unused for 7 days are evicted (`mdl cache info` / `mdl cache clean`).
+- **Content search & install** — `mdl search mod|resourcepack|shader <query>` via Modrinth with numbered selection and per-instance install into mods/ / resourcepacks/ / shaderpacks/.
+- **Microsoft account login** — `mdl account login` (OAuth Device Code flow, headless-friendly); `mdl account list`; `mdl account skin` to download the skin PNG / print avatar URL.
+- **Test worlds & auto-entry** — `mdl create --with-test-world` marks the instance; `mdl launch --enter-test-world --wait-ready` enters (or creates) the test world via Despotes once the game broadcasts ready.
+- **JDK customization & dynamic memory/perf** — `--java-path` override; `--memory` explicit or dynamic (half of system RAM, capped 8G); GC chosen by allocation tier (G1 for >=4G).
+- **Aprism JE Native support** — `mdl launch --aprism` detects the applicable Aprism artifact (stable-first / pre-release fallback), downloads+ caches it and attaches `-javaagent:...=aprismVersion=...;mcEdit=JE;mcVersion=...;gameRoot=...`.
+- **Minecraft BE (BDS) support** — `mdl bedrock install|launch` downloads and runs the official Bedrock Dedicated Server for Windows (version probing against the stable link pattern).
+- **dll/exe injector** — `mdl inject <pid|name> --dll <path>` (CreateRemoteThread/LoadLibraryW), groundwork for Aprism BE Native.
+- **Logging** — persistent `<data>/logs/mdl.log` (tee stdout+file), `--log-file` override, and `--lang zh` Chinese launcher messages.
+
+### Added (Alpha 8)
+- **Game-ready broadcast** — the agent server polls Despotes after launch and emits a `game_ready` WebSocket/JSON event when the game finishes booting; `GET /api/v1/game/:instance/ready` reports readiness; `mdl launch --wait-ready` blocks until ready.
+
+### Technical Notes
+- Mirror URL mapping follows the OpenBMCLAPI convention (root/maven/assets).
+- BDS Windows client is UWP-locked; client-side BE support is limited to injection (injector) pending Aprism BE.
+- Microsoft device flow uses the public PrismLauncher client id; re-login required on token expiry (offline_access simplification).
+
 ## [26.0.0-alpha.7] - 2026-08-09
 
 ### Added
