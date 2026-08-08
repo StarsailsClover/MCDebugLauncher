@@ -5,6 +5,28 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.0.0-alpha.7] - 2026-08-09
+
+### Added
+- **Despotes integration (Alpha 7, first slice)** — MDL now detects, downloads and installs the [Despotes](https://github.com/NDBlockConnect/Despotes) control mod, replacing the old bundled companion:
+  - `Latest Release` detection with Pre-Release policy: stable releases are preferred; Pre-Releases require explicit confirmation; when no applicable stable exists, the newest applicable Pre-Release is the fallback candidate.
+  - Asset matching by loader + Minecraft version, covering the v26.0 compatibility matrix (fabric 1.20-1.21.11 / 26.x, etc.).
+  - `mdl create` now lists applicable Despotes packages with numbered selection; non-interactive sessions auto-select the newest stable (pre-releases still need explicit opt-in). New flags: `--no-despotes`, `--despotes-prerelease`.
+  - Downloads are sha256-verified and cached in `<data>/despotes/`; instances install a copy.
+- **Mod Menu auto-install** — Fabric instances now automatically install [ModMenu](https://modrinth.com/mod/modmenu) from Modrinth during creation (best-effort).
+- **Dual-channel screenshots** — `mdl game screenshot` prefers the Despotes in-game framebuffer (works when minimized) and falls back to Windows.Graphics.Capture.
+
+### Changed
+- Game control runtime migrated from the MDL TCP companion to the Despotes HTTP protocol (`/despotes/v1/actions`, `/query`, `/screenshot`). `mdl game ...` and the agent API endpoints are unchanged at the CLI/HTTP surface.
+- Agent launch now passes `-Ddespotes.port` and records `runtime/despotes.port`; the old `mdl.agent.port`/`agent.port` mechanism is removed.
+
+### Removed
+- The bundled `mdl-agent-companion` source tree and local-JAR install path. Use Despotes instead.
+
+### Technical Notes
+- Despotes releases are fetched from the GitHub Releases API (`NDBlockConnect/Despotes`); asset names follow `Despotes-<tag>-<loader>-<mc>.jar`.
+- Remaining Alpha 7 roadmap (mirrors, chunked downloads, mod/resource/shader search, auth, BE, Aprism, cache eviction, etc.) continues in subsequent pre-releases.
+
 ## [26.0.0-alpha.6] - 2026-08-08
 
 ### Added
