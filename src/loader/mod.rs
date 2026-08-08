@@ -6,4 +6,7 @@ pub mod forge;
 pub mod neoforge;
 pub mod quilt;
 pub mod optifine;
+pub mod content;
+pub mod bedrock;
+pub mod aprism;
 
