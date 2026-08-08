@@ -14,6 +14,17 @@ pub fn create_http_client() -> Result<Client> {
         .context("Failed to create HTTP client")
 }
 
+/// HTTP client for large file downloads: much longer overall timeout and no
+/// per-body cap issues (chunked transfer handles very large artifacts).
+pub fn create_download_client() -> Result<Client> {
+    Client::builder()
+        .timeout(Duration::from_secs(600))
+        .connect_timeout(Duration::from_secs(10))
+        .user_agent(format!("MDL/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .context("Failed to create download HTTP client")
+}
+
 /// Fetch JSON from URL
 pub async fn fetch_json<T: serde::de::DeserializeOwned>(url: &str) -> Result<T> {
     let client = create_http_client()?;
