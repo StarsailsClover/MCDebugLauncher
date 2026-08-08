@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use axum::{
-    extract::{State, WebSocketUpgrade},
+    extract::{Path, State, WebSocketUpgrade},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -68,6 +68,66 @@ struct StatusResponse {
     running_instances: HashMap<String, InstanceProcess>,
 }
 
+/// Unified input request for the /game/:instance/input endpoint.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum GameInputRequest {
+    Key {
+        key: String,
+        #[serde(default = "default_action")]
+        action: String,
+        #[serde(default)]
+        hold_ms: Option<u64>,
+    },
+    Look {
+        yaw: f32,
+        pitch: f32,
+        #[serde(default)]
+        relative: bool,
+    },
+    Click {
+        #[serde(default = "default_button")]
+        button: String,
+        #[serde(default = "default_action")]
+        action: String,
+        #[serde(default)]
+        x: Option<f64>,
+        #[serde(default)]
+        y: Option<f64>,
+        #[serde(default)]
+        hold_ms: Option<u64>,
+    },
+    Scroll {
+        amount: f64,
+    },
+    Chat {
+        message: String,
+    },
+}
+
+fn default_action() -> String {
+    "tap".to_string()
+}
+
+fn default_button() -> String {
+    "left".to_string()
+}
+
+/// Screenshot query parameters.
+#[derive(Debug, Deserialize)]
+struct ScreenshotQuery {
+    /// Return base64-encoded PNG inside JSON instead of raw image bytes.
+    #[serde(default)]
+    base64: bool,
+    /// Seconds to wait for a frame (default 5).
+    #[serde(default = "default_timeout")]
+    timeout: u64,
+}
+
+fn default_timeout() -> u64 {
+    5
+}
+
 impl AgentServer {
     pub fn new() -> Self {
         let state = ServerState {
@@ -92,6 +152,11 @@ impl AgentServer {
             .route("/api/v1/status", get(handle_status))
             .route("/api/v1/execute", post(handle_execute))
             .route("/api/v1/events", get(handle_websocket))
+            // Alpha 6 game control endpoints
+            .route("/api/v1/game/windows", get(handle_game_windows))
+            .route("/api/v1/game/:instance/status", get(handle_game_status))
+            .route("/api/v1/game/:instance/screenshot", get(handle_game_screenshot))
+            .route("/api/v1/game/:instance/input", post(handle_game_input))
             .with_state((self.state.clone(), self.event_tx.clone()));
 
         let addr = format!("{}:{}", bind_address, port);
@@ -208,12 +273,204 @@ async fn handle_execute(
     }
 }
 
+/// Check whether a process with `pid` is alive (used for instance monitoring).
+fn pid_alive(pid: u32) -> bool {
+    use sysinfo::System;
+    let mut sys = System::new();
+    sys.refresh_processes();
+    sys.process(sysinfo::Pid::from_u32(pid)).is_some()
+}
+
+/// Resolve an instance's directory by name.
+async fn resolve_instance_dir(instance: &str) -> Result<std::path::PathBuf> {
+    use crate::instance::InstanceManager;
+    let manager = InstanceManager::new()?;
+    let inst = manager.get(instance).await?;
+    Ok(inst.path)
+}
+
+// ---------------------------------------------------------------------------
+// Game control endpoints (Alpha 6)
+// ---------------------------------------------------------------------------
+
+async fn handle_game_windows() -> impl IntoResponse {
+    #[cfg(windows)]
+    {
+        let windows = crate::game::window::list_mdl_windows(&crate::game::window::collect_running_pids());
+        Json(serde_json::json!({
+            "status": "success",
+            "data": { "windows": windows, "count": windows.len() }
+        }))
+        .into_response()
+    }
+    #[cfg(not(windows))]
+    {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": "Game window discovery is currently supported only on Windows"
+            })),
+        )
+            .into_response()
+    }
+}
+
+async fn handle_game_status(Path(instance): Path<String>) -> impl IntoResponse {
+    let dir = match resolve_instance_dir(&instance).await {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+            );
+        }
+    };
+
+    if !crate::game::client::is_available(&dir).await {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": format!(
+                    "Agent control unavailable for '{}'. Launch it with: mdl launch {} --detach --agent",
+                    instance, instance
+                )
+            })),
+        );
+    }
+
+    match crate::game::client::game_status(&dir).await {
+        Ok(response) => (StatusCode::OK, Json(response)),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+        ),
+    }
+}
+
+async fn handle_game_screenshot(
+    Path(instance): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<ScreenshotQuery>,
+) -> impl IntoResponse {
+    #[cfg(not(windows))]
+    {
+        let _ = (instance, query);
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": "Screenshot capture is currently supported only on Windows"
+            })),
+        )
+            .into_response();
+    }
+
+    #[cfg(windows)]
+    {
+        let dir = match resolve_instance_dir(&instance).await {
+            Ok(d) => d,
+            Err(e) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+                )
+                    .into_response();
+            }
+        };
+
+        let pid: Option<u32> = tokio::fs::read_to_string(dir.join("runtime").join("pid"))
+            .await
+            .ok()
+            .and_then(|c| c.trim().parse().ok());
+
+        let start = std::time::Instant::now();
+        match crate::game::capture::capture_instance_png(&instance, pid, query.timeout) {
+            Ok(image) => {
+                let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+                if query.base64 {
+                    use base64::Engine;
+                    let encoded = base64::engine::general_purpose::STANDARD
+                        .encode(&image.png_bytes);
+                    Json(serde_json::json!({
+                        "status": "success",
+                        "data": {
+                            "format": "png",
+                            "width": image.width,
+                            "height": image.height,
+                            "size_bytes": image.png_bytes.len(),
+                            "capture_ms": elapsed_ms,
+                            "base64": encoded
+                        }
+                    }))
+                    .into_response()
+                } else {
+                    let mut response = axum::http::Response::new(axum::body::Body::from(
+                        image.png_bytes,
+                    ));
+                    response.headers_mut().insert(
+                        axum::http::header::CONTENT_TYPE,
+                        axum::http::HeaderValue::from_static("image/png"),
+                    );
+                    response.into_response()
+                }
+            }
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+            )
+                .into_response(),
+        }
+    }
+}
+
+async fn handle_game_input(
+    Path(instance): Path<String>,
+    Json(payload): Json<GameInputRequest>,
+) -> impl IntoResponse {
+    let dir = match resolve_instance_dir(&instance).await {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+            );
+        }
+    };
+
+    let result = match payload {
+        GameInputRequest::Key { key, action, hold_ms } => {
+            crate::game::client::key_input(&dir, &key, &action, hold_ms).await
+        }
+        GameInputRequest::Look { yaw, pitch, relative } => {
+            crate::game::client::look(&dir, yaw, pitch, relative).await
+        }
+        GameInputRequest::Click { button, action, x, y, hold_ms } => {
+            crate::game::client::mouse_input(&dir, &button, &action, x, y, hold_ms).await
+        }
+        GameInputRequest::Scroll { amount } => crate::game::client::scroll(&dir, amount).await,
+        GameInputRequest::Chat { message } => crate::game::client::chat(&dir, &message).await,
+    };
+
+    match result {
+        Ok(response) => (StatusCode::OK, Json(response)),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Command execution
+// ---------------------------------------------------------------------------
+
 async fn execute_command(
     command: &str,
     args: &[String],
-    _options: &HashMap<String, String>,
+    options: &HashMap<String, String>,
     event_tx: broadcast::Sender<ServerEvent>,
-    _state: Arc<RwLock<ServerState>>,
+    state: Arc<RwLock<ServerState>>,
 ) -> Result<(String, Option<serde_json::Value>)> {
     use crate::instance::InstanceManager;
 
@@ -293,17 +550,43 @@ async fn execute_command(
 
             let name = &args[0];
 
+            // Build launch options from the request's options map. The agent
+            // API always launches detached: the HTTP call returns as soon as
+            // the game process starts, reporting its real PID. The previous
+            // implementation blocked until the game exited and reported pid 0.
+            let mut launch_options = crate::instance::launcher::LaunchOptions::default();
+            launch_options.detach = true;
+            if let Some(username) = options.get("username") {
+                launch_options.username = Some(username.clone());
+            }
+            if let Some(server) = options.get("server") {
+                launch_options.server = Some(server.clone());
+            }
+            if options.get("fullscreen").map(|v| v == "true").unwrap_or(false) {
+                launch_options.fullscreen = true;
+            }
+            if let Some(w) = options.get("width").and_then(|v| v.parse().ok()) {
+                launch_options.width = Some(w);
+            }
+            if let Some(h) = options.get("height").and_then(|v| v.parse().ok()) {
+                launch_options.height = Some(h);
+            }
+            if options.get("agent").map(|v| v == "true").unwrap_or(false) {
+                launch_options.agent = true;
+            }
+            if let Some(port) = options.get("agent-port").and_then(|v| v.parse().ok()) {
+                launch_options.agent_port = Some(port);
+            }
+
             // Send launch started event
             let _ = event_tx.send(ServerEvent::LaunchStarted {
                 instance: name.to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             });
 
-            // Launch the instance
             let manager = InstanceManager::new()?;
             let _instance = manager.get(name).await?;
 
-            // Send progress events during launch
             let _ = event_tx.send(ServerEvent::LaunchProgress {
                 instance: name.to_string(),
                 stage: "preparing".to_string(),
@@ -322,22 +605,55 @@ async fn execute_command(
                 timestamp: chrono::Utc::now().to_rfc3339(),
             });
 
-            match launcher.launch(&name, &crate::instance::launcher::LaunchOptions::default()).await {
-                Ok(_) => {
-                    // Note: Current launcher.launch() returns (), not a process handle
-                    // For now we'll report success without PID
+            match launcher.launch(name, &launch_options).await {
+                Ok(outcome) => {
                     let _ = event_tx.send(ServerEvent::LaunchCompleted {
                         instance: name.to_string(),
-                        pid: 0,
+                        pid: outcome.pid,
                         timestamp: chrono::Utc::now().to_rfc3339(),
+                    });
+
+                    // Track the running instance and emit instance_stopped
+                    // when the game process exits.
+                    {
+                        let mut s = state.write().await;
+                        s.running_instances.insert(
+                            name.to_string(),
+                            InstanceProcess {
+                                pid: outcome.pid,
+                                started: chrono::Utc::now().to_rfc3339(),
+                            },
+                        );
+                    }
+                    let monitor_state = state.clone();
+                    let monitor_tx = event_tx.clone();
+                    let monitor_name = name.to_string();
+                    let monitor_pid = outcome.pid;
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            if !pid_alive(monitor_pid) {
+                                let mut s = monitor_state.write().await;
+                                s.running_instances.remove(&monitor_name);
+                                let _ = monitor_tx.send(ServerEvent::InstanceStopped {
+                                    instance: monitor_name,
+                                    exit_code: None,
+                                    timestamp: chrono::Utc::now().to_rfc3339(),
+                                });
+                                break;
+                            }
+                        }
                     });
 
                     let data = serde_json::json!({
                         "instance": name,
-                        "status": "launched"
+                        "status": "launched",
+                        "pid": outcome.pid,
+                        "detached": outcome.detached,
+                        "agent": launch_options.agent
                     });
 
-                    Ok((format!("Instance '{}' launched", name), Some(data)))
+                    Ok((format!("Instance '{}' launched (PID {})", name, outcome.pid), Some(data)))
                 }
                 Err(e) => {
                     let _ = event_tx.send(ServerEvent::LaunchFailed {
