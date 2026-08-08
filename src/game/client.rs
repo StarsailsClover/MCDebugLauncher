@@ -23,6 +23,17 @@ use std::time::Duration;
 /// Default timeout for a single command round-trip.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// HTTP client for the *local* Despotes control channel. Never routes through
+/// a system proxy (a proxy would break loopback control and tests).
+fn local_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(DEFAULT_TIMEOUT)
+        .connect_timeout(Duration::from_secs(3))
+        .build()
+        .context("Failed to create local HTTP client")
+}
+
 /// Resolve the Despotes HTTP port for an instance.
 ///
 /// The launcher passes the port to the game via `-Ddespotes.port` and
@@ -52,8 +63,10 @@ pub async fn is_available(instance_dir: &Path) -> bool {
     let Ok(url) = base_url(instance_dir).await else {
         return false;
     };
-    let client = crate::util::http::create_http_client().ok();
-    let Some(client) = client else { return false };
+    let client = match local_client() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
     let probe = tokio::time::timeout(
         Duration::from_millis(1000),
         client.get(format!("{}/despotes/v1/status", url)).send(),
@@ -66,7 +79,7 @@ async fn post_json(instance_dir: &Path, path: &str, body: &Value) -> Result<Valu
     let url = base_url(instance_dir).await?;
     let full = format!("{}{}", url, path);
 
-    let client = crate::util::http::create_http_client()?;
+    let client = local_client()?;
     let response = tokio::time::timeout(
         DEFAULT_TIMEOUT,
         client
@@ -269,7 +282,7 @@ pub async fn _screenshot_raw(instance_dir: &Path) -> Result<Vec<u8>> {
 /// Fetch a screenshot (PNG bytes) from the Despotes framebuffer capture.
 pub async fn capture_image(instance_dir: &Path) -> Result<Vec<u8>> {
     let url = base_url(instance_dir).await?;
-    let client = crate::util::http::create_http_client()?;
+    let client = local_client()?;
     let response = tokio::time::timeout(
         DEFAULT_TIMEOUT,
         client
