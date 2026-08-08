@@ -8,6 +8,7 @@ use std::time::Duration;
 pub fn create_http_client() -> Result<Client> {
     Client::builder()
         .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
         .user_agent(format!("MDL/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .context("Failed to create HTTP client")

@@ -10,6 +10,7 @@ mod loader;
 mod instance;
 mod diagnostic;
 mod agent;
+mod game;
 mod util;
 
 #[derive(Parser)]
@@ -158,6 +159,111 @@ enum ConfigCommands {
 }
 
 #[derive(Subcommand)]
+enum GameCommands {
+    /// Query the game state via the companion mod (in-world, pause, screen, ...)
+    Status {
+        /// Instance name
+        instance: String,
+    },
+
+    /// Capture a screenshot of the game window (works while unfocused)
+    Screenshot {
+        /// Instance name
+        instance: String,
+
+        /// Output file path (PNG). Defaults to screenshots/<instance>_<timestamp>.png
+        #[arg(short, long)]
+        output: Option<String>,
+
+        /// Seconds to wait for a captured frame (default 5)
+        #[arg(long, default_value = "5")]
+        timeout: u64,
+    },
+
+    /// Press, release, or tap a key inside the game (e.g. w, space, escape, inventory)
+    Key {
+        /// Instance name
+        instance: String,
+
+        /// Key name (Minecraft keybind name, e.g. w, space, escape, inventory)
+        key: String,
+
+        /// Action: press, release, or tap
+        #[arg(short, long, default_value = "tap")]
+        action: String,
+
+        /// Hold duration in ms (for tap)
+        #[arg(long)]
+        hold_ms: Option<u64>,
+    },
+
+    /// Rotate the player's view (absolute yaw/pitch in degrees, or relative)
+    Look {
+        /// Instance name
+        instance: String,
+
+        /// Yaw in degrees
+        #[arg(long)]
+        yaw: f32,
+
+        /// Pitch in degrees
+        #[arg(long)]
+        pitch: f32,
+
+        /// Treat yaw/pitch as deltas relative to the current rotation
+        #[arg(long)]
+        relative: bool,
+    },
+
+    /// Perform a mouse action (left/right/middle click) in the game
+    Click {
+        /// Instance name
+        instance: String,
+
+        /// Mouse button: left, right, middle
+        #[arg(short, long, default_value = "left")]
+        button: String,
+
+        /// Action: press, release, or tap
+        #[arg(short, long, default_value = "tap")]
+        action: String,
+
+        /// GUI x coordinate (optional; uses current cursor position when omitted)
+        #[arg(long)]
+        x: Option<f64>,
+
+        /// GUI y coordinate (optional; uses current cursor position when omitted)
+        #[arg(long)]
+        y: Option<f64>,
+
+        /// Hold duration in ms (for tap)
+        #[arg(long)]
+        hold_ms: Option<u64>,
+    },
+
+    /// Scroll the mouse wheel (positive = up)
+    Scroll {
+        /// Instance name
+        instance: String,
+
+        /// Scroll amount in steps (negative scrolls down)
+        amount: f64,
+    },
+
+    /// Send a chat message or /command to the game
+    Chat {
+        /// Instance name
+        instance: String,
+
+        /// Message or command (leading "/" is treated as a command)
+        message: String,
+    },
+
+    /// List MDL game windows visible for capture
+    Windows,
+}
+
+#[derive(Subcommand)]
 enum Commands {
     /// Manage Minecraft versions
     Versions {
@@ -242,9 +348,19 @@ enum Commands {
         #[arg(long)]
         height: Option<u32>,
 
-        /// Run in background
+        /// Run in background: return immediately after the game starts.
+        /// Output goes to logs/launch_detached.log.
         #[arg(long)]
         detach: bool,
+
+        /// Enable agent control: installs the MDL companion mod (Fabric/Quilt),
+        /// disables pause-on-lost-focus, and starts the in-game control server.
+        #[arg(long)]
+        agent: bool,
+
+        /// TCP port for the agent control server (default 25590)
+        #[arg(long)]
+        agent_port: Option<u16>,
     },
 
     /// Diagnose instance issues
@@ -296,6 +412,10 @@ enum Commands {
     /// Manage world backups
     #[command(subcommand)]
     Backup(BackupCommands),
+
+    /// Observe and control a running game instance (Alpha 6 agent features)
+    #[command(subcommand)]
+    Game(GameCommands),
 
     /// Delete an instance
     Delete {
@@ -370,8 +490,8 @@ async fn main() -> Result<()> {
         Commands::List => {
             cmd_list(&cli.format).await?;
         }
-        Commands::Launch { name, username, server, fullscreen, width, height, detach } => {
-            cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach).await?;
+        Commands::Launch { name, username, server, fullscreen, width, height, detach, agent, agent_port } => {
+            cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach, agent, agent_port).await?;
         }
         Commands::Diagnose { name, export, analyze } => {
             cmd_diagnose(&name, export.as_deref(), analyze).await?;
@@ -433,6 +553,34 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Game(game_cmd) => {
+            match game_cmd {
+                GameCommands::Status { instance } => {
+                    cmd_game_status(&cli.format, &instance).await?;
+                }
+                GameCommands::Screenshot { instance, output, timeout } => {
+                    cmd_game_screenshot(&instance, output.as_deref(), timeout).await?;
+                }
+                GameCommands::Key { instance, key, action, hold_ms } => {
+                    cmd_game_key(&instance, &key, &action, hold_ms).await?;
+                }
+                GameCommands::Look { instance, yaw, pitch, relative } => {
+                    cmd_game_look(&instance, yaw, pitch, relative).await?;
+                }
+                GameCommands::Click { instance, button, action, x, y, hold_ms } => {
+                    cmd_game_click(&instance, &button, &action, x, y, hold_ms).await?;
+                }
+                GameCommands::Scroll { instance, amount } => {
+                    cmd_game_scroll(&instance, amount).await?;
+                }
+                GameCommands::Chat { instance, message } => {
+                    cmd_game_chat(&instance, &message).await?;
+                }
+                GameCommands::Windows => {
+                    cmd_game_windows(&cli.format)?;
+                }
+            }
+        }
         Commands::Delete { name } => {
             cmd_delete(&name).await?;
         }
@@ -454,7 +602,11 @@ async fn main() -> Result<()> {
     // the last thing the user sees. Non-JSON output only, to keep machine-
     // readable output clean.
     if cli.format != "json" {
-        if let Ok(Some(info)) = update_check.await {
+        // Hard-cap the wait: a slow or blocked network (e.g. unreachable
+        // GitHub API) must never hang the command. The check itself keeps
+        // running in the background until process exit.
+        let update_info = tokio::time::timeout(std::time::Duration::from_secs(8), update_check).await;
+        if let Ok(Ok(Some(info))) = update_info {
             eprintln!(
                 "\nA new version of MCDebugLauncher is available: {} -> {}\nDownload: {}\n",
                 info.current, info.latest, info.url
@@ -462,7 +614,11 @@ async fn main() -> Result<()> {
         }
     }
 
-    Ok(())
+    // Every code path above surfaces errors by terminating early, so
+    // reaching this point always means success. Exit explicitly so the
+    // orphaned background update-check thread (possibly blocked in a slow
+    // DNS/network call) can never keep the process alive.
+    std::process::exit(0);
 }
 
 // Command implementations
@@ -639,7 +795,7 @@ async fn cmd_list(format: &str) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_launch(name: &str, username: Option<&str>, server: Option<&str>, fullscreen: bool, width: Option<u32>, height: Option<u32>, _detach: bool) -> Result<()> {
+async fn cmd_launch(name: &str, username: Option<&str>, server: Option<&str>, fullscreen: bool, width: Option<u32>, height: Option<u32>, detach: bool, agent: bool, agent_port: Option<u16>) -> Result<()> {
     use instance::{InstanceLauncher, launcher::LaunchOptions};
 
     let options = LaunchOptions {
@@ -648,10 +804,21 @@ async fn cmd_launch(name: &str, username: Option<&str>, server: Option<&str>, fu
         fullscreen,
         width,
         height,
+        detach,
+        agent,
+        agent_port,
     };
 
     let launcher = InstanceLauncher::new()?;
-    launcher.launch(name, &options).await?;
+    let outcome = launcher.launch(name, &options).await?;
+
+    if outcome.detached {
+        println!("Instance '{}' launched in background (PID {})", name, outcome.pid);
+        println!("  Game log: <instance>/logs/launch_detached.log");
+        if agent {
+            println!("  Agent control: companion mod installing; use 'mdl game status {}' once in-game", name);
+        }
+    }
 
     Ok(())
 }
@@ -1282,4 +1449,158 @@ async fn cmd_setup() -> Result<()> {
     println!("You can now use 'mdl' from any terminal window.");
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Game control commands (Alpha 6)
+// ---------------------------------------------------------------------------
+
+/// Resolve the on-disk directory of an instance by name.
+async fn resolve_instance_dir(instance: &str) -> Result<std::path::PathBuf> {
+    use instance::InstanceManager;
+    let manager = InstanceManager::new()?;
+    let inst = manager.get(instance).await?;
+    Ok(inst.path)
+}
+
+fn print_game_response(response: &serde_json::Value) {
+    println!("{}", serde_json::to_string_pretty(response).unwrap_or_default());
+}
+
+async fn cmd_game_status(format: &str, instance: &str) -> Result<()> {
+    let dir = resolve_instance_dir(instance).await?;
+
+    if !game::client::is_available(&dir).await {
+        anyhow::bail!(
+            "Agent control is not available for instance '{}'.              The game must be running with the MDL companion mod installed.              Launch it with: mdl launch {} --detach --agent",
+            instance, instance
+        );
+    }
+
+    let response = game::client::game_status(&dir).await?;
+    if format == "json" {
+        print_game_response(&response);
+    } else {
+        print_game_response(&response);
+    }
+    Ok(())
+}
+
+async fn cmd_game_screenshot(instance: &str, output: Option<&str>, timeout: u64) -> Result<()> {
+    #[cfg(not(windows))]
+    {
+        let _ = (instance, output, timeout);
+        anyhow::bail!("Game screenshot capture is currently supported only on Windows");
+    }
+
+    #[cfg(windows)]
+    {
+        let dir = resolve_instance_dir(instance).await?;
+
+        info!("Capturing screenshot of instance '{}'...", instance);
+        let start = std::time::Instant::now();
+
+        // Read the instance PID (if running) to prefer the right window when
+        // several instances share the title prefix.
+        let pid: Option<u32> = tokio::fs::read_to_string(dir.join("runtime").join("pid"))
+            .await
+            .ok()
+            .and_then(|c| c.trim().parse().ok());
+
+        let image = game::capture::capture_instance_png(instance, pid, timeout)?;
+        let elapsed = start.elapsed();
+
+        let out_path = match output {
+            Some(p) => std::path::PathBuf::from(p),
+            None => {
+                let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+                let name = format!("{}_{}.png", instance, ts);
+                std::env::current_dir()?.join(name)
+            }
+        };
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&out_path, &image.png_bytes)?;
+
+        println!(
+            "Screenshot saved: {} ({}x{}, {:.0} ms)",
+            out_path.display(),
+            image.width,
+            image.height,
+            elapsed.as_secs_f64() * 1000.0
+        );
+        Ok(())
+    }
+}
+
+async fn cmd_game_key(instance: &str, key: &str, action: &str, hold_ms: Option<u64>) -> Result<()> {
+    let dir = resolve_instance_dir(instance).await?;
+    let response = game::client::key_input(&dir, key, action, hold_ms).await?;
+    print_game_response(&response);
+    Ok(())
+}
+
+async fn cmd_game_look(instance: &str, yaw: f32, pitch: f32, relative: bool) -> Result<()> {
+    let dir = resolve_instance_dir(instance).await?;
+    let response = game::client::look(&dir, yaw, pitch, relative).await?;
+    print_game_response(&response);
+    Ok(())
+}
+
+async fn cmd_game_click(instance: &str, button: &str, action: &str, x: Option<f64>, y: Option<f64>, hold_ms: Option<u64>) -> Result<()> {
+    let dir = resolve_instance_dir(instance).await?;
+    let response = game::client::mouse_input(&dir, button, action, x, y, hold_ms).await?;
+    print_game_response(&response);
+    Ok(())
+}
+
+async fn cmd_game_scroll(instance: &str, amount: f64) -> Result<()> {
+    let dir = resolve_instance_dir(instance).await?;
+    let response = game::client::scroll(&dir, amount).await?;
+    print_game_response(&response);
+    Ok(())
+}
+
+async fn cmd_game_chat(instance: &str, message: &str) -> Result<()> {
+    let dir = resolve_instance_dir(instance).await?;
+    let response = game::client::chat(&dir, message).await?;
+    print_game_response(&response);
+    Ok(())
+}
+
+fn cmd_game_windows(format: &str) -> Result<()> {
+    #[cfg(not(windows))]
+    {
+        let _ = format;
+        anyhow::bail!("Game window discovery is currently supported only on Windows");
+    }
+
+    #[cfg(windows)]
+    {
+        let windows = game::window::list_mdl_windows(&game::window::collect_running_pids());
+        if format == "json" {
+            let json = serde_json::json!({
+                "status": "success",
+                "data": { "windows": windows, "count": windows.len() }
+            });
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        } else if windows.is_empty() {
+            println!("No MDL game windows found");
+        } else {
+            println!("INSTANCE        PID         SIZE          TITLE");
+            println!("{}", "-".repeat(64));
+            for w in &windows {
+                println!(
+                    "{:<15} {:<11} {:>4}x{:<6}  {}",
+                    w.instance,
+                    w.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+                    w.width,
+                    w.height,
+                    w.title
+                );
+            }
+        }
+        Ok(())
+    }
 }

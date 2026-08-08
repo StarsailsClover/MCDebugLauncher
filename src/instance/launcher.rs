@@ -261,6 +261,25 @@ pub struct LaunchOptions {
     pub width: Option<u32>,
     /// Window height in pixels
     pub height: Option<u32>,
+    /// Return immediately after spawning the game process instead of waiting
+    /// for it to exit. Required for agent workflows and the agent API.
+    pub detach: bool,
+    /// Enable agent control: installs the MDL companion mod (Fabric),
+    /// passes the control-server port to the game via a JVM property, and
+    /// disables pause-on-lost-focus so the game keeps running while the
+    /// user focuses other applications.
+    pub agent: bool,
+    /// TCP port for the companion control server (default 25590).
+    pub agent_port: Option<u16>,
+}
+
+/// Result of a successful launch.
+#[derive(Debug)]
+pub struct LaunchOutcome {
+    /// Process ID of the spawned game (java) process.
+    pub pid: u32,
+    /// True when the launcher returned without waiting for the game to exit.
+    pub detached: bool,
 }
 
 pub struct InstanceLauncher {
@@ -298,7 +317,7 @@ impl InstanceLauncher {
         Ok(Self { java_path: java_runtime.path })
     }
 
-    pub async fn launch(&self, name: &str, options: &LaunchOptions) -> Result<()> {
+    pub async fn launch(&self, name: &str, options: &LaunchOptions) -> Result<LaunchOutcome> {
         let instances_dir = crate::util::paths::get_instances_dir()?;
         let instance_dir = instances_dir.join(name);
 
@@ -314,11 +333,21 @@ impl InstanceLauncher {
         // lock, even if an error is returned early.
         let result = self.do_launch(name, &instance_dir, options).await;
 
-        release_launch_lock(&lock_path).await;
+        match &result {
+            Ok(outcome) if outcome.detached => {
+                // Detached: transfer the lock to the game process so the
+                // single-instance guarantee holds after this launcher
+                // returns. The lock becomes stale once the game exits.
+                if let Err(e) = fs::write(&lock_path, outcome.pid.to_string()).await {
+                    tracing::warn!("Failed to transfer launch lock to game process: {}", e);
+                }
+            }
+            _ => release_launch_lock(&lock_path).await,
+        }
         result
     }
 
-    async fn do_launch(&self, name: &str, instance_dir: &Path, options: &LaunchOptions) -> Result<()> {
+    async fn do_launch(&self, name: &str, instance_dir: &Path, options: &LaunchOptions) -> Result<LaunchOutcome> {
         let config_path = instance_dir.join("instance.json");
         let config_data = fs::read_to_string(&config_path).await?;
         let config: InstanceConfig = serde_json::from_str(&config_data)?;
@@ -366,6 +395,45 @@ impl InstanceLauncher {
         let libraries_dir = crate::util::paths::get_libraries_cache_dir()?;
         let (loader_jvm_args, loader_game_args) = self.load_loader_args(&version_dir, &config, &libraries_dir).await?;
 
+        // Agent mode (Alpha 6): prepare the instance for programmatic control.
+        // 1. Install the companion mod (in-process input injection) for Fabric.
+        // 2. Force pauseOnLostFocus:false so the game keeps running while the
+        //    user focuses other apps — a hard requirement for agent control.
+        // 3. Record the requested control port for post-launch discovery.
+        let agent_port = options.agent_port.unwrap_or(crate::game::DEFAULT_COMPANION_PORT);
+        if options.agent {
+            let loader_type = config.loader.as_ref().map(|l| l.loader_type.as_str());
+            match loader_type {
+                Some("fabric") | Some("quilt") => {
+                    match crate::game::install::install(instance_dir).await {
+                        Ok(jar) => tracing::info!("Agent control enabled via companion mod: {}", jar),
+                        Err(e) => tracing::warn!(
+                            "Agent control requested but companion mod unavailable: {}. \
+                             The game will launch without in-game control support.",
+                            e
+                        ),
+                    }
+                }
+                other => tracing::warn!(
+                    "Agent control requires a Fabric or Quilt instance, but this instance uses '{}'. \
+                     Screenshots remain available; in-game input is not.",
+                    other.unwrap_or("vanilla")
+                ),
+            }
+            match crate::game::options::ensure_no_pause_on_lost_focus(instance_dir) {
+                Ok(true) => tracing::info!("Set pauseOnLostFocus:false (game keeps running when unfocused)"),
+                Ok(false) => tracing::debug!("pauseOnLostFocus already disabled"),
+                Err(e) => tracing::warn!("Failed to set pauseOnLostFocus: {}", e),
+            }
+            // Remove stale port file from a previous run; the companion mod
+            // rewrites it once its control server is accepting connections.
+            let stale = instance_dir.join("runtime").join(crate::game::COMPANION_PORT_FILE);
+            let _ = fs::remove_file(&stale).await;
+            let runtime_dir = instance_dir.join("runtime");
+            fs::create_dir_all(&runtime_dir).await?;
+            fs::write(runtime_dir.join("requested_port"), agent_port.to_string()).await?;
+        }
+
         // Enumerate installed mods and display them before launch so the
         // operator can confirm the test context. Also sets the console window
         // title to "MDL: <instance> [mod1, mod2, ...]" for easy identification.
@@ -390,6 +458,15 @@ impl InstanceLauncher {
         cmd.arg("-Xmx2G");
         cmd.arg("-Xms512M");
         cmd.arg(format!("-Djava.library.path={}", natives_dir.display()));
+        if options.agent {
+            // Hand the control-server port to the companion mod via a JVM
+            // system property. The mod binds this port (or falls back to an
+            // ephemeral one) and reports the actual port in runtime/agent.port.
+            cmd.arg(format!("-D{}={}", crate::game::COMPANION_PORT_PROPERTY, agent_port));
+            // Tell the companion to treat the window as always focused so
+            // injected input keeps working while the user focuses other apps.
+            cmd.arg("-Dmdl.agent.keepFocus=true");
+        }
 
         if !loader_jvm_args.is_empty() {
             // Use loader-provided JVM args (NeoForge: includes correct -p, --add-opens, DlibraryDirectory, etc.)
@@ -423,8 +500,24 @@ impl InstanceLauncher {
         self.add_game_arguments(&mut cmd, &config, &version_metadata, &game_dir, &assets_dir, &main_class, &version_dir, &loader_game_args, &window_title, options)?;
 
         cmd.current_dir(&game_dir);
-        cmd.stdout(Stdio::inherit());
-        cmd.stderr(Stdio::inherit());
+        // In detached mode the game outlives this launcher process, so its
+        // output cannot inherit the launcher console. Redirect stdout/stderr
+        // into a launch log file instead. In attached mode keep inheriting so
+        // the operator sees live game output as before.
+        let log_file = if options.detach {
+            let log_dir = instance_dir.join("logs");
+            tokio::fs::create_dir_all(&log_dir).await?;
+            let path = log_dir.join("launch_detached.log");
+            let file = std::fs::File::create(&path)
+                .with_context(|| format!("Failed to create launch log {}", path.display()))?;
+            cmd.stdout(file.try_clone()?);
+            cmd.stderr(file);
+            Some(path)
+        } else {
+            cmd.stdout(Stdio::inherit());
+            cmd.stderr(Stdio::inherit());
+            None
+        };
 
         tracing::info!("Starting Minecraft...");
         tracing::debug!("Command: {:?}", cmd);
@@ -438,6 +531,16 @@ impl InstanceLauncher {
         let pid_file = pid_dir.join("pid");
         tokio::fs::write(&pid_file, pid.to_string()).await?;
 
+        if options.detach {
+            // Return immediately; the game keeps running in the background.
+            // The launch lock was transferred to the game process in launch().
+            if let Some(log) = log_file {
+                tracing::info!("Game output is being written to {}", log.display());
+            }
+            tracing::info!("Instance '{}' launched in background (PID {})", name, pid);
+            return Ok(LaunchOutcome { pid, detached: true });
+        }
+
         let status = child.wait().context("Failed to wait for Minecraft process")?;
 
         // Clean up PID file when process exits
@@ -449,7 +552,7 @@ impl InstanceLauncher {
         }
 
         tracing::info!("Minecraft closed successfully");
-        Ok(())
+        Ok(LaunchOutcome { pid, detached: false })
     }
 
     async fn build_classpath(&self, version_dir: &Path, config: &InstanceConfig) -> Result<(String, String, Vec<String>)> {
