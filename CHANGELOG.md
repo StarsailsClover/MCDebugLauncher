@@ -5,6 +5,31 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.0.0-alpha.6] - 2026-08-08
+
+### Added
+- **Agent Game Control (highlight)** — the agent can now observe and operate a running Minecraft instance without touching the user's keyboard/mouse or stealing window focus:
+  - **High-performance screenshots** via Windows.Graphics.Capture: GPU-accelerated per-window capture that works while the game is unfocused, occluded, or in the background (764 ms round-trip in testing). New `mdl game screenshot <instance>` and `GET /api/v1/game/:instance/screenshot` (raw PNG or `?base64=true` JSON).
+  - **In-game input injection** via the new `mdl-agent-companion` Fabric mod (bundled with MDL, auto-installed on `--agent` launch): keys (`mdl game key`), view rotation (`mdl game look`), mouse/GUI clicks (`mdl game click`), hotbar scroll (`mdl game scroll`), chat/commands (`mdl game chat`) — plus `POST /api/v1/game/:instance/input`. Verified end-to-end: menu navigation, world entry, movement and look all work while the user's focus stays in other apps.
+  - **Game state queries** (`mdl game status`, `GET /api/v1/game/:instance/status`): in-world flag, pause state, screen, player position/rotation.
+  - **No-pause-while-multitasking**: agent launches automatically set `pauseOnLostFocus:false` and pass `mdl.agent.keepFocus=true`, so the game never shows the pause menu when the user focuses another application.
+  - New `mdl game windows` and `GET /api/v1/game/windows` to list MDL game windows visible for capture.
+- **Detached launching** — `mdl launch <instance> --detach` now actually works: returns immediately with the real PID, game output goes to `logs/launch_detached.log`. The launch lock is transferred to the game process so the single-instance guarantee still holds.
+- `--agent` / `--agent-port` launch options.
+
+### Changed
+- Agent API `launch` command is no longer blocking: it launches detached and returns the real PID immediately (previously the HTTP request hung until the game exited and reported PID 0). The server now tracks running instances and emits `instance_stopped` events.
+- Game window discovery is PID-first (titles are unreliable — some clients ignore `--title`), with title-prefix matching as fallback.
+
+### Fixed
+- CLI commands could hang for minutes at exit on machines where the background GitHub update check hits an unresponsive network path; the check is now hard-capped and the process exits explicitly.
+- HTTP client gained a connect timeout so slow networks fail fast instead of blocking.
+
+### Technical Notes
+- Companion mod protocol v1 over a local TCP socket (JSON lines, 127.0.0.1 only, default port 25590). The bound port is reported via `runtime/agent.port`.
+- The companion is shipped as `mdl-agent-companion-1.0.0.jar` alongside the launcher and is installed into Fabric/Quilt instances at agent launch.
+- Input works without focus because the companion injects through Minecraft's own keybinding/screen systems on the client thread, and the keepFocus Mixin defeats the game's internal focus gating.
+
 ## [26.0.0-alpha.5.1] - 2026-08-01
 
 ### Fixed
