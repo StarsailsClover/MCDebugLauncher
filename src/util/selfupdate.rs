@@ -17,11 +17,26 @@ pub async fn check_for_update() -> Result<Option<String>> {
         .send()
         .await?;
 
-    if !response.status().is_success() {
+    let release: serde_json::Value = if response.status().is_success() {
+        response.json().await?
+    } else if response.status().as_u16() == 404 {
+        // No stable "latest" release exists — fall back to the newest release
+        // (including Pre-Releases), matching the project's release policy.
+        let list = client
+            .get("https://api.github.com/repos/StarsailsClover/MCDebugLauncher/releases?per_page=10")
+            .send()
+            .await?;
+        if !list.status().is_success() {
+            anyhow::bail!("Failed to fetch latest release: {}", list.status());
+        }
+        let releases: Vec<serde_json::Value> = list.json().await?;
+        releases
+            .into_iter()
+            .next()
+            .context("No releases found")?
+    } else {
         anyhow::bail!("Failed to fetch latest release: {}", response.status());
-    }
-
-    let release: serde_json::Value = response.json().await?;
+    };
 
     let latest_version = release["tag_name"]
         .as_str()
