@@ -648,6 +648,8 @@ async fn main() -> Result<()> {
     // Language for launcher messages (en default, zh via --lang zh / MDL_LANG)
     let lang = std::env::var("MDL_LANG").unwrap_or_else(|_| cli.lang.clone());
     util::i18n::set_lang(&lang);
+    // Windows: force UTF-8 console output so Chinese logs are not garbled.
+    util::i18n::enable_utf8_console();
 
     // Setup logging
     let log_level = if cli.quiet {
