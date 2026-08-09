@@ -448,6 +448,40 @@ impl InstanceLauncher {
             fs::write(runtime_dir.join(crate::game::DESPOTES_PORT_FILE), agent_port.to_string()).await?;
         }
 
+        // Fabric instances: ensure Fabric API is present before launch. The
+        // create-time install is best-effort (warns on failure), so a failure
+        // there — or a user removing the file — leaves the instance without
+        // it, and most Fabric mods then refuse to load ("Fabric API not
+        // installed"). Detect and repair it here so launches are resilient.
+        if config.loader.as_ref().map(|l| l.loader_type.as_str()) == Some("fabric") {
+            let mods_dir_probe = instance_dir.join("mods");
+            let has_fabric_api = std::fs::read_dir(&mods_dir_probe)
+                .map(|entries| {
+                    entries.flatten().any(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .to_lowercase()
+                            .contains("fabric-api")
+                    })
+                })
+                .unwrap_or(false);
+            if !has_fabric_api {
+                tracing::warn!("Fabric API missing from mods/ - downloading it before launch...");
+                match crate::loader::fabric::FabricInstaller::install_fabric_api(
+                    &version_metadata.id,
+                    &mods_dir_probe,
+                )
+                .await
+                {
+                    Ok(()) => tracing::info!("Fabric API installed"),
+                    Err(e) => tracing::warn!(
+                        "Could not auto-install Fabric API: {} (mods may fail to load)",
+                        e
+                    ),
+                }
+            }
+        }
+
         // Enumerate installed mods and display them before launch so the
         // operator can confirm the test context. Also sets the console window
         // title to "MDL: <instance> [mod1, mod2, ...]" for easy identification.
