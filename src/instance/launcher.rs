@@ -23,7 +23,7 @@ use crate::version::manifest::VersionMetadata;
 /// Acquire the global launch lock, blocking (polling) if another MDL-managed
 /// instance is already running. Returns the path to the lock file so the
 /// caller can release it with `release_launch_lock`.
-async fn acquire_launch_lock() -> Result<PathBuf> {
+async fn acquire_launch_lock(no_queue: bool) -> Result<Option<PathBuf>> {
     let lock_path = crate::util::paths::get_data_dir()?.join("launching.lock");
     let mut waiting_logged = false;
 
@@ -33,10 +33,18 @@ async fn acquire_launch_lock() -> Result<PathBuf> {
             if let Ok(content) = fs::read_to_string(&lock_path).await {
                 if let Ok(pid) = content.trim().parse::<u32>() {
                     if is_pid_running(pid) {
+                        if no_queue {
+                            // Queueing disabled: launch in parallel without
+                            // touching the existing lock.
+                            tracing::info!(
+                                "Another instance is running (PID {}), but --no-queue was                                  given - launching in parallel without queueing.",
+                                pid
+                            );
+                            return Ok(None);
+                        }
                         if !waiting_logged {
                             tracing::info!(
-                                "Another instance is already running (PID {}). \
-                                 Waiting for it to close...",
+                                "Another instance is already running (PID {}).                                  Waiting for it to close...",
                                 pid
                             );
                             waiting_logged = true;
@@ -44,7 +52,7 @@ async fn acquire_launch_lock() -> Result<PathBuf> {
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                         continue;
                     }
-                    // Stale lock from a crashed process — remove it.
+                    // Stale lock from a crashed process - remove it.
                     tracing::debug!("Removing stale launch lock (PID {} not running)", pid);
                 }
             }
@@ -57,7 +65,7 @@ async fn acquire_launch_lock() -> Result<PathBuf> {
         }
         fs::write(&lock_path, our_pid.to_string()).await
             .context("Failed to write launch lock file")?;
-        return Ok(lock_path);
+        return Ok(Some(lock_path));
     }
 }
 
@@ -283,6 +291,8 @@ pub struct LaunchOptions {
     pub enter_test_world: bool,
     /// Block until the game broadcasts ready (agent mode).
     pub wait_ready: bool,
+    /// Skip the instance queue: launch even if another instance is running.
+    pub no_queue: bool,
 }
 
 /// Result of a successful launch.
@@ -337,24 +347,23 @@ impl InstanceLauncher {
             anyhow::bail!("Instance '{}' does not exist", name);
         }
 
-        // Acquire the global launch lock. Blocks (with a log message) if another
-        // MDL-managed instance is already running, then proceeds when it exits.
-        let lock_path = acquire_launch_lock().await?;
+        let lock_path = acquire_launch_lock(options.no_queue).await?;
 
-        // Run the actual launch inside a closure so we can always release the
-        // lock, even if an error is returned early.
+        // Run the actual launch; then handle the lock depending on outcome.
         let result = self.do_launch(name, &instance_dir, options).await;
 
-        match &result {
-            Ok(outcome) if outcome.detached => {
-                // Detached: transfer the lock to the game process so the
-                // single-instance guarantee holds after this launcher
-                // returns. The lock becomes stale once the game exits.
-                if let Err(e) = fs::write(&lock_path, outcome.pid.to_string()).await {
-                    tracing::warn!("Failed to transfer launch lock to game process: {}", e);
+        if let Some(lp) = &lock_path {
+            match &result {
+                Ok(outcome) if outcome.detached => {
+                    // Detached: transfer the lock to the game process so the
+                    // single-instance guarantee holds after this launcher
+                    // returns. The lock becomes stale once the game exits.
+                    if let Err(e) = fs::write(lp, outcome.pid.to_string()).await {
+                        tracing::warn!("Failed to transfer launch lock to game process: {}", e);
+                    }
                 }
+                _ => release_launch_lock(lp).await,
             }
-            _ => release_launch_lock(&lock_path).await,
         }
         result
     }

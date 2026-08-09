@@ -455,6 +455,10 @@ enum Commands {
         #[arg(long)]
         detach: bool,
 
+        /// Skip the instance queue: launch even if another instance is running.
+        #[arg(long)]
+        no_queue: bool,
+
         /// Enable agent control via Despotes (must be installed in the instance),
         /// disables pause-on-lost-focus, and starts the in-game control server.
         #[arg(long)]
@@ -702,8 +706,8 @@ async fn main() -> Result<()> {
         Commands::List => {
             cmd_list(&cli.format).await?;
         }
-        Commands::Launch { name, username, server, fullscreen, width, height, detach, agent, agent_port, java_path, memory, dynamic_memory, aprism, enter_test_world, wait_ready } => {
-            cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach, agent, agent_port, java_path.as_deref(), memory.as_deref(), dynamic_memory, aprism, enter_test_world, wait_ready).await?;
+        Commands::Launch { name, username, server, fullscreen, width, height, detach, no_queue, agent, agent_port, java_path, memory, dynamic_memory, aprism, enter_test_world, wait_ready } => {
+            cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach, no_queue, agent, agent_port, java_path.as_deref(), memory.as_deref(), dynamic_memory, aprism, enter_test_world, wait_ready).await?;
         }
         Commands::Diagnose { name, export, analyze } => {
             cmd_diagnose(&name, export.as_deref(), analyze).await?;
@@ -1055,6 +1059,7 @@ async fn cmd_launch(
     width: Option<u32>,
     height: Option<u32>,
     detach: bool,
+    no_queue: bool,
     agent: bool,
     agent_port: Option<u16>,
     java_path: Option<&str>,
@@ -1081,6 +1086,7 @@ async fn cmd_launch(
         aprism,
         enter_test_world,
         wait_ready,
+        no_queue,
     };
 
     let launcher = InstanceLauncher::new()?;
