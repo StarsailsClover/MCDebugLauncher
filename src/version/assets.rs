@@ -35,15 +35,15 @@ fn resources_base_url() -> String {
 const MAX_CONCURRENT_DOWNLOADS: usize = 16;
 
 #[derive(Debug, Deserialize)]
-struct AssetIndexFile {
-    objects: HashMap<String, AssetObject>,
+pub struct AssetIndexFile {
+    pub objects: HashMap<String, AssetObject>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-struct AssetObject {
-    hash: String,
+pub struct AssetObject {
+    pub hash: String,
     #[allow(dead_code)]
-    size: u64,
+    pub size: u64,
 }
 
 /// Download the asset index and every referenced object into `assets_dir`.

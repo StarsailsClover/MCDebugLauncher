@@ -413,8 +413,39 @@ impl InstanceLauncher {
         // they are missing the game launches with no textures and logs
         // "Can't open the resource index file". This is idempotent and only
         // fetches what is missing.
+        // Pre-launch integrity check (Alpha 8.1): verify the client JAR and
+        // libraries against their sha1 checksums and re-download anything
+        // corrupted, so a damaged cache self-heals instead of breaking launch.
+        let libraries_dir_verify = crate::util::paths::get_libraries_cache_dir()?;
+        match crate::instance::verify::verify_and_repair_core_files(
+            self,
+            &version_dir,
+            &version_metadata,
+            &libraries_dir_verify,
+        )
+        .await
+        {
+            Ok(n) => {
+                if n > 0 {
+                    tracing::info!("Integrity check repaired {} file(s)", n);
+                }
+            }
+            Err(e) => tracing::warn!("Integrity check failed (continuing): {}", e),
+        }
+
         if let Some(asset_index) = &version_metadata.asset_index {
             tracing::info!("Verifying game assets...");
+            // Verify asset objects once per index id (removes corrupt objects),
+            // then download whatever is missing. Both steps are idempotent.
+            if let Err(e) = crate::instance::verify::verify_assets(
+                &assets_dir,
+                &asset_index.id,
+                &asset_index.url,
+            )
+            .await
+            {
+                tracing::warn!("Asset verification failed (continuing): {}", e);
+            }
             crate::version::assets::download_assets(asset_index, &assets_dir).await?;
         }
 
@@ -978,7 +1009,7 @@ impl InstanceLauncher {
         Ok((classpath, main_class, module_path_entries))
     }
 
-    async fn download_library(&self, url: &str, path: &Path, expected_sha1: &str) -> Result<()> {
+    pub async fn download_library(&self, url: &str, path: &Path, expected_sha1: &str) -> Result<()> {
         use crate::version::downloader::download_file;
 
         // Create parent directory
@@ -1050,7 +1081,7 @@ impl InstanceLauncher {
         )
     }
 
-    fn get_library_path_from_name(&self, name: &str, libraries_dir: &Path) -> PathBuf {
+    pub fn get_library_path_from_name(&self, name: &str, libraries_dir: &Path) -> PathBuf {
         let parts: Vec<&str> = name.split(':').collect();
         if parts.len() < 3 {
             return libraries_dir.join(name);
@@ -1152,7 +1183,7 @@ impl InstanceLauncher {
         Some(format!("{}-{}", mc_version, neoform_version))
     }
 
-    fn check_rules(&self, rules: &[Rule]) -> bool {
+    pub fn check_rules(&self, rules: &[Rule]) -> bool {
         let os_name = std::env::consts::OS;
 
         for rule in rules {
