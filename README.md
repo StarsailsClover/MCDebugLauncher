@@ -7,32 +7,45 @@ A command-line Minecraft launcher designed for rapid testing, mod development, a
 ## Features
 
 - **One-Command Launch**: Install and launch any Minecraft version with any mod loader in a single command
-- **Multi-Loader Support**: Vanilla, Forge, NeoForge, Fabric, Quilt, LegacyFabric, OptiFine
-- **Intelligent Diagnostics**: Automatic crash report collection, log analysis, and error detection
-- **Agent-Friendly**: JSON-structured output for AI agents and automation tools
-- **Developer Tools**: Debug logging, performance profiling, headless mode support
-- **Instance Isolation**: Independent instances with separate mods, configs, and Java versions
-- **Automatic Java Detection**: Detects Java version requirements and provides upgrade instructions
-- **Instance Management**: Mod management, configuration import/export, world backup/restore
-- **Enterprise-Grade**: Production-ready code quality with comprehensive error handling
+- **Multi-Loader Support**: Vanilla, Forge, NeoForge, Fabric, Quilt, LegacyFabric, OptiFine, Aprism JE Native
+- **Agent Game Control (Despotes)**: Observe and operate a running game without stealing focus — GPU screenshots (Windows.Graphics.Capture + in-game framebuffer), input injection (keys/mouse/look/chat), status queries; the game keeps running while you focus other apps (`pauseOnLostFocus` handled automatically)
+- **Modrinth Modpack Import**: `mdl import` creates the instance with the pack's exact version/loader, copies overrides and auto-completes every missing file (sha1-verified, idempotent)
+- **Java Edition Dedicated Servers**: `mdl server create/launch/stop` downloads the official server.jar, manages eula/properties and runs servers in the background
+- **Mirrors & Resilient Downloads**: built-in official + Chinese mirror sources with live latency probing, chunked (HTTP Range) parallel downloads, automatic source switching, sha1-verified 7-day copy-install cache
+- **Content Search & Install**: search and install mods / resource packs / shaders from Modrinth with one command
+- **Microsoft Accounts**: device-code login (headless-friendly), account list, skin download
+- **Integrity & Self-Repair**: pre-launch verification of client JAR, libraries and assets with automatic re-download of corrupted files; Fabric API auto-install at launch
+- **Intelligent Diagnostics**: automatic crash report collection, log analysis, and error detection
+- **Agent-Friendly**: JSON-structured output, HTTP/WebSocket agent server with launch progress and game-ready events
+- **Instance Management**: mod management, configuration import/export, world backup/restore, optional launch queue (`--no-queue`)
+- **Chinese Localization**: `--lang zh` messages and UTF-8 console output on Windows
 
 ## Quick Start
 
 ```bash
-# Create and launch a Fabric instance
+# Create and launch a Fabric instance (Fabric API + ModMenu installed automatically)
 mdl create my-instance --mc-version 1.21.1 --loader fabric
 mdl launch my-instance
 
-# Manage mods
+# Import a Modrinth modpack (.mrpack) with auto-completion
+mdl import my-pack ./cool-pack.mrpack
+
+# Search and install content
+mdl search mod sodium --mc-version 1.21.1 --loader fabric --instance my-instance
+
+# Launch in the background with agent control, wait for the game-ready broadcast
+mdl launch my-instance --detach --agent --wait-ready
+mdl game status my-instance
+mdl game screenshot my-instance --output shot.png
+
+# Java Edition dedicated server
+mdl server create my-server --mc-version 1.21.4
+mdl server launch my-server
+mdl server stop my-server
+
+# Manage mods / backups / diagnostics
 mdl mod list my-instance
-mdl mod install my-instance fabric-api-0.92.0.jar
-
-# Backup and restore worlds
 mdl backup create my-instance world1
-mdl backup list my-instance
-mdl backup restore my-instance world1_20260727_120000
-
-# View logs and diagnostics
 mdl logs my-instance --follow
 mdl diagnose my-instance --analyze
 ```
@@ -78,22 +91,23 @@ See [docs/specification.md](docs/specification.md) for complete API documentatio
 
 ## Status
 
-**Current Version**: v26.0 Alpha 4
+**Current Version**: v26.0 Alpha 8.1
 
-- ✅ Phase 1: CLI framework and version management
-- ✅ Phase 2: Instance management and Fabric loader
-- ✅ Phase 3: Launch functionality with full library support
-- ✅ Phase 4: Diagnostics and log analysis
-- ✅ Phase 5: Agent API server with WebSocket events
-- ✅ Phase 6: Forge mod loader support
-- ✅ Phase 7: NeoForge, Quilt, and OptiFine support
-- ✅ Alpha 4: Mod management, configuration management, world backup/restore
+- ✅ CLI framework, version management, instance management
+- ✅ Forge / NeoForge / Fabric / Quilt / OptiFine loaders
+- ✅ Diagnostics, log analysis, agent HTTP/WebSocket server
+- ✅ Alpha 5: mod/config/backup management, self-update
+- ✅ Alpha 6: agent game control (screenshots, input injection, focus-free play)
+- ✅ Alpha 7: Despotes integration, mirrors + chunked downloads + cache, Modrinth search, Microsoft login, Aprism JE, Bedrock Dedicated Server, dll injector
+- ✅ Alpha 8: game-ready broadcast, pre-launch integrity verification, Fabric API auto-repair, --no-queue, UTF-8 console fixes
+- ✅ Alpha 8.1: Modrinth modpack import (auto-completion), JE dedicated servers, startup update digest, detached-spawn handle-leak fix
 
 **Tested Configurations:**
-- Vanilla Minecraft 1.21.1 ✅
-- Fabric Loader 0.19.3 ✅
-- Forge 52.1.2 ✅
-- NeoForge 21.1.x ✅
+- Vanilla Minecraft 1.21.x ✅
+- Fabric Loader + Fabric API ✅
+- Forge 52.x / NeoForge 21.x ✅
+- Bedrock Dedicated Server 1.26.x ✅
+- JE Dedicated Server 1.21.4 ✅
 
 ## Contributing
 

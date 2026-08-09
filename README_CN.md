@@ -7,32 +7,45 @@
 ## 特性
 
 - **单命令启动**: 单条命令安装并启动任意 Minecraft 版本和任意 Mod 加载器
-- **多加载器支持**: Vanilla、Forge、NeoForge、Fabric、Quilt、LegacyFabric、OptiFine
+- **多加载器支持**: Vanilla、Forge、NeoForge、Fabric、Quilt、LegacyFabric、OptiFine、Aprism JE Native
+- **Agent 游戏操控（Despotes）**: 不抢占焦点地观察与操控运行中的游戏——GPU 截图（Windows.Graphics.Capture + 游戏内帧缓冲）、输入注入（按键/鼠标/视角/聊天）、状态查询；切到别的应用游戏仍继续运行（自动处理 `pauseOnLostFocus`）
+- **Modrinth 整合包导入**: `mdl import` 按整合包声明的版本/加载器创建实例，复制 overrides 并自动补全所有缺失文件（sha1 校验、幂等）
+- **JE 专用服务器**: `mdl server create/launch/stop` 下载官方 server.jar、管理 eula/properties、后台运行
+- **镜像与可靠下载**: 内置官方 + 国内镜像源实时测活、分块并行下载、自动换源、sha1 校验的 7 天副本安装缓存
+- **内容搜索安装**: 一条命令从 Modrinth 搜索并安装 mod/资源包/光影
+- **微软账号**: 设备码登录（无头友好）、账号列表、皮肤下载
+- **完整性与自修复**: 启动前校验客户端 JAR、库与资源文件，损坏自动重新下载；启动时自动补装 Fabric API
 - **智能诊断**: 自动崩溃报告收集、日志分析和错误检测
-- **代理友好**: 为 AI 代理和自动化工具提供 JSON 结构化输出
-- **开发者工具**: 调试日志、性能分析、无头模式支持
-- **实例隔离**: 独立实例，拥有独立的 mod、配置和 Java 版本
-- **自动 Java 检测**: 检测 Java 版本要求并提供升级指引
-- **实例管理**: Mod 管理、配置导入导出、世界备份恢复
-- **企业级规范**: 生产级代码质量与全面的错误处理
+- **代理友好**: JSON 结构化输出，内置带启动进度与游戏就绪事件的 HTTP/WebSocket 服务器
+- **实例管理**: Mod 管理、配置导入导出、世界备份恢复、可选启动队列（`--no-queue`）
+- **中文本地化**: `--lang zh` 消息与 Windows UTF-8 控制台输出
 
 ## 快速开始
 
 ```bash
-# 创建并启动 Fabric 实例
+# 创建并启动 Fabric 实例（自动安装 Fabric API + ModMenu）
 mdl create my-instance --mc-version 1.21.1 --loader fabric
 mdl launch my-instance
 
-# 管理 mod
+# 导入 Modrinth 整合包（.mrpack）自动补全
+mdl import my-pack ./cool-pack.mrpack
+
+# 搜索并安装内容
+mdl search mod sodium --mc-version 1.21.1 --loader fabric --instance my-instance
+
+# 后台带 agent 控制启动，等待游戏就绪广播
+mdl launch my-instance --detach --agent --wait-ready
+mdl game status my-instance
+mdl game screenshot my-instance --output shot.png
+
+# JE 专用服务器
+mdl server create my-server --mc-version 1.21.4
+mdl server launch my-server
+mdl server stop my-server
+
+# Mod / 备份 / 诊断管理
 mdl mod list my-instance
-mdl mod install my-instance fabric-api-0.92.0.jar
-
-# 备份和恢复世界
 mdl backup create my-instance world1
-mdl backup list my-instance
-mdl backup restore my-instance world1_20260727_120000
-
-# 查看日志和诊断信息
 mdl logs my-instance --follow
 mdl diagnose my-instance --analyze
 ```
@@ -78,22 +91,23 @@ async def listen():
 
 ## 状态
 
-**当前版本**: v26.0 Alpha 4
+**当前版本**: v26.0 Alpha 8.1
 
-- ✅ Phase 1: CLI 框架和版本管理
-- ✅ Phase 2: 实例管理和 Fabric 加载器
-- ✅ Phase 3: 启动功能与完整库支持
-- ✅ Phase 4: 诊断和日志分析
-- ✅ Phase 5: Agent API 服务器与 WebSocket 事件
-- ✅ Phase 6: Forge mod 加载器支持
-- ✅ Phase 7: NeoForge、Quilt 和 OptiFine 支持
-- ✅ Alpha 4: Mod 管理、配置管理、世界备份恢复
+- ✅ CLI 框架、版本管理、实例管理
+- ✅ Forge / NeoForge / Fabric / Quilt / OptiFine 加载器
+- ✅ 诊断、日志分析、agent HTTP/WebSocket 服务器
+- ✅ Alpha 5: mod/配置/备份管理、自更新
+- ✅ Alpha 6: agent 游戏操控（截图、输入注入、免焦点游玩）
+- ✅ Alpha 7: Despotes 集成、镜像+分块下载+缓存、Modrinth 搜索、微软登录、Aprism JE、基岩版专用服、dll 注入器
+- ✅ Alpha 8: 游戏就绪广播、启动前完整性校验、Fabric API 自修复、--no-queue、UTF-8 控制台修复
+- ✅ Alpha 8.1: Modrinth 整合包导入（自动补全）、JE 专用服务器、启动更新纲要、detach 句柄泄漏修复
 
 **已测试配置：**
-- Vanilla Minecraft 1.21.1 ✅
-- Fabric Loader 0.19.3 ✅
-- Forge 52.1.2 ✅
-- NeoForge 21.1.x ✅
+- Vanilla Minecraft 1.21.x ✅
+- Fabric Loader + Fabric API ✅
+- Forge 52.x / NeoForge 21.x ✅
+- 基岩版专用服 1.26.x ✅
+- JE 专用服 1.21.4 ✅
 
 ## 贡献
 

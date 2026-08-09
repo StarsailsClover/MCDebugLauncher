@@ -5,6 +5,20 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.0.0-alpha.8.1] - 2026-08-10
+
+### Added
+- **Modrinth modpack import** — `mdl import <name> <pack.mrpack>` parses `modrinth.index.json`, creates the instance with the pack's exact Minecraft version and loader, copies `overrides/` into the instance, then auto-completes every indexed file (sha1-verified download, skipped when already intact — fully idempotent). Zip-slip paths are rejected. `--no-download` imports structure only.
+- **Java Edition dedicated servers** — `mdl server create|list|launch|stop|status`: downloads the official server.jar (sha1-verified) from the version manifest, writes `eula.txt` and a default `server.properties`, launches detached with PID tracking, background log at `<server>/server.log`, and stops via taskkill. Supports JSON output for agents.
+- **Startup update digest** — every MDL run now prints the four most recent version digests (parsed from the CHANGELOG embedded at build time) so returning users see what changed; suppressed under `--format json` to keep machine-readable output clean.
+
+### Fixed
+- **Detached spawn pipe-handle leak (UX)** — on Windows the launcher's stdout/stderr handles were inherited by detached children (game and server processes), keeping the caller's pipe open so `mdl launch --detach` / `mdl server launch` appeared to hang until the game exited. The launcher now clears the inherit flags and creates detached children with `DETACHED_PROCESS`, so both commands return immediately. This also applies to the existing client `--detach` path.
+
+### Changed
+- Fabric instances additionally benefit from the launch-time Fabric API repair introduced in Alpha 8 (verified working end-to-end in 8.1).
+- README rewritten to reflect Alpha 5–8.1 capabilities (modpack import, servers, agent control, mirrors, accounts).
+
 ## [26.0.0-alpha.8] - 2026-08-09
 
 ### Added
