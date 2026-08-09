@@ -1,5 +1,0 @@
-# Gradle / Loom build artifacts
-build/
-.gradle/
-run/
-out/
