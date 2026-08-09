@@ -9,4 +9,6 @@ pub mod optifine;
 pub mod content;
 pub mod bedrock;
 pub mod aprism;
+pub mod modpack;
+pub mod server;
 

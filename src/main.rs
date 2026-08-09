@@ -354,6 +354,41 @@ enum CacheCommands {
 }
 
 #[derive(Subcommand)]
+enum ServerCommands {
+    /// Create a managed Java Edition dedicated server (downloads server.jar)
+    Create {
+        /// Server name
+        name: String,
+        /// Minecraft version (e.g. 1.21.4, release)
+        #[arg(long, default_value = "release")]
+        mc_version: String,
+        /// Max memory allocation (e.g. 4G)
+        #[arg(short, long)]
+        memory: Option<String>,
+    },
+    /// List managed servers
+    List,
+    /// Launch a server (background by default)
+    Launch {
+        /// Server name
+        name: String,
+        /// Run attached (foreground, blocks until the server exits)
+        #[arg(long)]
+        attach: bool,
+    },
+    /// Stop a running server
+    Stop {
+        /// Server name
+        name: String,
+    },
+    /// Show server status (running PID, version)
+    Status {
+        /// Server name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum Commands {
     /// Manage Minecraft versions
     Versions {
@@ -563,6 +598,22 @@ enum Commands {
     #[command(subcommand)]
     Cache(CacheCommands),
 
+    /// Import a Modrinth modpack (.mrpack): create the instance, copy
+    /// overrides and auto-download every missing file (pack auto-completion)
+    Import {
+        /// New instance name
+        name: String,
+        /// Path to the .mrpack file (or a Modrinth project slug/version URL)
+        pack: String,
+        /// Skip the file download step (only create instance + overrides)
+        #[arg(long)]
+        no_download: bool,
+    },
+
+    /// Java Edition dedicated server management (create/launch/stop)
+    #[command(subcommand)]
+    Server(ServerCommands),
+
     /// Inject a DLL into a running process (Aprism BE groundwork)
     Inject {
         /// Target PID or process name (e.g. Minecraft.Windows.exe)
@@ -691,6 +742,9 @@ async fn main() -> Result<()> {
     // Kick off a best-effort GitHub update check concurrently with the command.
     // It is throttled by an on-disk cache and never blocks or fails the command.
     let update_check = tokio::spawn(util::update::check_for_update());
+
+    // Alpha 8.1: show the four most recent version digests at startup.
+    util::changelog::print_recent_updates(cli.format == "json");
 
     // Execute command
     match cli.command {
@@ -823,6 +877,20 @@ async fn main() -> Result<()> {
         Commands::Cache(cc) => match cc {
             CacheCommands::Info => { cmd_cache_info(); }
             CacheCommands::Clean { days } => { cmd_cache_clean(days); }
+        },
+        Commands::Import { name, pack, no_download } => {
+            cmd_import(&name, &pack, no_download).await?;
+        }
+        Commands::Server(sc) => match sc {
+            ServerCommands::Create { name, mc_version, memory } => {
+                cmd_server_create(&name, &mc_version, memory.as_deref()).await?;
+            }
+            ServerCommands::List => { cmd_server_list(&cli.format); }
+            ServerCommands::Launch { name, attach } => {
+                cmd_server_launch(&name, attach).await?;
+            }
+            ServerCommands::Stop { name } => { cmd_server_stop(&name).await?; }
+            ServerCommands::Status { name } => { cmd_server_status(&cli.format, &name); }
         },
         Commands::Inject { target, dll } => { cmd_inject(&target, &dll).await?; }
         Commands::Agent { port, bind } => {
@@ -2241,4 +2309,135 @@ async fn cmd_inject(target: &str, dll: &str) -> Result<()> {
     util::injector::inject_dll(pid, std::path::Path::new(dll))?;
     println!("Injected {} into PID {}", dll, pid);
     Ok(())
+}
+
+
+// ---------- Alpha 8.1: modpack import ----------
+
+async fn cmd_import(name: &str, pack: &str, no_download: bool) -> Result<()> {
+    use instance::{InstanceManager, config::{InstanceConfig, LoaderConfig}};
+
+    let pack_path = std::path::PathBuf::from(pack);
+    if !pack_path.exists() {
+        anyhow::bail!("Modpack file not found: {}", pack);
+    }
+
+    // Parse the pack index to learn the required game version + loader.
+    let index = loader::modpack::read_pack_index(&pack_path)?;
+    let mc_version = index.minecraft_version()
+        .ok_or_else(|| anyhow::anyhow!("Pack does not declare a Minecraft version"))?
+        .to_string();
+    let loader = index.loader();
+
+    println!("Modpack: {} ({})", index.name, index.version_id);
+    println!("  Minecraft: {}  Loader: {}", mc_version, loader.map(|(t, v)| format!("{} {}", t, v)).unwrap_or_else(|| "none".into()));
+
+    // Create the instance with the pack's exact version + loader.
+    let config = InstanceConfig {
+        name: name.to_string(),
+        version: mc_version.clone(),
+        loader: loader.map(|(t, v)| LoaderConfig {
+            loader_type: t.to_string(),
+            version: v.to_string(),
+        }),
+    };
+    let manager = InstanceManager::new()?;
+    let instance = manager.create(config, true).await?;
+
+    // Copy overrides into the instance.
+    let copied = loader::modpack::extract_overrides(&pack_path, &instance.path)?;
+    println!("Overrides: {} file(s) copied", copied);
+
+    // Auto-completion: download every indexed file (idempotent).
+    if no_download {
+        println!("Skipped file downloads (--no-download). Run again without it to complete the pack.");
+    } else {
+        let (installed, skipped) = loader::modpack::download_pack_files(&index, &instance.path).await?;
+        println!("Pack files: {} installed, {} already present", installed, skipped);
+    }
+
+    println!("Instance '{}' imported from modpack. Launch it with: mdl launch {}", name, name);
+    Ok(())
+}
+
+// ---------- Alpha 8.1: JE dedicated server ----------
+
+async fn cmd_server_create(name: &str, mc_version: &str, memory: Option<&str>) -> Result<()> {
+    let dir = loader::server::create_server(name, mc_version, memory).await?;
+    println!("Server '{}' created at {}", name, dir.display());
+    println!("  Start it with: mdl server launch {}   (add --attach for foreground)", name);
+    Ok(())
+}
+
+fn cmd_server_list(format: &str) {
+    let servers = loader::server::list_servers().unwrap_or_default();
+    if format == "json" {
+        let rows: Vec<serde_json::Value> = servers.iter().map(|s| {
+            let dir = s.dir().ok();
+            let pid = dir.as_deref().and_then(loader::server::running_pid);
+            serde_json::json!({
+                "name": s.name,
+                "version": s.version,
+                "memory": s.memory,
+                "running": pid.is_some(),
+                "pid": pid,
+            })
+        }).collect();
+        println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_default());
+        return;
+    }
+    if servers.is_empty() {
+        println!("No servers. Create one with: mdl server create <name> --mc-version <ver>");
+        return;
+    }
+    for s in &servers {
+        let running = s.dir().ok().and_then(|d| loader::server::running_pid(&d));
+        match running {
+            Some(pid) => println!("  {}  (Minecraft {}, PID {}) [running]", s.name, s.version, pid),
+            None => println!("  {}  (Minecraft {})", s.name, s.version),
+        }
+    }
+}
+
+async fn cmd_server_launch(name: &str, attach: bool) -> Result<()> {
+    let info = loader::server::load_server(name)?;
+    let pid = loader::server::launch_server(&info, !attach).await?;
+    if !attach {
+        println!("Server '{}' running in background (PID {})", name, pid);
+        println!("  Log: {}/server.log", info.dir()?.display());
+    }
+    Ok(())
+}
+
+async fn cmd_server_stop(name: &str) -> Result<()> {
+    let info = loader::server::load_server(name)?;
+    loader::server::stop_server(&info).await?;
+    println!("Server '{}' stopped", name);
+    Ok(())
+}
+
+fn cmd_server_status(format: &str, name: &str) {
+    let info = match loader::server::load_server(name) {
+        Ok(i) => i,
+        Err(e) => { eprintln!("Error: {}", e); return; }
+    };
+    let dir = info.dir().ok();
+    let pid = dir.as_deref().and_then(loader::server::running_pid);
+    if format == "json" {
+        println!("{}", serde_json::json!({
+            "name": info.name,
+            "version": info.version,
+            "memory": info.memory,
+            "running": pid.is_some(),
+            "pid": pid,
+            "dir": dir.map(|d| d.display().to_string()),
+        }));
+        return;
+    }
+    println!("Server: {} (Minecraft {})", info.name, info.version);
+    if let Some(dir) = &dir { println!("  Directory: {}", dir.display()); }
+    match pid {
+        Some(p) => println!("  Status: running (PID {})", p),
+        None => println!("  Status: stopped"),
+    }
 }

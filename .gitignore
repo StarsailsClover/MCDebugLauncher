@@ -36,3 +36,6 @@ memory/
 examples/
 forge-*.log
 launch.log
+
+# Session migration data (Cherry Studio)
+.cherry_migration/
