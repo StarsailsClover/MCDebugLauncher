@@ -590,9 +590,7 @@ async fn execute_command(
             let name = &args[0];
 
             // Build launch options from the request's options map. The agent
-            // API always launches detached: the HTTP call returns as soon as
-            // the game process starts, reporting its real PID. The previous
-            // implementation blocked until the game exited and reported pid 0.
+            // API always launches detached.
             let mut launch_options = crate::instance::launcher::LaunchOptions::default();
             launch_options.detach = true;
             if let Some(username) = options.get("username") {
@@ -616,128 +614,151 @@ async fn execute_command(
             if let Some(port) = options.get("agent-port").and_then(|v| v.parse().ok()) {
                 launch_options.agent_port = Some(port);
             }
+            if options.get("no-queue").map(|v| v == "true").unwrap_or(false) {
+                launch_options.no_queue = true;
+            }
 
-            // Send launch started event
+            // Validate the instance exists before handing off.
+            let manager = InstanceManager::new()?;
+            let _instance = manager.get(name).await?;
+
+            // Send launch started event.
             let _ = event_tx.send(ServerEvent::LaunchStarted {
                 instance: name.to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
             });
 
-            let manager = InstanceManager::new()?;
-            let _instance = manager.get(name).await?;
+            // Alpha 8.1: the launch preparation (library verification, asset
+            // checks, Java resolution, downloads) can take minutes on slow
+            // networks. Previously the HTTP request waited for all of it and
+            // clients hit request timeouts. The launch now runs as a
+            // background task: this call returns immediately with
+            // status "launching", and the real outcome is delivered via the
+            // launch_progress / launch_completed / launch_failed events
+            // (WebSocket stream).
+            let launch_agent = launch_options.agent;
+            let launch_name = name.to_string();
+            let launch_state = state.clone();
+            let launch_tx = event_tx.clone();
+            tokio::spawn(async move {
+                let _ = launch_tx.send(ServerEvent::LaunchProgress {
+                    instance: launch_name.clone(),
+                    stage: "preparing".to_string(),
+                    progress: 0.1,
+                    message: "Loading instance configuration".to_string(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                });
 
-            let _ = event_tx.send(ServerEvent::LaunchProgress {
-                instance: name.to_string(),
-                stage: "preparing".to_string(),
-                progress: 0.2,
-                message: "Loading instance configuration".to_string(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-            });
-
-            let launcher = crate::instance::launcher::InstanceLauncher::new()?;
-
-            let _ = event_tx.send(ServerEvent::LaunchProgress {
-                instance: name.to_string(),
-                stage: "downloading".to_string(),
-                progress: 0.5,
-                message: "Verifying libraries and assets".to_string(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-            });
-
-            match launcher.launch(name, &launch_options).await {
-                Ok(outcome) => {
-                    let _ = event_tx.send(ServerEvent::LaunchCompleted {
-                        instance: name.to_string(),
-                        pid: outcome.pid,
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                    });
-
-                    // Track the running instance and emit instance_stopped
-                    // when the game process exits.
-                    {
-                        let mut s = state.write().await;
-                        s.running_instances.insert(
-                            name.to_string(),
-                            InstanceProcess {
-                                pid: outcome.pid,
-                                started: chrono::Utc::now().to_rfc3339(),
-                            },
-                        );
+                let launcher = match crate::instance::launcher::InstanceLauncher::new() {
+                    Ok(l) => l,
+                    Err(e) => {
+                        let _ = launch_tx.send(ServerEvent::LaunchFailed {
+                            instance: launch_name,
+                            error: e.to_string(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                        });
+                        return;
                     }
-                    let monitor_state = state.clone();
-                    let monitor_tx = event_tx.clone();
-                    let monitor_name = name.to_string();
-                    let monitor_pid = outcome.pid;
-                    tokio::spawn(async move {
-                        loop {
-                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                            if !pid_alive(monitor_pid) {
-                                let mut s = monitor_state.write().await;
-                                s.running_instances.remove(&monitor_name);
-                                let _ = monitor_tx.send(ServerEvent::InstanceStopped {
-                                    instance: monitor_name,
-                                    exit_code: None,
-                                    timestamp: chrono::Utc::now().to_rfc3339(),
-                                });
-                                break;
-                            }
-                        }
-                    });
+                };
 
-                    // Alpha 8: poll Despotes until the game reports ready and
-                    // broadcast a single GameReady event.
-                    let ready_state = state.clone();
-                    let ready_tx = event_tx.clone();
-                    let ready_name = name.to_string();
-                    let ready_pid = outcome.pid;
-                    tokio::spawn(async move {
-                        let _ = (ready_state,);
-                        // Resolve instance dir for Despotes discovery.
-                        let Ok(instances) = crate::util::paths::get_instances_dir() else { return };
-                        let inst_dir = instances.join(&ready_name);
-                        for _ in 0..150 {
-                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                            if !pid_alive(ready_pid) {
-                                return; // game died before becoming ready
+                let _ = launch_tx.send(ServerEvent::LaunchProgress {
+                    instance: launch_name.clone(),
+                    stage: "downloading".to_string(),
+                    progress: 0.3,
+                    message: "Verifying libraries, assets and files".to_string(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                });
+
+                match launcher.launch(&launch_name, &launch_options).await {
+                    Ok(outcome) => {
+                        let _ = launch_tx.send(ServerEvent::LaunchCompleted {
+                            instance: launch_name.clone(),
+                            pid: outcome.pid,
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                        });
+
+                        // Track the running instance and emit instance_stopped
+                        // when the game process exits.
+                        {
+                            let mut s = launch_state.write().await;
+                            s.running_instances.insert(
+                                launch_name.clone(),
+                                InstanceProcess {
+                                    pid: outcome.pid,
+                                    started: chrono::Utc::now().to_rfc3339(),
+                                },
+                            );
+                        }
+                        let monitor_state = launch_state.clone();
+                        let monitor_tx = launch_tx.clone();
+                        let monitor_name = launch_name.clone();
+                        let monitor_pid = outcome.pid;
+                        tokio::spawn(async move {
+                            loop {
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                if !pid_alive(monitor_pid) {
+                                    let mut s = monitor_state.write().await;
+                                    s.running_instances.remove(&monitor_name);
+                                    let _ = monitor_tx.send(ServerEvent::InstanceStopped {
+                                        instance: monitor_name,
+                                        exit_code: None,
+                                        timestamp: chrono::Utc::now().to_rfc3339(),
+                                    });
+                                    break;
+                                }
                             }
-                            if crate::game::client::is_available(&inst_dir).await {
-                                if let Ok(st) = crate::game::client::game_status(&inst_dir).await {
-                                    let in_world = st.get("inGame").and_then(|v| v.as_bool()).unwrap_or(false);
-                                    let screen = st.get("screenOpen").and_then(|v| v.as_bool()).unwrap_or(false);
-                                    if in_world || screen {
-                                        let _ = ready_tx.send(ServerEvent::GameReady {
-                                            instance: ready_name,
-                                            pid: ready_pid,
-                                            in_world,
-                                            timestamp: chrono::Utc::now().to_rfc3339(),
-                                        });
-                                        return;
+                        });
+
+                        // Alpha 8: poll Despotes until the game reports ready and
+                        // broadcast a single GameReady event.
+                        let ready_state = launch_state.clone();
+                        let ready_tx = launch_tx.clone();
+                        let ready_name = launch_name.clone();
+                        let ready_pid = outcome.pid;
+                        tokio::spawn(async move {
+                            let _ = (ready_state,);
+                            let Ok(instances) = crate::util::paths::get_instances_dir() else { return };
+                            let inst_dir = instances.join(&ready_name);
+                            for _ in 0..150 {
+                                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                if !pid_alive(ready_pid) {
+                                    return;
+                                }
+                                if crate::game::client::is_available(&inst_dir).await {
+                                    if let Ok(st) = crate::game::client::game_status(&inst_dir).await {
+                                        let in_world = st.get("inGame").and_then(|v| v.as_bool()).unwrap_or(false);
+                                        let screen = st.get("screenOpen").and_then(|v| v.as_bool()).unwrap_or(false);
+                                        if in_world || screen {
+                                            let _ = ready_tx.send(ServerEvent::GameReady {
+                                                instance: ready_name,
+                                                pid: ready_pid,
+                                                in_world,
+                                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                            });
+                                            return;
+                                        }
                                     }
                                 }
                             }
-                        }
-                    });
-
-                    let data = serde_json::json!({
-                        "instance": name,
-                        "status": "launched",
-                        "pid": outcome.pid,
-                        "detached": outcome.detached,
-                        "agent": launch_options.agent
-                    });
-
-                    Ok((format!("Instance '{}' launched (PID {})", name, outcome.pid), Some(data)))
+                        });
+                    }
+                    Err(e) => {
+                        let _ = launch_tx.send(ServerEvent::LaunchFailed {
+                            instance: launch_name,
+                            error: e.to_string(),
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                        });
+                    }
                 }
-                Err(e) => {
-                    let _ = event_tx.send(ServerEvent::LaunchFailed {
-                        instance: name.to_string(),
-                        error: e.to_string(),
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                    });
+            });
 
-                    Err(e)
-                }
-            }
+            let data = serde_json::json!({
+                "instance": name,
+                "status": "launching",
+                "agent": launch_agent,
+                "note": "Launch runs in the background; watch launch_progress/launch_completed/launch_failed events"
+            });
+            Ok((format!("Instance '{}' launch started (background)", name), Some(data)))
         }
         _ => {
             anyhow::bail!("Unknown command: {}", command)
