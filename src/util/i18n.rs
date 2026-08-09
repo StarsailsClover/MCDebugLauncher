@@ -31,24 +31,28 @@ pub fn t(en: &str, zh: &str) -> String {
     }
 }
 
-/// On Windows, force the console output code page to UTF-8 (65001) so that
+/// On Windows, force the console input/output code page to UTF-8 (65001) so that
 /// Chinese log messages render correctly instead of showing GBK mojibake.
 ///
 /// The default Windows console code page is the system ANSI page (e.g. GBK on
 /// zh-CN), which corrupts UTF-8 bytes. Switching to UTF-8 before any logging
 /// output avoids that. On non-Windows platforms this is a no-op.
 ///
+/// Alpha 9: Now sets both input and output code pages for better PowerShell compatibility.
+///
 /// Best-effort: if the Win32 call fails (rare), we silently continue.
 pub fn enable_utf8_console() {
     #[cfg(windows)]
     {
-        // SAFETY: SetConsoleOutputCP only changes the console output code page;
+        // SAFETY: SetConsoleOutputCP and SetConsoleCP only change console code pages;
         // safe to call from the single-threaded startup path.
         unsafe {
             extern "system" {
                 fn SetConsoleOutputCP(code_page: u32) -> i32;
+                fn SetConsoleCP(code_page: u32) -> i32;
             }
-            let _ = SetConsoleOutputCP(65001); // CP_UTF8
+            let _ = SetConsoleOutputCP(65001); // CP_UTF8 for output
+            let _ = SetConsoleCP(65001); // CP_UTF8 for input
         }
     }
 }

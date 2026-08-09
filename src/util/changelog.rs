@@ -1,16 +1,17 @@
-// Recent-update digest shown at program startup (Alpha 8.1).
+// Recent-update digest shown at program startup (Alpha 9).
 //
 // The CHANGELOG is embedded at compile time (`include_str!`) so the digest
-// works from any install location without extra files. At startup MDL prints
-// the four most recent versions with their headline changes — a quick
-// orientation for users returning after an update. The block is printed
-// before command output, once per process, and never interferes with
-// `--format json` consumers (skipped when JSON output is requested).
+// works from any install location without extra files. 
+//
+// Alpha 9 behavior: Only show the changelog when the version has been updated
+// since the last run. This dramatically reduces startup noise for daily users.
 
 use crate::util::i18n;
+use std::fs;
+use std::path::PathBuf;
 
 /// CHANGELOG embedded at build time.
-static CHANGELOG: &str = include_str!("../../CHANGELOG.md");
+pub static CHANGELOG: &str = include_str!("../../CHANGELOG.md");
 
 /// One parsed version section from the CHANGELOG.
 #[derive(Debug, Clone)]
@@ -69,15 +70,26 @@ fn strip_md_bold(s: &str) -> String {
 
 /// Print the recent-update digest (4 versions). Silent when JSON output is
 /// requested so machine-readable output stays parseable.
+/// 
+/// Alpha 9: Only shows changelog if the version has been updated since last run.
 pub fn print_recent_updates(json_mode: bool) {
     if json_mode {
         return;
     }
+
+    let current_version = env!("CARGO_PKG_VERSION");
+    
+    // Check if we should show the changelog
+    if !has_version_changed(current_version) {
+        return;
+    }
+
+    // Show the full changelog
     let digests = recent_versions(CHANGELOG, 4, 4);
     if digests.is_empty() {
         return;
     }
-    println!("{}", i18n::t("Recent updates:", "最近更新:"));
+    println!("{}", i18n::t("Recent updates:", "最近更新："));
     for d in &digests {
         println!(
             "  {} {}{}",
@@ -95,6 +107,51 @@ pub fn print_recent_updates(json_mode: bool) {
         }
     }
     println!();
+
+    // Update the last version file
+    let _ = update_last_version(current_version);
+}
+
+/// Get the path to the last_version tracking file
+fn get_last_version_path() -> Option<PathBuf> {
+    let data_dir = dirs::data_dir()?;
+    Some(data_dir.join("mdl").join("last_version"))
+}
+
+/// Check if the version has changed since the last run
+fn has_version_changed(current_version: &str) -> bool {
+    let path = match get_last_version_path() {
+        Some(p) => p,
+        None => return true, // Show changelog if we can't determine
+    };
+
+    if !path.exists() {
+        return true; // First run or file deleted
+    }
+
+    match fs::read_to_string(&path) {
+        Ok(last_version) => {
+            let last_version = last_version.trim();
+            last_version != current_version
+        }
+        Err(_) => true, // Show changelog if we can't read the file
+    }
+}
+
+/// Update the last_version tracking file
+fn update_last_version(current_version: &str) -> std::io::Result<()> {
+    let path = match get_last_version_path() {
+        Some(p) => p,
+        None => return Ok(()), // Silently fail if we can't determine path
+    };
+
+    // Create parent directory if needed
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(&path, current_version)?;
+    Ok(())
 }
 
 #[cfg(test)]

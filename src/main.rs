@@ -649,6 +649,13 @@ enum Commands {
         check: bool,
     },
 
+    /// Show recent changelog updates
+    Changelog {
+        /// Number of versions to show (default: 4)
+        #[arg(long, default_value = "4")]
+        versions: usize,
+    },
+
     /// Add MDL to system PATH
     Setup,
 }
@@ -901,6 +908,9 @@ async fn main() -> Result<()> {
         }
         Commands::Update { check } => {
             cmd_update(check).await?;
+        }
+        Commands::Changelog { versions } => {
+            cmd_changelog(versions);
         }
         Commands::Setup => {
             cmd_setup().await?;
@@ -2439,5 +2449,24 @@ fn cmd_server_status(format: &str, name: &str) {
     match pid {
         Some(p) => println!("  Status: running (PID {})", p),
         None => println!("  Status: stopped"),
+    }
+}
+
+fn cmd_changelog(num_versions: usize) {
+    use util::changelog;
+    
+    let digests = changelog::recent_versions(changelog::CHANGELOG, num_versions, 10);
+    if digests.is_empty() {
+        println!("No changelog entries found.");
+        return;
+    }
+    
+    println!("Recent Updates:\n");
+    for d in &digests {
+        println!("## {} {}", d.version, if d.date.is_empty() { String::new() } else { format!("({})", d.date) });
+        for h in &d.highlights {
+            println!("  - {}", h);
+        }
+        println!();
     }
 }

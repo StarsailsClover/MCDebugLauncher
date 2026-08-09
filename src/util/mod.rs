@@ -13,3 +13,4 @@ pub mod injector;
 pub mod i18n;
 pub mod account;
 pub mod changelog;
+pub mod progress;
