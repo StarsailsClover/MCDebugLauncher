@@ -255,6 +255,71 @@ mod tests {
         assert_eq!(client[0].path, "mods/example.jar");
     }
 
+    /// Build a synthetic .mrpack in a temp dir and verify index parsing +
+    /// overrides extraction end-to-end (offline, hermetic).
+    #[test]
+    fn test_synthetic_mrpack_roundtrip() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let pack_path = dir.path().join("synthetic.mrpack");
+
+        // Assemble the zip: modrinth.index.json + overrides/options.txt
+        let file = std::fs::File::create(&pack_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+
+        zip.start_file("modrinth.index.json", opts).unwrap();
+        zip.write_all(sample_index_json().as_bytes()).unwrap();
+
+        zip.start_file("overrides/options.txt", opts).unwrap();
+        zip.write_all(b"fov:1.0
+").unwrap();
+
+        zip.start_file("overrides/config/test.toml", opts).unwrap();
+        zip.write_all(b"key = \"value\"
+").unwrap();
+
+        zip.finish().unwrap();
+
+        // Parse the index back from the archive.
+        let index = read_pack_index(&pack_path).unwrap();
+        assert_eq!(index.name, "Test Pack");
+        assert_eq!(index.minecraft_version(), Some("1.21.1"));
+        assert_eq!(index.client_files().len(), 1);
+
+        // Extract overrides into a fresh instance dir.
+        let inst = dir.path().join("instance");
+        std::fs::create_dir_all(&inst).unwrap();
+        let copied = extract_overrides(&pack_path, &inst).unwrap();
+        assert_eq!(copied, 2);
+        assert!(inst.join("options.txt").exists());
+        assert!(inst.join("config/test.toml").exists());
+        let content = std::fs::read_to_string(inst.join("config/test.toml")).unwrap();
+        assert!(content.contains("value"));
+    }
+
+    /// Zip-slip protection: unsafe override paths must be skipped.
+    #[test]
+    fn test_zip_slip_override_skipped() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let pack_path = dir.path().join("evil.mrpack");
+        let file = std::fs::File::create(&pack_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file("modrinth.index.json", opts).unwrap();
+        zip.write_all(sample_index_json().as_bytes()).unwrap();
+        zip.start_file("overrides/../../evil.txt", opts).unwrap();
+        zip.write_all(b"pwned").unwrap();
+        zip.finish().unwrap();
+
+        let inst = dir.path().join("instance");
+        std::fs::create_dir_all(&inst).unwrap();
+        let copied = extract_overrides(&pack_path, &inst).unwrap();
+        assert_eq!(copied, 0, "unsafe path must be skipped");
+        assert!(!dir.path().join("evil.txt").exists());
+    }
+
     #[test]
     fn test_loader_detection_none() {
         let raw = r#"{"formatVersion":1,"game":"minecraft","versionId":"1","dependencies":{"minecraft":"1.20"}}"#;
