@@ -156,7 +156,10 @@ pub async fn launch_server(info: &ServerInfo, detach: bool) -> Result<u32> {
 
     let memory = info.memory.clone().unwrap_or_else(|| "2G".to_string());
 
-    let mut cmd = tokio::process::Command::new("java");
+    // Use std::process::Command (not tokio): in detach mode the child handle
+    // is dropped immediately, the OS keeps the process running, and the tokio
+    // runtime is free to shut down — so `mdl server launch` returns at once.
+    let mut cmd = std::process::Command::new("java");
     cmd.arg(format!("-Xmx{}", memory))
         .arg(format!("-Xms{}", memory))
         .arg("-jar")
@@ -166,8 +169,6 @@ pub async fn launch_server(info: &ServerInfo, detach: bool) -> Result<u32> {
 
     let log_path = dir.join("server.log");
     if detach {
-        let log_dir = dir.join("logs");
-        fs::create_dir_all(&log_dir).await?;
         let runtime_dir = dir.join("runtime");
         fs::create_dir_all(&runtime_dir).await?;
         let file = std::fs::File::create(&log_path)
@@ -175,29 +176,39 @@ pub async fn launch_server(info: &ServerInfo, detach: bool) -> Result<u32> {
         cmd.stdout(file.try_clone()?);
         cmd.stderr(file);
         cmd.stdin(std::process::Stdio::null());
+        // Windows: fully detach the child from this console so the shell does
+        // not wait for the server to exit when `mdl server launch` returns.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        }
     } else {
         cmd.stdout(std::process::Stdio::inherit());
         cmd.stderr(std::process::Stdio::inherit());
         cmd.stdin(std::process::Stdio::inherit());
     }
 
+    // Prevent console/pipe handles from leaking into the detached child.
+    clear_stdio_inherit_flags();
+
     let mut child = cmd.spawn().context("Failed to spawn the server process (is Java installed?)")?;
-    let pid = child.id().unwrap_or(0);
+    let pid = child.id();
 
     if detach {
+        // Record the PID; running_pid() self-cleans stale files on read.
         let pid_file = dir.join("runtime").join("pid");
         fs::write(&pid_file, pid.to_string()).await?;
         tracing::info!("Server '{}' running in background (PID {}), log: {}", info.name, pid, log_path.display());
-        // Reap the child in the background so the PID file stays accurate.
-        tokio::spawn(async move {
-            let _ = child.wait().await;
-            let _ = tokio::fs::remove_file(dir.join("runtime").join("pid")).await;
-        });
+        // Drop the handle: the process is detached and keeps running.
+        drop(child);
         return Ok(pid);
     }
 
     // Attached: block until the server exits.
-    let status = child.wait().await.context("Failed to wait for the server")?;
+    let status = child.wait().context("Failed to wait for the server")?;
     if !status.success() {
         anyhow::bail!("Server exited with code {:?}", status.code());
     }
@@ -215,6 +226,38 @@ pub async fn stop_server(info: &ServerInfo) -> Result<()> {
     let _ = fs::remove_file(dir.join("runtime").join("pid")).await;
     tracing::info!("Server '{}' stopped (PID {})", info.name, pid);
     Ok(())
+}
+
+
+/// Windows: clear the inherit flag on the current process's stdout/stderr
+/// handles before spawning a detached child. Inherited handles leak into the
+/// child and keep the parent's pipes open, which makes the calling shell hang
+/// on the pipe even after MDL exits. Safe to call on non-Windows (no-op).
+pub fn clear_stdio_inherit_flags() {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        unsafe {
+            extern "system" {
+                fn GetStdHandle(which: u32) -> *mut std::ffi::c_void;
+                fn SetHandleInformation(
+                    h: *mut std::ffi::c_void,
+                    mask: u32,
+                    flags: u32,
+                ) -> i32;
+            }
+            const STD_OUTPUT_HANDLE: u32 = 0xFFFF_FFF5; // (DWORD)-11
+            const STD_ERROR_HANDLE: u32 = 0xFFFF_FFF4;  // (DWORD)-12
+            const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+            for which in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+                let h = GetStdHandle(which);
+                if !h.is_null() {
+                    // mask=HANDLE_FLAG_INHERIT, flags=0 -> clear the inherit bit
+                    SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+                }
+            }
+        }
+    }
 }
 
 fn is_pid_alive(pid: u32) -> bool {

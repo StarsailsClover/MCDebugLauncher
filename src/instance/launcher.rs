@@ -636,6 +636,13 @@ impl InstanceLauncher {
         tracing::info!("Starting Minecraft...");
         tracing::debug!("Command: {:?}", cmd);
 
+        // Detach mode: clear inherit flags on console/pipe handles so the
+        // game process does not hold the launcher's pipes open (the calling
+        // shell would otherwise hang on the pipe until the game exits).
+        if options.detach {
+            crate::loader::server::clear_stdio_inherit_flags();
+        }
+
         let mut child = cmd.spawn().context("Failed to spawn Minecraft process")?;
         let pid = child.id();
 
