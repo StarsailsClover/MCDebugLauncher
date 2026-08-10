@@ -5,6 +5,22 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.0.0-alpha.12] - 2026-08-11
+
+### Added (Alpha 12: environment health check + roadmap)
+- **`mdl doctor`** — a read-only environment health check. Verifies the Java
+  runtime, MDL directory layout, download cache, mirror latency probe, the
+  instances directory, and reachability of the Mojang / Modrinth / GitHub
+  endpoints. Each item renders `[OK]` / `[WARN]` / `[FAIL]` with a detail
+  line; the command exits non-zero when any hard check fails.
+- **ROADMAP.md** — version roadmap documenting the v26.0 completion and the
+  planned v26.1 minor themes (AI integration, agent UX, BE support, feature
+  parity, stabilization).
+
+### Verified
+- 67 unit tests green; release build green.
+- `mdl doctor` run end-to-end: 8 passed, 0 failed on this machine.
+
 ## [26.0.0-alpha.11] - 2026-08-11
 
 ### Added (Alpha 11: download progress display)

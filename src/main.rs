@@ -730,6 +730,10 @@ enum Commands {
     /// Get system information
     Info,
 
+    /// Run an environment health check (Java, directories, cache, mirrors,
+    /// network reachability) and print a pass/fail report
+    Doctor,
+
     /// Update MDL to the latest version
     Update {
         /// Check for updates without installing
@@ -1046,6 +1050,9 @@ async fn main() -> Result<()> {
         }
         Commands::Info => {
             cmd_info(&cli.format).await?;
+        }
+        Commands::Doctor => {
+            cmd_doctor().await?;
         }
         Commands::Update { check } => {
             cmd_update(check).await?;
@@ -2279,6 +2286,21 @@ fn agent_pid_running(pid: u32) -> bool {
     let mut sys = System::new();
     sys.refresh_processes();
     sys.process(sysinfo::Pid::from_u32(pid)).is_some()
+}
+
+/// Environment health check (Alpha 12): read-only verification of every
+/// external dependency MDL relies on, rendered as a pass/fail report.
+async fn cmd_doctor() -> Result<()> {
+    println!("MDL environment health check");
+    println!("============================");
+    let report = util::doctor::run_all().await;
+    for line in report.render() {
+        println!("{}", line);
+    }
+    if report.fail_count() > 0 {
+        anyhow::bail!("{} health check(s) failed", report.fail_count());
+    }
+    Ok(())
 }
 
 async fn cmd_info(format: &str) -> Result<()> {
