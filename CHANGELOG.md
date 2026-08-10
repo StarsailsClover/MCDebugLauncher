@@ -5,6 +5,32 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.1.0-alpha.3] - 2026-08-11
+
+### Added (v26.1 Alpha 3: more Bedrock launch support)
+- **Full BDS lifecycle management**: the Bedrock Dedicated Server now supports
+  the same lifecycle as the JE dedicated server:
+  - `mdl bedrock stop <instance>` — kills the BDS process tree.
+  - `mdl bedrock status <instance> [--format json]` — reports installed/running/PID.
+- **EULA auto-accept**: BDS now writes `eula.txt` on first launch so it does
+  not exit immediately.
+- **Log capture**: BDS stdout/stderr are captured to `bedrock_server.log`.
+- **PID tracking**: the BDS PID is recorded under `bedrock/server/runtime/pid`
+  and validated for liveness.
+- **Already-running guard**: launching a BDS that is already running returns a
+  clear error instead of spawning a second process.
+
+### Fixed
+- **BDS launch pipe hang**: the detached BDS spawn now clears the console
+  handle inherit flags (same fix as the JE server and game launcher), so the
+  calling shell returns immediately instead of hanging on the pipe.
+
+### Verified
+- 70 unit tests green.
+- End-to-end BDS lifecycle on a throwaway instance: install -> launch
+  (returns immediately, PID recorded) -> status (running) -> stop -> status
+  (stopped). Test instance cleaned up afterwards.
+
 ## [26.1.0-alpha.2] - 2026-08-11
 
 ### Added (v26.1 Alpha 2: better Agent experience)

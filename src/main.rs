@@ -343,6 +343,19 @@ enum BedrockCommands {
         /// Instance name
         name: String,
     },
+    /// Stop the Bedrock Dedicated Server of an instance
+    Stop {
+        /// Instance name
+        name: String,
+    },
+    /// Show whether the Bedrock Dedicated Server of an instance is running
+    Status {
+        /// Instance name
+        name: String,
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1021,6 +1034,8 @@ async fn main() -> Result<()> {
         Commands::Bedrock(bc) => match bc {
             BedrockCommands::Install { name } => { cmd_bedrock_install(&name).await?; }
             BedrockCommands::Launch { name } => { cmd_bedrock_launch(&name).await?; }
+            BedrockCommands::Stop { name } => { cmd_bedrock_stop(&name).await?; }
+            BedrockCommands::Status { name, format } => { cmd_bedrock_status(&name, &format).await?; }
         },
         Commands::Cache(cc) => match cc {
             CacheCommands::Info => { cmd_cache_info(); }
@@ -2965,8 +2980,49 @@ async fn cmd_bedrock_launch(name: &str) -> Result<()> {
     let manager = instance::InstanceManager::new()?;
     let inst = manager.get(name).await?;
     let server_dir = inst.path.join("bedrock").join("server");
+    if !server_dir.exists() {
+        anyhow::bail!(
+            "BDS not installed in '{}'. Run 'mdl bedrock install {}' first.",
+            name, name
+        );
+    }
     let pid = loader::bedrock::launch_bds(&server_dir)?;
     println!("Bedrock Dedicated Server started (PID {})", pid);
+    println!("  Log: {}", server_dir.join("bedrock_server.log").display());
+    Ok(())
+}
+
+async fn cmd_bedrock_stop(name: &str) -> Result<()> {
+    let manager = instance::InstanceManager::new()?;
+    let inst = manager.get(name).await?;
+    let server_dir = inst.path.join("bedrock").join("server");
+    let pid = loader::bedrock::stop_bds(&server_dir)?;
+    println!("Bedrock Dedicated Server stopped (PID {})", pid);
+    Ok(())
+}
+
+async fn cmd_bedrock_status(name: &str, format: &str) -> Result<()> {
+    let manager = instance::InstanceManager::new()?;
+    let inst = manager.get(name).await?;
+    let server_dir = inst.path.join("bedrock").join("server");
+    let installed = server_dir.join("bedrock_server.exe").exists();
+    let pid = loader::bedrock::running_bds_pid(&server_dir);
+    if format == "json" {
+        println!("{}", serde_json::json!({
+            "name": name,
+            "installed": installed,
+            "running": pid.is_some(),
+            "pid": pid,
+            "dir": installed.then(|| server_dir.display().to_string()),
+        }));
+        return Ok(());
+    }
+    println!("Bedrock Dedicated Server for '{}'", name);
+    println!("  Installed: {}", installed);
+    match pid {
+        Some(p) => println!("  Status: running (PID {})", p),
+        None => println!("  Status: stopped"),
+    }
     Ok(())
 }
 
