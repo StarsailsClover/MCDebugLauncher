@@ -5,6 +5,24 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.0.0] - 2026-08-11
+
+### v26.0 Official Release
+
+First official release of the v26.0 line. Collapses Alpha 9 through Alpha 12
+into a stable, non-prerelease build.
+
+Highlights across the line:
+- **Alpha 9**: instance-info command, multi-language support, startup changelog.
+- **Alpha 10**: Aprism product matrix (`--aprism` javaagent, AprismRefract
+  `.aep` extensions, AprismPrismate bridge) + Despotes vanilla support.
+- **Alpha 11**: real download progress bars (single-stream, chunked-parallel,
+  asset batch) with interactive-TTY gating.
+- **Alpha 12**: `mdl doctor` environment health check + ROADMAP.md.
+
+Verified: 67 unit tests green, release build green, `mdl doctor` end-to-end
+8 passed / 0 failed.
+
 ## [26.0.0-alpha.12] - 2026-08-11
 
 ### Added (Alpha 12: environment health check + roadmap)
