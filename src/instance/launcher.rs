@@ -604,6 +604,37 @@ impl InstanceLauncher {
             cmd.arg("jdk.naming.dns/com.sun.jndi.dns=java.naming");
         }
 
+        // Despotes native control agent (Alpha 10): vanilla instances have no
+        // mod loader, so Despotes ships a `native` build that attaches as a JVM
+        // -javaagent instead of a mods/ jar. If the instance has it installed
+        // (placed at the instance root by `mdl create`/offer) and we are not
+        // already attaching the Aprism loader, mount it here.
+        if options.agent && !options.aprism {
+            if let Some(agent_jar) = crate::game::despotes::native_agent_jar(instance_dir) {
+                cmd.arg(format!("-javaagent:{}", agent_jar.display()));
+                tracing::info!("Attached Despotes native control agent: {}", agent_jar.display());
+            }
+        }
+
+        // Aprism JE Native loader (Alpha 10): attach the Aprism javaagent.
+        // Aprism runs as a premain agent and is mutually exclusive with
+        // AprismPrismate (Prismate is a loader-side bridge that runs INSIDE a
+        // host loader; the agent and Prismate must not both be active). We
+        // refuse the conflicting combination with a named error.
+        if options.aprism {
+            if crate::loader::prismate::is_installed(instance_dir) {
+                anyhow::bail!(
+                    "Cannot launch with --aprism: this instance has AprismPrismate installed                      in mods/. The Aprism javaagent and AprismPrismate are mutually exclusive                      in one instance. Remove the Prismate jar or drop --aprism."
+                );
+            }
+            match attach_aprism(&mut cmd, &version_metadata.id, instance_dir).await {
+                Ok(info) => tracing::info!("Attached Aprism JE Native loader: {}", info),
+                Err(e) => anyhow::bail!("Failed to attach Aprism loader: {e}"),
+            }
+        } else if crate::loader::prismate::is_installed(instance_dir) {
+            tracing::info!("AprismPrismate present in mods/ (host loader will load .aje packs)");
+        }
+
         cmd.arg("-cp");
         cmd.arg(&classpath);
 

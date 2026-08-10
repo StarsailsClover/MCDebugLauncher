@@ -5,6 +5,36 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.0.0-alpha.10] - 2026-08-11
+
+### Added (Alpha 10: Aprism product matrix)
+- **Aprism JE Native loader**: the `--aprism` launch flag now actually attaches
+  the Aprism javaagent (it was defined but never wired). Downloads
+  `Aprism-<tag>-JE-<mc>.jar` from GitHub Releases (stable-first, pre-release
+  opt-in) and mounts
+  `-javaagent:...=aprismVersion=...;mcEdit=JE;mcVersion=...;gameRoot=...`.
+- **AprismRefract support** (`mdl aprism refract install|list`): detects and
+  installs loader-support `.aep` extensions
+  (`<Loader>-Support-A<range>-<Key><range>-JE-<mc>.aep`) into the instance's
+  `aprism-extensions/` directory so the Aprism loader can run Fabric/Forge/
+  NeoForge/Quilt/LiteLoader mods.
+- **AprismPrismate support** (`mdl aprism prismate install|status`): installs
+  the loader-side bridge `AprismPrismate-v<ver>-<Fa|N|Fo>-<mc>.jar` into
+  `mods/`, letting Fabric/NeoForge/Forge load Aprism-native `.aje` packs.
+  Refuses the conflicting `--aprism` + Prismate combination.
+
+### Fixed
+- **Despotes for vanilla** (reported bug): vanilla/none instances now map to
+  the Despotes `native` branch instead of failing with "no loader none". The
+  native build attaches as a JVM `-javaagent` (installed at the instance root,
+  not mods/); the launcher mounts it automatically in `--agent` mode.
+- Despotes asset parsing now accepts the Aprism variant's `.aje` suffix.
+- Corrected a mangled mutual-exclusion error message in the Aprism launcher path.
+
+### Tests
+- 67 unit tests + 3 opt-in network integration tests (Despotes fabric/native,
+  Aprism javaagent download). All green.
+
 ## [26.0.0-alpha.8.1] - 2026-08-10
 
 ### Added

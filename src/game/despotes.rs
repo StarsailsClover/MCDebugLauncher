@@ -67,17 +67,27 @@ impl DespotesLoader {
 }
 
 /// The loader the instance actually uses, mapped onto a Despotes loader slug.
-/// Returns `None` for loaders Despotes does not support (e.g. quilt without
-/// the Fabric branch, optifine-only instances, vanilla).
+///
+/// Vanilla instances (loader == None, "none" or "vanilla") map to the
+/// `native` Despotes branch, which attaches as a `-javaagent` instead of a
+/// mods/ jar. Returns `None` only for loaders Despotes does not support
+/// (e.g. quilt without the Fabric branch, optifine-only instances).
 pub fn despotes_loader_for(instance_loader: Option<&str>) -> Option<DespotesLoader> {
     match instance_loader.map(|s| s.to_ascii_lowercase()) {
+        None => Some(DespotesLoader::Native),
         Some(l) if l == "fabric" => Some(DespotesLoader::Fabric),
         Some(l) if l == "neoforge" => Some(DespotesLoader::NeoForge),
         Some(l) if l == "forge" => Some(DespotesLoader::Forge),
-        Some(l) if l == "native" => Some(DespotesLoader::Native),
+        Some(l) if l == "native" || l == "vanilla" || l == "none" => Some(DespotesLoader::Native),
         Some(l) if l == "aprism" => Some(DespotesLoader::Aprism),
         _ => None,
     }
+}
+
+/// Whether a Despotes build attaches as a JVM `-javaagent` (the `native`
+/// branch) instead of being dropped into the instance's mods/ directory.
+pub fn is_javaagent_variant(loader_slug: &str) -> bool {
+    loader_slug == DespotesLoader::Native.slug()
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,9 +165,12 @@ pub struct ParsedAsset {
 }
 
 /// Parse an asset filename into its components. Returns `None` when the
-/// name does not follow the `Despotes-<tag>-<loader>-<mc>.jar` convention.
+/// name does not follow the `Despotes-<tag>-<loader>-<mc>.jar` convention
+/// (the Aprism variant ships `.aje` and is accepted as well).
 pub fn parse_asset_name(name: &str) -> Option<ParsedAsset> {
-    let stem = name.strip_suffix(".jar")?;
+    let stem = name
+        .strip_suffix(".jar")
+        .or_else(|| name.strip_suffix(".aje"))?;
     let rest = stem.strip_prefix(DESPOTES_JAR_PREFIX)?;
     // tag may itself contain dashes (v26.0-Alpha.2), so split from the end:
     // <...>-<loader>-<mcversion>
@@ -382,7 +395,8 @@ pub fn installed_despotes(instance_dir: &Path) -> Vec<PathBuf> {
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
-            p.extension().and_then(|e| e.to_str()) == Some("jar")
+            let ext = p.extension().and_then(|e| e.to_str());
+            (ext == Some("jar") || ext == Some("aje"))
                 && p.file_stem()
                     .and_then(|s| s.to_str())
                     .map(|s| s.starts_with(DESPOTES_JAR_PREFIX))
@@ -391,9 +405,36 @@ pub fn installed_despotes(instance_dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Whether a Despotes mod is installed in the instance.
+/// Filename used for the native (javaagent) Despotes variant inside the
+/// instance root. Unlike loader mods it must NOT live in mods/ (vanilla has
+/// no loader); it is attached as a JVM `-javaagent` at launch.
+pub const NATIVE_AGENT_FILE: &str = "despotes-agent.jar";
+
+/// Install a cached native (javaagent) Despotes jar at the instance root.
+/// Replaces any previously installed native build. Returns the file name.
+pub async fn install_native(instance_dir: &Path, source: &Path) -> Result<String> {
+    let dest = instance_dir.join(NATIVE_AGENT_FILE);
+    tokio::fs::copy(source, &dest).await.with_context(|| {
+        format!("Failed to copy native Despotes agent into {}", instance_dir.display())
+    })?;
+    let name = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    tracing::info!("Installed Despotes native agent: {}", name);
+    Ok(name)
+}
+
+/// Path to the native (javaagent) Despotes jar for this instance, if present.
+pub fn native_agent_jar(instance_dir: &Path) -> Option<PathBuf> {
+    let p = instance_dir.join(NATIVE_AGENT_FILE);
+    if p.exists() { Some(p) } else { None }
+}
+
+/// Whether a Despotes control mod (loader variant) or native agent is present.
 pub fn is_installed(instance_dir: &Path) -> bool {
-    !installed_despotes(instance_dir).is_empty()
+    !installed_despotes(instance_dir).is_empty() || native_agent_jar(instance_dir).is_some()
 }
 
 async fn digest_matches(path: &Path, digest: Option<&str>) -> Result<bool> {
@@ -526,6 +567,79 @@ mod tests {
         let again = install_into(instance.path(), &cached).await.expect("reinstall");
         assert_eq!(again, installed);
         assert_eq!(installed_despotes(instance.path()).len(), 1);
+    }
+
+    #[test]
+    fn test_vanilla_maps_to_native() {
+        // Vanilla instances (None / "none" / "vanilla") use the native branch.
+        assert_eq!(despotes_loader_for(None), Some(DespotesLoader::Native));
+        assert_eq!(despotes_loader_for(Some("vanilla")), Some(DespotesLoader::Native));
+        assert_eq!(despotes_loader_for(Some("none")), Some(DespotesLoader::Native));
+        // Real loaders map to themselves.
+        assert_eq!(despotes_loader_for(Some("fabric")), Some(DespotesLoader::Fabric));
+        assert_eq!(despotes_loader_for(Some("FABRIC")), Some(DespotesLoader::Fabric));
+        assert_eq!(despotes_loader_for(Some("aprism")), Some(DespotesLoader::Aprism));
+        // Unsupported loaders stay unsupported.
+        assert_eq!(despotes_loader_for(Some("optifine")), None);
+    }
+
+    #[test]
+    fn test_javaagent_variant() {
+        assert!(is_javaagent_variant("native"));
+        assert!(!is_javaagent_variant("fabric"));
+        assert!(!is_javaagent_variant("neoforge"));
+    }
+
+    // Network-dependent integration test: the reported bug was that vanilla
+    // instances (loader "none") could not find a Despotes build. Verify the
+    // native branch is selected for a vanilla instance and installs as a
+    // javaagent at the instance root. Disabled by default; run with --ignored.
+    #[tokio::test]
+    #[ignore]
+    async fn test_real_native_variant_for_vanilla() {
+        // Vanilla instance -> native branch.
+        assert_eq!(despotes_loader_for(None), Some(DespotesLoader::Native));
+        assert!(is_javaagent_variant(DespotesLoader::Native.slug()));
+
+        let releases = fetch_releases().await.expect("fetch releases");
+        // Pick a MC version the native branch actually ships (probe from the
+        // real release list so the test does not hardcode a brittle version).
+        let mc = releases
+            .iter()
+            .flat_map(|r| r.assets.iter())
+            .filter_map(|a| parse_asset_name(&a.name))
+            .find(|p| p.loader == "native")
+            .map(|p| p.mc_version)
+            .expect("a native asset exists");
+
+        let (rel, asset) = select_release(&releases, "native", &mc, true)
+            .expect("native asset selectable");
+        assert_eq!(parse_asset_name(&asset.name).unwrap().loader, "native");
+
+        let cached = download_asset(&asset).await.expect("download native");
+        assert!(cached.exists());
+
+        let instance = tempfile::tempdir().unwrap();
+        let installed = install_native(instance.path(), &cached).await.expect("install native");
+        // install_native renames the agent to the fixed NATIVE_AGENT_FILE name.
+        assert_eq!(installed, NATIVE_AGENT_FILE);
+        // Native agent lives at the instance root, not mods/.
+        assert!(native_agent_jar(instance.path()).is_some());
+        assert!(installed_despotes(instance.path()).is_empty());
+        // is_installed must report true via the native agent.
+        assert!(is_installed(instance.path()));
+        let _ = rel;
+    }
+
+    #[test]
+    fn test_parse_aje_asset() {
+        // Aprism variant ships .aje, e.g. Despotes-v26.1-Alpha.8-aprism-26.2.aje
+        let p = parse_asset_name("Despotes-v26.1-Alpha.8-aprism-26.2.aje").unwrap();
+        assert_eq!(p.tag, "v26.1-Alpha.8");
+        assert_eq!(p.loader, "aprism");
+        assert_eq!(p.mc_version, "26.2");
+        // Non-despotes .aje is rejected.
+        assert!(parse_asset_name("fabric-api.aje").is_none());
     }
 
     #[test]

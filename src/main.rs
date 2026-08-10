@@ -357,6 +357,64 @@ enum CacheCommands {
 }
 
 #[derive(Subcommand)]
+enum AprismCommands {
+    /// Manage AprismRefract loader-support extensions (.aep)
+    #[command(subcommand)]
+    Refract(AprismRefractCommands),
+    /// Manage AprismPrismate loader-side bridge (.jar)
+    #[command(subcommand)]
+    Prismate(AprismPrismateCommands),
+}
+
+#[derive(Subcommand)]
+enum AprismRefractCommands {
+    /// Install the best-matching loader-support .aep into an instance
+    Install {
+        /// Instance name
+        instance: String,
+        /// Loader key override (fabric/forge/neoforge/quilt/liteloader);
+        /// defaults to the instance's loader
+        #[arg(long)]
+        loader: Option<String>,
+        /// Minecraft version override; defaults to the instance's version
+        #[arg(long)]
+        mc_version: Option<String>,
+        /// Also consider pre-releases when no stable artifact applies
+        #[arg(long)]
+        prerelease: bool,
+    },
+    /// List .aep extensions installed in an instance
+    List {
+        /// Instance name
+        instance: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AprismPrismateCommands {
+    /// Install the best-matching Prismate bridge into an instance's mods/
+    Install {
+        /// Instance name
+        instance: String,
+        /// Loader key override (fabric/neoforge/forge); defaults to the
+        /// instance's loader
+        #[arg(long)]
+        loader: Option<String>,
+        /// Minecraft version override; defaults to the instance's version
+        #[arg(long)]
+        mc_version: Option<String>,
+        /// Also consider pre-releases when no stable artifact applies
+        #[arg(long)]
+        prerelease: bool,
+    },
+    /// Show whether a Prismate bridge is installed in an instance
+    Status {
+        /// Instance name
+        instance: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum ServerCommands {
     /// Create a managed Java Edition dedicated server (downloads server.jar)
     Create {
@@ -616,6 +674,11 @@ enum Commands {
     /// Download cache management
     #[command(subcommand)]
     Cache(CacheCommands),
+
+    /// Aprism ecosystem: loader-support extensions (AprismRefract) and the
+    /// loader-side bridge (AprismPrismate)
+    #[command(subcommand)]
+    Aprism(AprismCommands),
 
     /// Import a Modrinth modpack (.mrpack): create the instance, copy
     /// overrides and auto-download every missing file (pack auto-completion)
@@ -948,6 +1011,20 @@ async fn main() -> Result<()> {
         Commands::Cache(cc) => match cc {
             CacheCommands::Info => { cmd_cache_info(); }
             CacheCommands::Clean { days } => { cmd_cache_clean(days); }
+        },
+        Commands::Aprism(ac) => match ac {
+            AprismCommands::Refract(rc) => match rc {
+                AprismRefractCommands::Install { instance, loader, mc_version, prerelease } => {
+                    cmd_aprism_refract_install(&instance, loader.as_deref(), mc_version.as_deref(), prerelease).await?;
+                }
+                AprismRefractCommands::List { instance } => { cmd_aprism_refract_list(&instance).await?; }
+            },
+            AprismCommands::Prismate(pc) => match pc {
+                AprismPrismateCommands::Install { instance, loader, mc_version, prerelease } => {
+                    cmd_aprism_prismate_install(&instance, loader.as_deref(), mc_version.as_deref(), prerelease).await?;
+                }
+                AprismPrismateCommands::Status { instance } => { cmd_aprism_prismate_status(&instance).await?; }
+            },
         },
         Commands::Import { name, pack, no_download } => {
             cmd_import(&name, &pack, no_download).await?;
@@ -2519,6 +2596,10 @@ Despotes control mod: not applicable to loader '{}'. Skipping.",
         );
         return Ok(());
     };
+    // Vanilla/none instances use the `native` branch, which attaches as a
+    // JVM -javaagent instead of a mods/ jar. Track this so the chosen asset
+    // is installed into the instance root rather than mods/.
+    let is_native = despotes::is_javaagent_variant(dloader.slug());
 
     // Resolve the concrete Minecraft version (handles `release`/`latest`).
     let mc_version = {
@@ -2616,8 +2697,13 @@ Checking Despotes releases for {}/{} ...",
     };
 
     let cached = despotes::download_asset(&asset).await?;
-    let installed = despotes::install_into(instance_dir, &cached).await?;
-    println!("Installed Despotes {} ({}) into mods/", rel.tag, installed);
+    let installed = if is_native {
+        despotes::install_native(instance_dir, &cached).await?
+    } else {
+        despotes::install_into(instance_dir, &cached).await?
+    };
+    let where_ = if is_native { "instance root (javaagent)" } else { "mods/" };
+    println!("Installed Despotes {} ({}) into {}", rel.tag, installed, where_);
     Ok(())
 }
 
@@ -2708,6 +2794,124 @@ async fn cmd_account_skin(account: &str, output: Option<&str>) -> Result<()> {
     util::account::download_skin(&uuid, &out).await?;
     println!("Skin saved: {}", out.display());
     println!("Avatar: {}", util::account::avatar_url(&uuid, 64));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Aprism ecosystem management (Alpha 10): AprismRefract loader-support
+// extensions (.aep -> aprism-extensions/) and AprismPrismate bridge
+// (.jar -> mods/).
+// ---------------------------------------------------------------------------
+
+/// Resolve the loader key + MC version an Aprism artifact should target:
+/// explicit CLI overrides win, otherwise fall back to the instance's config.
+fn aprism_target<'a>(
+    inst: &instance::Instance,
+    loader_override: Option<&'a str>,
+    mc_override: Option<&'a str>,
+) -> (Option<String>, String) {
+    let loader = loader_override
+        .map(|s| s.to_string())
+        .or_else(|| inst.config.loader.as_ref().map(|l| l.loader_type.clone()));
+    let mc = mc_override
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| inst.config.version.clone());
+    (loader, mc)
+}
+
+async fn cmd_aprism_refract_install(
+    instance: &str,
+    loader: Option<&str>,
+    mc_version: Option<&str>,
+    prerelease: bool,
+) -> Result<()> {
+    let manager = instance::InstanceManager::new()?;
+    let inst = manager.get(instance).await?;
+    let (loader, mc) = aprism_target(&inst, loader, mc_version);
+    let loader = loader.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Instance '{}' has no mod loader; AprismRefract needs one              (fabric/forge/neoforge/quilt/liteloader). Use --loader to override.",
+            inst.name
+        )
+    })?;
+    let key = loader::refract::refract_key_for_loader(&loader).ok_or_else(|| {
+        anyhow::anyhow!("Loader '{}' has no AprismRefract support extension", loader)
+    })?;
+    println!("Checking AprismRefract releases for {}/{} ...", loader, mc);
+    let releases = loader::refract::fetch_releases().await?;
+    let (rel, asset) = loader::refract::select_release(&releases, key, &mc, prerelease)
+        .ok_or_else(|| anyhow::anyhow!("No applicable AprismRefract .aep for {}/{}", loader, mc))?;
+    let cached = loader::refract::download_asset(&asset).await?;
+    let installed = loader::refract::install_into(&inst.path, &cached).await?;
+    println!(
+        "Installed AprismRefract extension {} ({}) into aprism-extensions/",
+        rel.tag, installed
+    );
+    Ok(())
+}
+
+async fn cmd_aprism_refract_list(instance: &str) -> Result<()> {
+    let manager = instance::InstanceManager::new()?;
+    let inst = manager.get(instance).await?;
+    let exts = loader::refract::installed_extensions(&inst.path);
+    if exts.is_empty() {
+        println!("No AprismRefract extensions installed in '{}'.", inst.name);
+    } else {
+        println!("AprismRefract extensions in '{}':", inst.name);
+        for e in exts {
+            println!("  {}", e.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_aprism_prismate_install(
+    instance: &str,
+    loader: Option<&str>,
+    mc_version: Option<&str>,
+    prerelease: bool,
+) -> Result<()> {
+    let manager = instance::InstanceManager::new()?;
+    let inst = manager.get(instance).await?;
+    let (loader, mc) = aprism_target(&inst, loader, mc_version);
+    let loader = loader.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Instance '{}' has no mod loader; AprismPrismate runs inside              Fabric/NeoForge/Forge. Use --loader to override.",
+            inst.name
+        )
+    })?;
+    let key = loader::prismate::prismate_key_for_loader(&loader).ok_or_else(|| {
+        anyhow::anyhow!("Loader '{}' has no AprismPrismate bridge (fabric/neoforge/forge only)", loader)
+    })?;
+    // Mutual exclusion: Prismate cannot coexist with the Aprism javaagent.
+    // We cannot know the future launch flags here, so we only warn when the
+    // Aprism loader is already known to be attached (instance-level marker).
+    println!("Checking AprismPrismate releases for {}/{} ...", loader, mc);
+    let releases = loader::prismate::fetch_releases().await?;
+    let (rel, asset) = loader::prismate::select_release(&releases, key, &mc, prerelease)
+        .ok_or_else(|| anyhow::anyhow!("No applicable AprismPrismate jar for {}/{}", loader, mc))?;
+    let cached = loader::prismate::download_asset(&asset).await?;
+    let installed = loader::prismate::install_into(&inst.path, &cached).await?;
+    println!(
+        "Installed AprismPrismate {} ({}) into mods/",
+        rel.tag, installed
+    );
+    println!("Note: AprismPrismate is mutually exclusive with the --aprism javaagent.");
+    Ok(())
+}
+
+async fn cmd_aprism_prismate_status(instance: &str) -> Result<()> {
+    let manager = instance::InstanceManager::new()?;
+    let inst = manager.get(instance).await?;
+    let jars = loader::prismate::installed_prismate(&inst.path);
+    if jars.is_empty() {
+        println!("AprismPrismate: not installed in '{}'.", inst.name);
+    } else {
+        println!("AprismPrismate in '{}':", inst.name);
+        for j in jars {
+            println!("  {}", j.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
+        }
+    }
     Ok(())
 }
 

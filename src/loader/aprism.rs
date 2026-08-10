@@ -148,6 +148,41 @@ pub fn javaagent_arg(jar: &Path, aprism_version: &str, mc_version: &str, game_ro
 
 #[cfg(test)]
 mod tests {
+    // Network-dependent integration test: the --aprism launch path must
+    // resolve and download the JE javaagent artifact from GitHub Releases.
+    // Disabled by default; run with --ignored.
+    #[tokio::test]
+    #[ignore]
+    async fn test_real_aprism_javaagent_download() {
+        let releases = fetch_releases().await.expect("fetch aprism releases");
+        assert!(!releases.is_empty());
+        // The probe target MC version is discovered from the real asset list
+        // so the test never hardcodes a brittle version.
+        let mc = releases
+            .iter()
+            .flat_map(|r| r.assets.iter())
+            .filter_map(|a| parse_asset_name(&a.name))
+            .map(|(_, _, mc)| mc)
+            .next()
+            .expect("an aprism JE asset exists");
+        let (rel, asset) = select_release(&releases, &mc, true)
+            .expect("aprism JE artifact selectable");
+        let (tag, edit, amc) = parse_asset_name(&asset.name).unwrap();
+        assert_eq!(tag, rel.tag);
+        assert_eq!(edit, "JE");
+        assert_eq!(amc, mc);
+        let cached = download_asset(&asset).await.expect("download aprism jar");
+        assert!(cached.exists());
+        // javaagent arg must embed the jar path and all four key=value fields.
+        let arg = javaagent_arg(&cached, &rel.tag, &mc, std::path::Path::new("/g"));
+        assert!(arg.starts_with("-javaagent:"));
+        assert!(arg.contains("aprismVersion="));
+        assert!(arg.contains("mcEdit=JE"));
+        assert!(arg.contains("mcVersion="));
+        assert!(arg.contains("gameRoot="));
+    }
+
+
     use super::*;
 
     #[test]

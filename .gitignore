@@ -39,3 +39,6 @@ launch.log
 
 # Session migration data (Cherry Studio)
 .cherry_migration/
+
+# Release zip artifacts (built, not committed)
+mdl-v26*-windows-x64.zip
