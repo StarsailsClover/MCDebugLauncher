@@ -236,7 +236,7 @@ pub async fn stop_server(info: &ServerInfo) -> Result<()> {
 pub fn clear_stdio_inherit_flags() {
     #[cfg(windows)]
     {
-        use std::os::windows::io::AsRawHandle;
+        
         unsafe {
             extern "system" {
                 fn GetStdHandle(which: u32) -> *mut std::ffi::c_void;

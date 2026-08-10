@@ -9,7 +9,7 @@
 // rendered as `[OK]` / `[WARN]` / `[FAIL]` with a short detail line so both
 // humans and agents can consume the output.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 /// One health-check finding.

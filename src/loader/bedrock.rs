@@ -9,7 +9,6 @@
 // Native).
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 

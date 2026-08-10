@@ -5,6 +5,30 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.1.0-alpha.5] - 2026-08-11
+
+### Changed (v26.1 Alpha 5: stability & code hygiene)
+- **Zero compiler warnings**: the build is now completely warning-free. This
+  closes out real issues, not just noise:
+  - Fixed a dead-store (`is_neoforge` initial value never read).
+  - Renamed Xbox API response fields to snake_case with `#[serde(rename)]`
+    (PascalCase wire keys preserved).
+  - Handled the must-use `Result` from `capture.stop()`.
+  - Migrated deprecated `image::io::Limits` to `image::Limits`.
+  - Fixed two "type more private than item" API-design issues
+    (`FabricLoaderProfile`, `Rule` made `pub`).
+  - Removed unused imports (`Context`, two `std::io::Write`).
+  - Unified the triplicated Win32 FFI declarations (`OpenProcess`,
+    `CloseHandle`, `GetStdHandle`) to a single pointer-handle signature,
+    eliminating three "redeclared with a different signature" warnings.
+  - Suppressed intentional dead_code on the retained public API surface
+    (serde wire-format fields and reserved utilities) via one documented
+    crate-level allow.
+
+### Verified
+- 74 unit tests green; release build clean; `mdl doctor` 8 passed / 0 failed;
+  `mdl capabilities` returns the full manifest.
+
 ## [26.1.0-alpha.4] - 2026-08-11
 
 ### Added (v26.1 Alpha 4: feature parity)

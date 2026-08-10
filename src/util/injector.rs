@@ -18,7 +18,7 @@ mod windows_impl {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
 
-    type HANDLE = usize;
+    type HANDLE = *mut std::ffi::c_void;
 
     extern "system" {
         fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> HANDLE;
@@ -61,7 +61,7 @@ mod windows_impl {
 
     // LoadLibraryW as a CreateRemoteThread-compatible entry point.
     unsafe extern "system" fn load_library_trampoline(lp: *mut std::ffi::c_void) -> u32 {
-        LoadLibraryW(lp as *const u16) as u32
+        LoadLibraryW(lp as *const u16) as usize as u32
     }
 
     fn to_wide(s: &str) -> Vec<u16> {
@@ -84,7 +84,7 @@ mod windows_impl {
                 0,
                 pid,
             );
-            if proc == 0 {
+            if proc.is_null() {
                 bail!(
                     "Failed to open process {} (insufficient privileges or process gone)",
                     pid
@@ -125,7 +125,7 @@ mod windows_impl {
                 0,
                 std::ptr::null_mut(),
             );
-            if thread == 0 {
+            if thread.is_null() {
                 CloseHandle(proc);
                 bail!("CreateRemoteThread failed for process {}", pid);
             }

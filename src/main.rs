@@ -1,6 +1,12 @@
+// MDL keeps a large intentional public API surface: serde wire-format fields
+// deserialized from Mojang/GitHub/Modrinth responses but not read in Rust, and
+// reserved utility functions staged for upcoming features. These are deliberate,
+// not bugs — suppress dead_code for the whole crate rather than annotating each.
+#![allow(dead_code)]
+
 // MCDebugLauncher - Main entry point
 
-use anyhow::{Result, Context};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tracing::{info, Level};
@@ -810,7 +816,6 @@ struct TeeWriter {
 }
 impl std::io::Write for TeeWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        use std::io::Write;
         // Only write to stdout if not in JSON mode
         if !self.json_mode {
             let _ = std::io::stdout().write_all(buf);
@@ -823,7 +828,6 @@ impl std::io::Write for TeeWriter {
         Ok(buf.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        use std::io::Write;
         if !self.json_mode {
             let _ = std::io::stdout().flush();
         }
@@ -1452,7 +1456,7 @@ async fn enter_world_after_ready(name: &str) -> Result<()> {
     // Navigate from the title screen: Singleplayer -> Create New World.
     // Coordinates use GUI scale 2 (client area = screenshot px / 2), verified
     // in Alpha 7 E2E. Best-effort: any failure only warns.
-    let mut click = |x: f64, y: f64| {
+    let click = |x: f64, y: f64| {
         let path = inst.path.clone();
         async move {
             let _ = game::client::mouse_input(&path, "left", "tap", Some(x), Some(y), None).await;
@@ -2048,7 +2052,7 @@ async fn cmd_import_instance(zip_path: &std::path::Path, instance_name: Option<&
     let target_name = instance_name.unwrap_or(&config.name).to_string();
     
     // Check if instance already exists
-    let manager = InstanceManager::new()?;
+    let _manager = InstanceManager::new()?;
     let instances_dir = util::paths::get_instances_dir()?;
     let target_path = instances_dir.join(&target_name);
     

@@ -19,7 +19,7 @@ pub struct FabricLoaderVersion {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct FabricLoaderProfile {
+pub struct FabricLoaderProfile {
     #[serde(rename = "launcherMeta")]
     launcher_meta: LauncherMeta,
     /// Intermediary mappings library required at runtime. The Fabric meta API

@@ -66,8 +66,10 @@ pub struct MinecraftAccount {
 
 #[derive(Debug, Deserialize)]
 struct XboxAuthResponse {
-    Token: String,
-    DisplayClaims: serde_json::Value,
+    #[serde(rename = "Token")]
+    token: String,
+    #[serde(rename = "DisplayClaims")]
+    display_claims: serde_json::Value,
 }
 
 fn accounts_dir() -> Result<PathBuf> {
@@ -168,7 +170,7 @@ pub async fn login_interactive() -> Result<MinecraftAccount> {
         .context("Xbox Live auth failed")?
         .json()
         .await?;
-    let uhs = xbl.DisplayClaims["xui"][0]["uhs"]
+    let uhs = xbl.display_claims["xui"][0]["uhs"]
         .as_str()
         .context("Missing XBL user hash")?
         .to_string();
@@ -177,7 +179,7 @@ pub async fn login_interactive() -> Result<MinecraftAccount> {
     let xsts: XboxAuthResponse = client
         .post(XSTS_URL)
         .json(&serde_json::json!({
-            "Properties": { "SandboxId": "RETAIL", "UserTokens": [xbl.Token] },
+            "Properties": { "SandboxId": "RETAIL", "UserTokens": [xbl.token] },
             "RelyingParty": "rp://api.minecraftservices.com/",
             "TokenType": "JWT"
         }))
@@ -195,7 +197,7 @@ pub async fn login_interactive() -> Result<MinecraftAccount> {
     let mc: McLogin = client
         .post(MC_LOGIN_URL)
         .json(&serde_json::json!({
-            "identityToken": format!("XBL3.0 x={};{}", uhs, xsts.Token)
+            "identityToken": format!("XBL3.0 x={};{}", uhs, xsts.token)
         }))
         .send()
         .await

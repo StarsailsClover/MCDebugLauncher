@@ -147,7 +147,9 @@ pub fn capture_window_png(resolved: window::ResolvedWindow, timeout_secs: u64) -
         .map_err(|e| anyhow::anyhow!("Failed to start window capture: {}", e))?;
 
     let result = receiver.recv_timeout(Duration::from_secs(timeout_secs.max(1)));
-    capture.stop();
+    // Stop the capture session. Failure here is benign (the channel has
+    // already delivered or timed out), so the Result is intentionally dropped.
+    let _ = capture.stop();
 
     match result {
         Ok(Ok(image)) => Ok(image),
@@ -185,7 +187,7 @@ pub fn capture_instance_best(
 
 /// Decode PNG header dimensions without full rasterization.
 fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    use image::io::Limits;
+    use image::Limits;
     use image::ImageDecoder;
     let mut opts = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()

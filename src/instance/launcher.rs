@@ -224,7 +224,7 @@ enum ArgumentValueInner {
 }
 
 #[derive(Debug, Deserialize)]
-struct Rule {
+pub struct Rule {
     action: String,
     os: Option<OsRule>,
     features: Option<HashMap<String, bool>>,
@@ -400,7 +400,7 @@ impl InstanceLauncher {
         let (classpath, main_class, module_path_entries) = self.build_classpath(&version_dir, &config).await?;
 
         // Prepare game arguments
-        let game_dir = instance_dir.clone();
+        let game_dir = instance_dir;
         let assets_dir = crate::util::paths::get_data_dir()?.join("assets");
         let natives_dir = version_dir.join("natives");
 
@@ -718,8 +718,6 @@ impl InstanceLauncher {
         let mut deferred_jars: Vec<String> = Vec::new();
         let module_path_entries = Vec::new();
         let mut main_class = String::new();
-        let mut is_neoforge = false;
-
         let loader_type = config.loader.as_ref().map(|l| l.loader_type.as_str());
         let is_neoforge_loader = loader_type == Some("neoforge");
 
@@ -748,7 +746,7 @@ impl InstanceLauncher {
                 }
 
                 // Check if this is NeoForge (needs module path instead of classpath)
-                is_neoforge = main_class.contains("bootstraplauncher") || main_class.contains("neoforge");
+                let is_neoforge = main_class.contains("bootstraplauncher") || main_class.contains("neoforge");
 
                 // NeoForge: add the installer-produced game JARs. These come from
                 // the installer's processor pipeline, not from version.json's

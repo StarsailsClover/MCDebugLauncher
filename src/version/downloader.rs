@@ -90,7 +90,7 @@ pub async fn download_file(
 /// optional sha1 verification.
 async fn try_single_source(
     url: &str,
-    dest: &Path,
+    _dest: &Path,
     expected_sha1: Option<&str>,
     display_name: Option<&str>,
 ) -> Result<Vec<u8>> {
@@ -297,7 +297,7 @@ pub async fn download_file_with_progress<F>(
 where
     F: FnMut(u64, u64),
 {
-    use futures_util::StreamExt;
+    
     
     debug!("Downloading {} to {:?} with progress", url, dest);
 

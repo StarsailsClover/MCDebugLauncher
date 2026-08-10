@@ -14,10 +14,9 @@
 //      fetched by the normal asset downloader.
 
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tokio::fs;
 
-use crate::instance::config::InstanceConfig;
 use crate::util::checksum::verify_sha1;
 use crate::version::manifest::VersionMetadata;
 

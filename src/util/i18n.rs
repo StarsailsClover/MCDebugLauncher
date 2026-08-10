@@ -51,9 +51,9 @@ pub fn enable_utf8_console() {
             extern "system" {
                 fn SetConsoleOutputCP(code_page: u32) -> i32;
                 fn SetConsoleCP(code_page: u32) -> i32;
-                fn GetConsoleMode(handle: isize, mode: *mut u32) -> i32;
-                fn SetConsoleMode(handle: isize, mode: u32) -> i32;
-                fn GetStdHandle(std_handle: u32) -> isize;
+                fn GetConsoleMode(handle: *mut std::ffi::c_void, mode: *mut u32) -> i32;
+                fn SetConsoleMode(handle: *mut std::ffi::c_void, mode: u32) -> i32;
+                fn GetStdHandle(std_handle: u32) -> *mut std::ffi::c_void;
             }
             
             const STD_OUTPUT_HANDLE: u32 = 0xFFFFFFF5_u32; // -11 as u32
@@ -68,7 +68,7 @@ pub fn enable_utf8_console() {
             // This is needed for progress bars (which use stderr) to work correctly
             for handle_id in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
                 let handle = GetStdHandle(handle_id);
-                if handle != -1 && handle != 0 {
+                if !handle.is_null() {
                     let mut mode: u32 = 0;
                     if GetConsoleMode(handle, &mut mode) != 0 {
                         let _ = SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
