@@ -5,6 +5,22 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.1.0-alpha.4] - 2026-08-11
+
+### Added (v26.1 Alpha 4: feature parity)
+- **Instance clone**: `mdl clone <src> <dst>` duplicates an entire instance
+  (mods, configs, saves, worlds) into a new instance and rewrites its
+  `instance.json` with the new name. Matches the "duplicate instance" feature
+  every mainstream launcher offers.
+- **Instance rename**: `mdl rename <old> <new>` renames an instance directory
+  and updates its config. Matches mainstream launcher rename support.
+- **`InstanceManager::with_dir`**: test-friendly constructor rooted at a
+  custom directory (used by the new isolated tests).
+
+### Verified
+- 74 unit tests green (4 new clone/rename tests covering recursive copy,
+  config rewrite, and destination-conflict rejection).
+
 ## [26.1.0-alpha.3] - 2026-08-11
 
 ### Added (v26.1 Alpha 3: more Bedrock launch support)

@@ -729,6 +729,22 @@ enum Commands {
         name: String,
     },
 
+    /// Clone (duplicate) an instance into a new instance
+    Clone {
+        /// Source instance name
+        name: String,
+        /// New instance name
+        new_name: String,
+    },
+
+    /// Rename an instance
+    Rename {
+        /// Current instance name
+        name: String,
+        /// New instance name
+        new_name: String,
+    },
+
     /// Start agent server
     Agent {
         /// Server port
@@ -1005,6 +1021,12 @@ async fn main() -> Result<()> {
         }
         Commands::Delete { name } => {
             cmd_delete(&name).await?;
+        }
+        Commands::Clone { name, new_name } => {
+            cmd_clone(&name, &new_name).await?;
+        }
+        Commands::Rename { name, new_name } => {
+            cmd_rename(&name, &new_name).await?;
         }
         Commands::InstanceInfo { name } => {
             cmd_instance_info(&cli.format, &name).await?;
@@ -1792,6 +1814,26 @@ async fn cmd_delete(name: &str) -> Result<()> {
     manager.delete(name).await?;
 
     println!("Instance '{}' deleted", name);
+    Ok(())
+}
+
+async fn cmd_clone(name: &str, new_name: &str) -> Result<()> {
+    use instance::InstanceManager;
+
+    let manager = InstanceManager::new()?;
+    let inst = manager.clone_instance(name, new_name).await?;
+
+    println!("Instance '{}' cloned to '{}' ({})", name, new_name, inst.path.display());
+    Ok(())
+}
+
+async fn cmd_rename(name: &str, new_name: &str) -> Result<()> {
+    use instance::InstanceManager;
+
+    let manager = InstanceManager::new()?;
+    let inst = manager.rename(name, new_name).await?;
+
+    println!("Instance '{}' renamed to '{}' ({})", name, new_name, inst.path.display());
     Ok(())
 }
 

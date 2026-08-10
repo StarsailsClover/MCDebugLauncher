@@ -24,6 +24,12 @@ impl InstanceManager {
         Ok(Self { instances_dir })
     }
 
+    /// Construct a manager rooted at a custom instances directory. Used by
+    /// tests to avoid touching the real user data directory.
+    pub fn with_dir(instances_dir: PathBuf) -> Self {
+        Self { instances_dir }
+    }
+
     pub async fn create(&self, config: InstanceConfig, install: bool) -> Result<Instance> {
         let instance_path = self.instances_dir.join(&config.name);
 
@@ -277,5 +283,163 @@ impl InstanceManager {
             .with_context(|| format!("Failed to delete instance '{}'", name))?;
 
         Ok(())
+    }
+
+    /// Clone an instance into a new instance directory. The entire directory
+    /// tree is copied (mods, configs, saves, worlds) and the new instance's
+    /// `instance.json` is rewritten with the new name. v26.1-alpha.4: this
+    /// matches the "duplicate instance" feature every mainstream launcher
+    /// offers.
+    pub async fn clone_instance(&self, src_name: &str, dst_name: &str) -> Result<Instance> {
+        let src_path = self.instances_dir.join(src_name);
+        let dst_path = self.instances_dir.join(dst_name);
+
+        if !src_path.exists() {
+            anyhow::bail!("Instance '{}' not found", src_name);
+        }
+        if dst_path.exists() {
+            anyhow::bail!("Instance '{}' already exists", dst_name);
+        }
+
+        copy_dir_recursive(&src_path, &dst_path).await
+            .with_context(|| format!("Failed to clone '{}' to '{}'", src_name, dst_name))?;
+
+        // Rewrite the cloned config with the new name.
+        let mut config = self.get(dst_name).await?.config;
+        config.name = dst_name.to_string();
+        let config_json = serde_json::to_string_pretty(&config)?;
+        fs::write(dst_path.join("instance.json"), config_json).await
+            .context("Failed to rewrite cloned instance configuration")?;
+
+        Ok(Instance {
+            name: dst_name.to_string(),
+            config,
+            path: dst_path,
+        })
+    }
+
+    /// Rename an instance: move its directory and rewrite `instance.json`.
+    /// v26.1-alpha.4: matches mainstream launcher rename support.
+    pub async fn rename(&self, old_name: &str, new_name: &str) -> Result<Instance> {
+        let old_path = self.instances_dir.join(old_name);
+        let new_path = self.instances_dir.join(new_name);
+
+        if !old_path.exists() {
+            anyhow::bail!("Instance '{}' not found", old_name);
+        }
+        if new_path.exists() {
+            anyhow::bail!("Instance '{}' already exists", new_name);
+        }
+
+        fs::rename(&old_path, &new_path).await
+            .with_context(|| format!("Failed to rename '{}' to '{}'", old_name, new_name))?;
+
+        let mut config = self.get(new_name).await?.config;
+        config.name = new_name.to_string();
+        let config_json = serde_json::to_string_pretty(&config)?;
+        fs::write(new_path.join("instance.json"), config_json).await
+            .context("Failed to rewrite renamed instance configuration")?;
+
+        Ok(Instance {
+            name: new_name.to_string(),
+            config,
+            path: new_path,
+        })
+    }
+}
+
+/// Recursively copy a directory tree (files + subdirectories). Uses tokio fs
+/// so it stays async-friendly. Skips symlinks (rare in instance dirs).
+async fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    fs::create_dir_all(dst).await?;
+    let mut entries = fs::read_dir(src).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let src_child = entry.path();
+        let dst_child = dst.join(entry.file_name());
+        let ft = entry.file_type().await?;
+        if ft.is_dir() {
+            Box::pin(copy_dir_recursive(&src_child, &dst_child)).await?;
+        } else if ft.is_file() {
+            fs::copy(&src_child, &dst_child).await.with_context(|| {
+                format!("Failed to copy {}", src_child.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instance::config::InstanceConfig;
+    use tempfile::tempdir;
+
+    fn test_config(name: &str) -> InstanceConfig {
+        InstanceConfig {
+            name: name.to_string(),
+            version: "1.21.4".to_string(),
+            loader: None,
+        }
+    }
+
+    /// Create a bare instance directory (config only, no download) for tests.
+    async fn make_instance(manager: &InstanceManager, name: &str) {
+        let path = manager.instances_dir.join(name);
+        tokio::fs::create_dir_all(&path).await.unwrap();
+        let config = test_config(name);
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        tokio::fs::write(path.join("instance.json"), json).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_clone_copies_tree_and_renames_config() {
+        let dir = tempdir().unwrap();
+        let manager = InstanceManager::with_dir(dir.path().to_path_buf());
+        make_instance(&manager, "src").await;
+        // Add a nested file to prove recursive copy.
+        let nested = manager.instances_dir.join("src").join("mods");
+        tokio::fs::create_dir_all(&nested).await.unwrap();
+        tokio::fs::write(nested.join("example.jar"), b"fake").await.unwrap();
+
+        let cloned = manager.clone_instance("src", "dst").await.unwrap();
+        assert_eq!(cloned.name, "dst");
+        assert!(cloned.path.join("mods").join("example.jar").exists());
+        // Config rewritten with new name.
+        let cfg: InstanceConfig = serde_json::from_str(
+            &tokio::fs::read_to_string(cloned.path.join("instance.json")).await.unwrap(),
+        ).unwrap();
+        assert_eq!(cfg.name, "dst");
+    }
+
+    #[tokio::test]
+    async fn test_clone_rejects_existing_destination() {
+        let dir = tempdir().unwrap();
+        let manager = InstanceManager::with_dir(dir.path().to_path_buf());
+        make_instance(&manager, "src").await;
+        make_instance(&manager, "dst").await;
+        assert!(manager.clone_instance("src", "dst").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_rename_moves_and_rewrites_config() {
+        let dir = tempdir().unwrap();
+        let manager = InstanceManager::with_dir(dir.path().to_path_buf());
+        make_instance(&manager, "old").await;
+        let renamed = manager.rename("old", "new").await.unwrap();
+        assert_eq!(renamed.name, "new");
+        assert!(!manager.instances_dir.join("old").exists());
+        let cfg: InstanceConfig = serde_json::from_str(
+            &tokio::fs::read_to_string(renamed.path.join("instance.json")).await.unwrap(),
+        ).unwrap();
+        assert_eq!(cfg.name, "new");
+    }
+
+    #[tokio::test]
+    async fn test_rename_rejects_existing_destination() {
+        let dir = tempdir().unwrap();
+        let manager = InstanceManager::with_dir(dir.path().to_path_buf());
+        make_instance(&manager, "old").await;
+        make_instance(&manager, "taken").await;
+        assert!(manager.rename("old", "taken").await.is_err());
     }
 }
