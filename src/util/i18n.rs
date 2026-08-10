@@ -38,21 +38,43 @@ pub fn t(en: &str, zh: &str) -> String {
 /// zh-CN), which corrupts UTF-8 bytes. Switching to UTF-8 before any logging
 /// output avoids that. On non-Windows platforms this is a no-op.
 ///
-/// Alpha 9: Now sets both input and output code pages for better PowerShell compatibility.
+/// Alpha 9: Now sets both input and output code pages, and also attempts to
+/// configure the console mode for UTF-8 processing at a lower level.
 ///
 /// Best-effort: if the Win32 call fails (rare), we silently continue.
 pub fn enable_utf8_console() {
     #[cfg(windows)]
     {
-        // SAFETY: SetConsoleOutputCP and SetConsoleCP only change console code pages;
+        // SAFETY: Console API calls only change console state;
         // safe to call from the single-threaded startup path.
         unsafe {
             extern "system" {
                 fn SetConsoleOutputCP(code_page: u32) -> i32;
                 fn SetConsoleCP(code_page: u32) -> i32;
+                fn GetConsoleMode(handle: isize, mode: *mut u32) -> i32;
+                fn SetConsoleMode(handle: isize, mode: u32) -> i32;
+                fn GetStdHandle(std_handle: u32) -> isize;
             }
-            let _ = SetConsoleOutputCP(65001); // CP_UTF8 for output
-            let _ = SetConsoleCP(65001); // CP_UTF8 for input
+            
+            const STD_OUTPUT_HANDLE: u32 = 0xFFFFFFF5_u32; // -11 as u32
+            const STD_ERROR_HANDLE: u32 = 0xFFFFFFF4_u32; // -12 as u32
+            const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+            
+            // Set console code pages to UTF-8
+            let _ = SetConsoleOutputCP(65001);
+            let _ = SetConsoleCP(65001);
+            
+            // Enable virtual terminal processing for both stdout and stderr
+            // This is needed for progress bars (which use stderr) to work correctly
+            for handle_id in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+                let handle = GetStdHandle(handle_id);
+                if handle != -1 && handle != 0 {
+                    let mut mode: u32 = 0;
+                    if GetConsoleMode(handle, &mut mode) != 0 {
+                        let _ = SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+                    }
+                }
+            }
         }
     }
 }

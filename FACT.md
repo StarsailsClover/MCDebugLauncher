@@ -132,25 +132,38 @@
 
 ## 🔴 待修复问题
 
-### 9. 中文显示需要 PowerShell UTF-8 设置
-**现象：** 使用 `--lang zh` 时在默认 PowerShell 中显示乱码
+### 9. ✅ 中文显示 UTF-8 支持
+**状态：** 程序正常，环境限制已确认
 
-**根因分析：** 不是程序 bug，是 PowerShell 默认使用 GBK 编码
+**根因分析（深度调查）：**
+- ✅ 程序输出正确的 UTF-8 字节（验证：原始字节流包含正确的 `E2-80-94` em dash）
+- ✅ CHANGELOG.md 文件本身是正确的 UTF-8 编码
+- ✅ Rust `include_str!` 在编译时正确读取 UTF-8
+- ❌ PowerShell 默认使用 GBK (CP936) 解释程序输出，导致显示乱码
+- ✅ cmd.exe 使用 `chcp 65001` 后能正确显示所有中文字符
 
-**解决方案（用户侧）：**
-```powershell
-$OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-[Console]::InputEncoding = [System.Text.Encoding]::UTF8
-```
+**解决方案（推荐）：**
+- **cmd.exe 用户：** 在启动 cmd 时执行 `chcp 65001`
+- **PowerShell 用户：** 在 PowerShell profile 中添加：
+  ```powershell
+  $OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+  [Console]::InputEncoding = [System.Text.Encoding]::UTF8
+  ```
+- **Windows Terminal 用户：** 默认支持 UTF-8，无需额外设置
 
-**解决方案（程序侧）：**
-- Windows 平台在启动时强制调用 `SetConsoleOutputCP(CP_UTF8)`
-- 程序中已有 `enable_utf8_console()` 函数，但 PowerShell 重定向时仍有问题
-- 建议在 README 中说明 PowerShell 用户需要设置环境变量
+**程序侧已实现：**
+- ✅ `enable_utf8_console()` 调用 `SetConsoleCP(CP_UTF8)` 和 `SetConsoleOutputCP(CP_UTF8)`
+- ✅ 所有字符串正确使用 UTF-8 编码
+- ✅ 国际化字符串通过 `i18n::t()` 函数加载
 
-**优先级：** P1（文档改进 + 增强 Windows UTF-8 强制设置）
+**测试结果：**
+- ✅ cmd.exe + chcp 65001：完美显示中文和特殊字符（—）
+- 🟡 PowerShell：需要用户设置环境变量
+- ✅ 程序输出字节流：100% 正确的 UTF-8
 
-**状态：** 待改进
+**优先级：** P2（仅需文档说明，非程序 bug）
+
+**状态：** 已验证 - 需要文档更新
 
 ---
 
@@ -280,25 +293,31 @@ $OutputEncoding = [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 - ✅ delete 确认机制（--force）
 
 **仍需改进：**
-- 🔄 中文 UTF-8 显示增强（Windows 强制设置 + 文档说明）
+- ✅ 中文 UTF-8 显示验证完成（确认为环境问题，非程序 bug）
 
 ### Phase 2: 新功能开发（Alpha 9 重点）
-- [x] Task 1: 下载与启动进度显示（indicatif）✅ - 基础设施已存在
+- [ ] Task 1: 下载与启动进度显示（indicatif）🔄 - 需要集成
   - ✅ indicatif 依赖已添加到 Cargo.toml
   - ✅ util/progress.rs 进度条工具已实现
   - ✅ download_file_with_progress 接口已存在
-  - 🔄 需要在实际下载流程中集成进度显示
-- [x] Task 2: 文件完整性验证可选控制（--skip-verify）✅
+  - 🔄 实测发现：23MB 文件下载 26 秒无任何反馈
+  - ⏳ 需要在实际下载流程中集成进度显示
+- [ ] Task 2: 文件完整性验证可选控制（--skip-verify）⏳ - 未实现
+  - ⏳ 需要添加 --skip-verify 参数到 launch 命令
+  - ⏳ 需要在验证流程中实现跳过逻辑
 - [x] Task 3: 交互式模组搜索安装 ✅（Alpha 8.1 已实现）
 - [x] Task 4: 编译警告清理和统计 ✅ - 从 79 降到 66 个
-- [x] Task 5: 启动更新摘要优化 🔄 - 已实现版本变化检测
-  - ✅ 添加版本变化检测逻辑（基于 last_version.txt）
+- [x] Task 5: 启动更新摘要优化 ✅ - 版本变化检测完成
+  - ✅ 添加版本变化检测逻辑（基于 last_version 文件）
   - ✅ 增强 mdl changelog 命令支持自定义版本数
   - ✅ 将相关函数设为 public
-  - 🔄 等待编译测试
-- [x] Task 6: 中文 UTF-8 显示增强 ✅
-  - ✅ 同时设置 SetConsoleCP 和 SetConsoleOutputCP
-  - ✅ 改进函数注释说明 PowerShell 兼容性
+  - ✅ 编译测试通过
+  - ✅ 功能测试通过（首次显示 changelog，后续不显示）
+- [x] Task 6: 中文 UTF-8 显示验证 ✅
+  - ✅ 验证程序输出正确的 UTF-8 字节流
+  - ✅ 验证 cmd.exe + chcp 65001 完美显示
+  - ✅ 确认 PowerShell 乱码为环境问题，非程序 bug
+  - ✅ 文档已更新，说明解决方案
 
 ### Phase 3: 测试和文档
 - [ ] 端到端测试所有功能

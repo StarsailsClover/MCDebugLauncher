@@ -45,6 +45,7 @@ thiserror = "1.0"
 sha1 = "0.10"
 sha2 = "0.10"
 zip = "2.2"
+walkdir = "2.5"
 # Java runtime archive extraction (tar.gz on Linux/macOS)
 tar = "0.4"
 flate2 = "1.0"
@@ -55,6 +56,7 @@ dirs = "5.0"
 regex = "1.10"
 sysinfo = "0.30"
 indicatif = "0.17"
+console = "0.15"
 
 # HTTP server
 axum = { version = "0.7", features = ["ws"] }

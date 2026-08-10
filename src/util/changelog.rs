@@ -84,28 +84,30 @@ pub fn print_recent_updates(json_mode: bool) {
         return;
     }
 
-    // Show the full changelog
-    let digests = recent_versions(CHANGELOG, 4, 4);
+    // Show only the latest version's changelog (Alpha 9: much less noisy)
+    let digests = recent_versions(CHANGELOG, 1, 5);
     if digests.is_empty() {
         return;
     }
-    println!("{}", i18n::t("Recent updates:", "最近更新："));
-    for d in &digests {
-        println!(
-            "  {} {}{}",
-            d.version,
-            if d.date.is_empty() { String::new() } else { format!("({}) ", d.date) },
-            ""
-        );
-        for h in &d.highlights {
-            let line = if h.chars().count() > 96 {
-                format!("{}…", h.chars().take(93).collect::<String>())
-            } else {
-                h.clone()
-            };
-            println!("    - {}", line);
-        }
+    
+    let d = &digests[0];
+    println!(
+        "{} {} {}",
+        i18n::t("What's new in", "新版本"),
+        d.version,
+        if d.date.is_empty() { String::new() } else { format!("({})", d.date) }
+    );
+    
+    for h in &d.highlights {
+        let line = if h.chars().count() > 96 {
+            format!("{}…", h.chars().take(93).collect::<String>())
+        } else {
+            h.clone()
+        };
+        println!("  • {}", line);
     }
+    
+    println!("  {}", i18n::t("Run 'mdl changelog' for full history", "运行 'mdl changelog' 查看完整历史"));
     println!();
 
     // Update the last version file

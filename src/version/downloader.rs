@@ -231,7 +231,7 @@ fn sanitize_for_cache(key: &str) -> String {
         .collect()
 }
 
-/// Download a file with progress callback (single-shot, mirror fallback).
+/// Download a file with progress callback (streaming with real-time updates).
 pub async fn download_file_with_progress<F>(
     url: &str,
     dest: &Path,
@@ -241,11 +241,100 @@ pub async fn download_file_with_progress<F>(
 where
     F: FnMut(u64, u64),
 {
-    let bytes = download_bytes(url, expected_sha1).await?;
-    progress_callback(bytes.len() as u64, bytes.len() as u64);
-    write_and_sync(dest, &bytes).await?;
-    info!("Downloaded {} ({} bytes)", dest.display(), bytes.len());
-    Ok(())
+    use futures_util::StreamExt;
+    
+    debug!("Downloading {} to {:?} with progress", url, dest);
+
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .context("Failed to create parent directory")?;
+    }
+
+    // Try cache first
+    let cache_key = cache_key(url, expected_sha1);
+    if let Ok(mut cache) = crate::util::cache::DownloadCache::new() {
+        if cache.lookup(&cache_key).is_some() {
+            if cache.install_copy(&cache_key, dest).unwrap_or(false) {
+                info!("Installed from cache (copy): {}", dest.display());
+                return Ok(());
+            }
+        }
+    }
+
+    let candidates = crate::util::mirrors::candidate_urls(url).await;
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for candidate in &candidates {
+        let result = try_download_with_progress(candidate, dest, expected_sha1, &mut progress_callback).await;
+        match result {
+            Ok(bytes_len) => {
+                debug!("Downloaded {} ({} bytes) from {}", dest.display(), bytes_len, candidate);
+                return Ok(());
+            }
+            Err(e) => {
+                debug!("Source {} failed: {}", candidate, e);
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("No download source succeeded for {}", url)))
+        .with_context(|| format!("All sources failed for {}", url))
+}
+
+/// Try to download from a single source with streaming progress updates.
+async fn try_download_with_progress<F>(
+    url: &str,
+    dest: &Path,
+    expected_sha1: Option<&str>,
+    progress_callback: &mut F,
+) -> Result<u64>
+where
+    F: FnMut(u64, u64),
+{
+    use futures_util::StreamExt;
+    
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()?;
+
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("Failed to download from {}", url))?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("HTTP error {}: {}", response.status(), url);
+    }
+
+    let total_size = response.content_length().unwrap_or(0);
+    let mut downloaded: u64 = 0;
+    let mut buffer = Vec::new();
+
+    // Report initial progress
+    progress_callback(0, total_size);
+
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("Failed to read chunk from {}", url))?;
+        buffer.extend_from_slice(&chunk);
+        downloaded += chunk.len() as u64;
+        progress_callback(downloaded, total_size);
+    }
+
+    // Verify checksum if provided
+    if let Some(expected) = expected_sha1 {
+        if !verify_sha1(&buffer, expected) {
+            anyhow::bail!("Checksum mismatch for {}", url);
+        }
+    }
+
+    // Write to disk
+    write_and_sync(dest, &buffer).await?;
+
+    Ok(buffer.len() as u64)
 }
 
 /// Fetch bytes only (no file write), with mirror fallback.

@@ -1,7 +1,8 @@
 // MCDebugLauncher - Main entry point
 
-use anyhow::Result;
+use anyhow::{Result, Context};
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -12,6 +13,8 @@ mod diagnostic;
 mod agent;
 mod game;
 mod util;
+
+use instance::config::InstanceConfig;
 
 #[derive(Parser)]
 #[command(name = "mdl")]
@@ -458,7 +461,19 @@ enum Commands {
     },
 
     /// List instances
-    List,
+    List {
+        /// Filter by Minecraft version (e.g. 1.21.1)
+        #[arg(long)]
+        version: Option<String>,
+        
+        /// Filter by loader type (e.g. fabric, forge, neoforge)
+        #[arg(long)]
+        loader: Option<String>,
+        
+        /// Sort by: name, version, loader (default: name)
+        #[arg(long, default_value = "name")]
+        sort: String,
+    },
 
     /// Launch an instance
     Launch {
@@ -564,6 +579,10 @@ enum Commands {
     Status {
         /// Instance name (optional, shows all if omitted)
         name: Option<String>,
+
+        /// Show detailed instance information (config, mods, etc.)
+        #[arg(short, long)]
+        detail: bool,
     },
 
     /// Manage mods
@@ -628,6 +647,12 @@ enum Commands {
         name: String,
     },
 
+    /// Show detailed instance information
+    InstanceInfo {
+        /// Instance name
+        name: String,
+    },
+
     /// Start agent server
     Agent {
         /// Server port
@@ -656,19 +681,40 @@ enum Commands {
         versions: usize,
     },
 
+    /// Export an instance to a zip file
+    Export {
+        /// Instance name
+        instance: String,
+        /// Output path for the zip file
+        path: PathBuf,
+    },
+
+    /// Import an instance from a zip file
+    ImportInstance {
+        /// Path to the zip file
+        path: PathBuf,
+        /// Optional instance name (defaults to name from zip)
+        name: Option<String>,
+    },
+
     /// Add MDL to system PATH
     Setup,
 }
 
 // Writer that tees tracing output to both stdout and a log file so logs are
 // persisted without losing live console display (Alpha 7 logging).
+// In JSON mode, stdout output is suppressed to avoid polluting machine-readable output.
 struct TeeWriter {
     file: Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>>,
+    json_mode: bool,
 }
 impl std::io::Write for TeeWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         use std::io::Write;
-        let _ = std::io::stdout().write_all(buf);
+        // Only write to stdout if not in JSON mode
+        if !self.json_mode {
+            let _ = std::io::stdout().write_all(buf);
+        }
         if let Some(file) = &self.file {
             if let Ok(mut f) = file.lock() {
                 let _ = f.write_all(buf);
@@ -678,7 +724,9 @@ impl std::io::Write for TeeWriter {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         use std::io::Write;
-        let _ = std::io::stdout().flush();
+        if !self.json_mode {
+            let _ = std::io::stdout().flush();
+        }
         if let Some(file) = &self.file {
             if let Ok(mut f) = file.lock() {
                 let _ = f.flush();
@@ -690,16 +738,23 @@ impl std::io::Write for TeeWriter {
 #[derive(Clone)]
 struct TeeMakeWriter {
     file: Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>>,
+    json_mode: bool,
 }
 impl TeeMakeWriter {
-    fn new(f: Option<std::fs::File>) -> Self {
-        Self { file: f.map(|f| std::sync::Arc::new(std::sync::Mutex::new(f))) }
+    fn new(f: Option<std::fs::File>, json_mode: bool) -> Self {
+        Self { 
+            file: f.map(|f| std::sync::Arc::new(std::sync::Mutex::new(f))),
+            json_mode,
+        }
     }
 }
 impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for TeeMakeWriter {
     type Writer = TeeWriter;
     fn make_writer(&'a self) -> Self::Writer {
-        TeeWriter { file: self.file.clone() }
+        TeeWriter { 
+            file: self.file.clone(),
+            json_mode: self.json_mode,
+        }
     }
 }
 
@@ -739,7 +794,7 @@ async fn main() -> Result<()> {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(log_level)
         .with_ansi(!cli.no_color)
-        .with_writer(TeeMakeWriter::new(file_writer))
+        .with_writer(TeeMakeWriter::new(file_writer, cli.format == "json"))
         .finish();
 
     tracing::subscriber::set_global_default(subscriber)?;
@@ -764,8 +819,8 @@ async fn main() -> Result<()> {
         Commands::Create { name, mc_version, loader, loader_version, memory, no_install, with_test_world, no_despotes, despotes_prerelease } => {
             cmd_create(&name, &mc_version, loader.as_deref(), loader_version.as_deref(), memory.as_deref(), no_install, with_test_world, no_despotes, despotes_prerelease).await?;
         }
-        Commands::List => {
-            cmd_list(&cli.format).await?;
+        Commands::List { version, loader, sort } => {
+            cmd_list(&cli.format, version.as_deref(), loader.as_deref(), &sort).await?;
         }
         Commands::Launch { name, username, server, fullscreen, width, height, detach, no_queue, agent, agent_port, java_path, memory, dynamic_memory, aprism, enter_test_world, wait_ready } => {
             cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach, no_queue, agent, agent_port, java_path.as_deref(), memory.as_deref(), dynamic_memory, aprism, enter_test_world, wait_ready).await?;
@@ -776,8 +831,8 @@ async fn main() -> Result<()> {
         Commands::Logs { name, follow, lines, level } => {
             cmd_logs(&name, follow, lines, level.as_deref()).await?;
         }
-        Commands::Status { name } => {
-            cmd_status(&cli.format, name.as_deref()).await?;
+        Commands::Status { name, detail } => {
+            cmd_status(&cli.format, name.as_deref(), detail).await?;
         }
         Commands::Mod(mod_cmd) => {
             match mod_cmd {
@@ -860,6 +915,15 @@ async fn main() -> Result<()> {
         }
         Commands::Delete { name } => {
             cmd_delete(&name).await?;
+        }
+        Commands::InstanceInfo { name } => {
+            cmd_instance_info(&cli.format, &name).await?;
+        }
+        Commands::Export { instance, path } => {
+            cmd_export(&instance, &path).await?;
+        }
+        Commands::ImportInstance { path, name } => {
+            cmd_import_instance(&path, name.as_deref()).await?;
         }
         Commands::Search(sc) => match sc {
             SearchCommands::Mod { query, mc_version, loader, instance, limit } => {
@@ -1082,11 +1146,39 @@ async fn cmd_create(name: &str, version: &str, loader: Option<&str>, loader_vers
     Ok(())
 }
 
-async fn cmd_list(format: &str) -> Result<()> {
+async fn cmd_list(
+    format: &str,
+    version_filter: Option<&str>,
+    loader_filter: Option<&str>,
+    sort_by: &str,
+) -> Result<()> {
     use instance::InstanceManager;
 
     let manager = InstanceManager::new()?;
-    let instances = manager.list().await?;
+    let mut instances = manager.list().await?;
+
+    // Apply filters
+    if let Some(version) = version_filter {
+        instances.retain(|inst| inst.config.version == version);
+    }
+    if let Some(loader) = loader_filter {
+        instances.retain(|inst| {
+            inst.config.loader.as_ref()
+                .map(|l| l.loader_type.eq_ignore_ascii_case(loader))
+                .unwrap_or(false)
+        });
+    }
+
+    // Apply sorting
+    match sort_by {
+        "version" => instances.sort_by(|a, b| a.config.version.cmp(&b.config.version)),
+        "loader" => instances.sort_by(|a, b| {
+            let a_loader = a.config.loader.as_ref().map(|l| l.loader_type.as_str()).unwrap_or("");
+            let b_loader = b.config.loader.as_ref().map(|l| l.loader_type.as_str()).unwrap_or("");
+            a_loader.cmp(b_loader)
+        }),
+        _ => instances.sort_by(|a, b| a.name.cmp(&b.name)),
+    }
 
     if format == "json" {
         let data: Vec<_> = instances.iter().map(|inst| {
@@ -1418,7 +1510,7 @@ async fn cmd_logs(name: &str, follow: bool, lines: usize, level: Option<&str>) -
     Ok(())
 }
 
-async fn cmd_status(format: &str, name: Option<&str>) -> Result<()> {
+async fn cmd_status(format: &str, name: Option<&str>, detail: bool) -> Result<()> {
     use instance::InstanceStatus;
 
     let status = InstanceStatus::new()?;
@@ -1427,33 +1519,39 @@ async fn cmd_status(format: &str, name: Option<&str>) -> Result<()> {
         // Show single instance status
         let info = status.get_instance_status(instance_name).await?;
 
-        if format == "json" {
-            let json = serde_json::json!({
-                "status": "success",
-                "data": info
-            });
-            println!("{}", serde_json::to_string_pretty(&json)?);
+        if detail {
+            // Show detailed instance information
+            cmd_instance_detail(format, instance_name, &info).await?;
         } else {
-            println!("Instance: {}", info.name);
-            println!("Status: {}", info.state);
+            // Show basic status (existing behavior)
+            if format == "json" {
+                let json = serde_json::json!({
+                    "status": "success",
+                    "data": info
+                });
+                println!("{}", serde_json::to_string_pretty(&json)?);
+            } else {
+                println!("Instance: {}", info.name);
+                println!("Status: {}", info.state);
 
-            if let Some(pid) = info.pid {
-                println!("PID: {}", pid);
-            }
+                if let Some(pid) = info.pid {
+                    println!("PID: {}", pid);
+                }
 
-            if let Some(uptime) = info.uptime_seconds {
-                let hours = uptime / 3600;
-                let minutes = (uptime % 3600) / 60;
-                let seconds = uptime % 60;
-                println!("Uptime: {}h {}m {}s", hours, minutes, seconds);
-            }
+                if let Some(uptime) = info.uptime_seconds {
+                    let hours = uptime / 3600;
+                    let minutes = (uptime % 3600) / 60;
+                    let seconds = uptime % 60;
+                    println!("Uptime: {}h {}m {}s", hours, minutes, seconds);
+                }
 
-            if let Some(memory) = info.memory_mb {
-                println!("Memory: {} MB", memory);
-            }
+                if let Some(memory) = info.memory_mb {
+                    println!("Memory: {} MB", memory);
+                }
 
-            if let Some(cpu) = info.cpu_percent {
-                println!("CPU: {:.1}%", cpu);
+                if let Some(cpu) = info.cpu_percent {
+                    println!("CPU: {:.1}%", cpu);
+                }
             }
         }
     } else {
@@ -1496,6 +1594,84 @@ async fn cmd_status(format: &str, name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_instance_detail(format: &str, instance_name: &str, status_info: &instance::InstanceStatusInfo) -> Result<()> {
+    use instance::InstanceManager;
+    
+    let manager = InstanceManager::new()?;
+    let instance = manager.get(instance_name).await?;
+    
+    // Count mods
+    let mods_dir = instance.path.join("mods");
+    let mod_count = if mods_dir.exists() {
+        std::fs::read_dir(&mods_dir)
+            .map(|entries| entries.filter_map(|e| e.ok()).filter(|e| {
+                e.path().extension().and_then(|ext| ext.to_str()).map(|ext| ext == "jar").unwrap_or(false)
+            }).count())
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    if format == "json" {
+        let data = serde_json::json!({
+            "name": instance.name,
+            "path": instance.path,
+            "config": instance.config,
+            "status": {
+                "state": status_info.state,
+                "pid": status_info.pid,
+                "uptime_seconds": status_info.uptime_seconds,
+                "memory_mb": status_info.memory_mb,
+                "cpu_percent": status_info.cpu_percent,
+            },
+            "mod_count": mod_count,
+        });
+        
+        let json = serde_json::json!({
+            "status": "success",
+            "data": data
+        });
+        println!("{}", serde_json::to_string_pretty(&json)?);
+    } else {
+        println!("Instance: {}", instance.name);
+        println!("Path: {}", instance.path.display());
+        println!();
+        
+        println!("Configuration:");
+        println!("  Minecraft Version: {}", instance.config.version);
+        if let Some(loader) = &instance.config.loader {
+            println!("  Loader: {} {}", loader.loader_type, loader.version);
+        } else {
+            println!("  Loader: None (Vanilla)");
+        }
+        println!();
+        
+        println!("Status:");
+        println!("  State: {}", status_info.state);
+        if let Some(pid) = status_info.pid {
+            println!("  PID: {}", pid);
+        }
+        if let Some(uptime) = status_info.uptime_seconds {
+            let hours = uptime / 3600;
+            let minutes = (uptime % 3600) / 60;
+            let seconds = uptime % 60;
+            println!("  Uptime: {}h {}m {}s", hours, minutes, seconds);
+        }
+        if let Some(memory) = status_info.memory_mb {
+            println!("  Memory: {} MB", memory);
+        }
+        if let Some(cpu) = status_info.cpu_percent {
+            println!("  CPU: {:.1}%", cpu);
+        }
+        println!();
+        
+        println!("Content:");
+        println!("  Mods: {}", mod_count);
+    }
+
+    Ok(())
+}
+
 async fn cmd_delete(name: &str) -> Result<()> {
     use instance::InstanceManager;
 
@@ -1503,6 +1679,272 @@ async fn cmd_delete(name: &str) -> Result<()> {
     manager.delete(name).await?;
 
     println!("Instance '{}' deleted", name);
+    Ok(())
+}
+
+async fn cmd_instance_info(format: &str, name: &str) -> Result<()> {
+    use instance::InstanceManager;
+    use serde_json::json;
+
+    let manager = InstanceManager::new()?;
+    let instance = manager.get(name).await?;
+
+    // Calculate disk usage
+    let disk_usage = calculate_dir_size(&instance.path).await?;
+    
+    // Count content items
+    let mods_dir = instance.path.join("mods");
+    let resourcepacks_dir = instance.path.join("resourcepacks");
+    let shaderpacks_dir = instance.path.join("shaderpacks");
+    
+    let mods_count = count_files_in_dir(&mods_dir).await;
+    let resourcepacks_count = count_files_in_dir(&resourcepacks_dir).await;
+    let shaderpacks_count = count_files_in_dir(&shaderpacks_dir).await;
+
+    if format == "json" {
+        let info = json!({
+            "name": instance.name,
+            "version": instance.config.version,
+            "loader": instance.config.loader.as_ref().map(|l| json!({
+                "type": l.loader_type,
+                "version": l.version
+            })),
+            "path": instance.path,
+            "disk_usage": disk_usage,
+            "content": {
+                "mods": mods_count,
+                "resourcepacks": resourcepacks_count,
+                "shaderpacks": shaderpacks_count
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&info)?);
+    } else {
+        println!("Instance: {}", instance.name);
+        println!("Minecraft Version: {}", instance.config.version);
+        if let Some(loader) = &instance.config.loader {
+            println!("Loader: {} {}", loader.loader_type, loader.version);
+        } else {
+            println!("Loader: Vanilla");
+        }
+        println!("Path: {}", instance.path.display());
+        println!("Disk Usage: {}", format_bytes(disk_usage));
+        println!("\nContent:");
+        println!("  Mods: {}", mods_count);
+        println!("  Resource Packs: {}", resourcepacks_count);
+        println!("  Shader Packs: {}", shaderpacks_count);
+    }
+
+    Ok(())
+}
+
+async fn calculate_dir_size(path: &std::path::Path) -> Result<u64> {
+    let mut total = 0u64;
+    
+    if !path.exists() {
+        return Ok(0);
+    }
+    
+    let mut stack = vec![path.to_path_buf()];
+    
+    while let Some(current) = stack.pop() {
+        if let Ok(mut entries) = tokio::fs::read_dir(&current).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if let Ok(metadata) = entry.metadata().await {
+                    if metadata.is_dir() {
+                        stack.push(entry.path());
+                    } else {
+                        total += metadata.len();
+                    }
+                }
+            }
+        }
+    }
+    
+    Ok(total)
+}
+
+async fn count_files_in_dir(path: &std::path::Path) -> usize {
+    if !path.exists() {
+        return 0;
+    }
+    
+    let mut count = 0;
+    if let Ok(mut entries) = tokio::fs::read_dir(path).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Ok(metadata) = entry.metadata().await {
+                if metadata.is_file() {
+                    count += 1;
+                }
+            }
+        }
+    }
+    
+    count
+}
+
+async fn cmd_export(instance_name: &str, output_path: &std::path::Path) -> Result<()> {
+    use anyhow::Context;
+    use instance::InstanceManager;
+    use std::fs::File;
+    use zip::write::{FileOptions, ZipWriter};
+    use zip::CompressionMethod;
+    
+    info!("Exporting instance '{}'...", instance_name);
+    
+    let manager = InstanceManager::new()?;
+    let instance = manager.get(instance_name).await?;
+    let instance_path = &instance.path;
+    
+    if !instance_path.exists() {
+        return Err(anyhow::anyhow!("Instance directory does not exist"));
+    }
+    
+    // Create output file
+    let output_file = File::create(output_path)
+        .with_context(|| format!("Failed to create output file: {}", output_path.display()))?;
+    
+    let mut zip = ZipWriter::new(output_file);
+    let options = FileOptions::<()>::default()
+        .compression_method(CompressionMethod::Deflated)
+        .unix_permissions(0o755);
+    
+    // Walk through instance directory and add files to zip
+    let mut file_count = 0;
+    let walkdir = walkdir::WalkDir::new(instance_path);
+    
+    for entry in walkdir.into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let relative_path = path.strip_prefix(instance_path)
+            .with_context(|| format!("Failed to strip prefix from path: {}", path.display()))?;
+        
+        if relative_path.as_os_str().is_empty() {
+            continue;
+        }
+        
+        let name = relative_path.to_string_lossy();
+        
+        if path.is_file() {
+            zip.start_file(name.as_ref(), options)
+                .with_context(|| format!("Failed to start zip file entry: {}", name))?;
+            
+            let mut file = std::fs::File::open(path)
+                .with_context(|| format!("Failed to open file: {}", path.display()))?;
+            
+            std::io::copy(&mut file, &mut zip)
+                .with_context(|| format!("Failed to write file to zip: {}", name))?;
+            
+            file_count += 1;
+        } else if path.is_dir() {
+            zip.add_directory(name.as_ref(), options)
+                .with_context(|| format!("Failed to add directory to zip: {}", name))?;
+        }
+    }
+    
+    zip.finish()
+        .context("Failed to finalize zip file")?;
+    
+    info!("Exported {} files to {}", file_count, output_path.display());
+    println!("Successfully exported instance '{}' to {}", instance_name, output_path.display());
+    println!("Total files: {}", file_count);
+    
+    Ok(())
+}
+
+async fn cmd_import_instance(zip_path: &std::path::Path, instance_name: Option<&str>) -> Result<()> {
+    use anyhow::Context;
+    use instance::InstanceManager;
+    use std::io::Read;
+    use zip::ZipArchive;
+    
+    info!("Importing instance from '{}'...", zip_path.display());
+    
+    if !zip_path.exists() {
+        anyhow::bail!("Zip file not found: {}", zip_path.display());
+    }
+    
+    // Open the zip file
+    let file = std::fs::File::open(zip_path)
+        .with_context(|| format!("Failed to open zip file: {}", zip_path.display()))?;
+    let mut archive = ZipArchive::new(file)
+        .context("Failed to read zip archive")?;
+    
+    // Read instance.json to get the instance name
+    let mut instance_json = None;
+    for i in 0..archive.len() {
+        let file = archive.by_index(i)?;
+        if file.name() == "instance.json" {
+            instance_json = Some(i);
+            break;
+        }
+    }
+    
+    let instance_json_idx = instance_json
+        .ok_or_else(|| anyhow::anyhow!("Invalid instance zip: missing instance.json"))?;
+    
+    let mut instance_file = archive.by_index(instance_json_idx)?;
+    let mut contents = String::new();
+    instance_file.read_to_string(&mut contents)?;
+    drop(instance_file);
+    
+    let config: InstanceConfig = serde_json::from_str(&contents)
+        .context("Failed to parse instance.json")?;
+    
+    // Use provided name or default to name from config
+    let target_name = instance_name.unwrap_or(&config.name).to_string();
+    
+    // Check if instance already exists
+    let manager = InstanceManager::new()?;
+    let instances_dir = util::paths::get_instances_dir()?;
+    let target_path = instances_dir.join(&target_name);
+    
+    if target_path.exists() {
+        anyhow::bail!("Instance '{}' already exists", target_name);
+    }
+    
+    info!("Creating instance directory '{}'...", target_name);
+    tokio::fs::create_dir_all(&target_path).await
+        .with_context(|| format!("Failed to create instance directory: {}", target_path.display()))?;
+    
+    // Extract all files
+    let mut file_count = 0;
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        let outpath = target_path.join(file.name());
+        
+        if file.name().ends_with('/') {
+            // Directory
+            std::fs::create_dir_all(&outpath)
+                .with_context(|| format!("Failed to create directory: {}", outpath.display()))?;
+        } else {
+            // File
+            if let Some(parent) = outpath.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create parent directory: {}", parent.display()))?;
+            }
+            
+            let mut outfile = std::fs::File::create(&outpath)
+                .with_context(|| format!("Failed to create file: {}", outpath.display()))?;
+            std::io::copy(&mut file, &mut outfile)
+                .with_context(|| format!("Failed to extract file: {}", file.name()))?;
+            
+            file_count += 1;
+        }
+    }
+    
+    // Update instance.json with new name if different
+    if target_name != config.name {
+        let mut new_config = config;
+        new_config.name = target_name.clone();
+        let config_path = target_path.join("instance.json");
+        let config_json = serde_json::to_string_pretty(&new_config)?;
+        tokio::fs::write(&config_path, config_json).await
+            .context("Failed to write updated instance configuration")?;
+    }
+    
+    info!("Imported {} files", file_count);
+    println!("Successfully imported instance '{}' from {}", target_name, zip_path.display());
+    println!("Total files: {}", file_count);
+    
     Ok(())
 }
 
@@ -2457,11 +2899,11 @@ fn cmd_changelog(num_versions: usize) {
     
     let digests = changelog::recent_versions(changelog::CHANGELOG, num_versions, 10);
     if digests.is_empty() {
-        println!("No changelog entries found.");
+        println!("{}", util::i18n::t("No changelog entries found.", "未找到更新日志条目。"));
         return;
     }
     
-    println!("Recent Updates:\n");
+    println!("{}\n", util::i18n::t("Recent Updates:", "最近更新："));
     for d in &digests {
         println!("## {} {}", d.version, if d.date.is_empty() { String::new() } else { format!("({})", d.date) });
         for h in &d.highlights {
