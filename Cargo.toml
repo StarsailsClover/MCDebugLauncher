@@ -1,6 +1,6 @@
 [package]
 name = "mcdebug-launcher"
-version = "26.0.0-alpha.5.1"
+version = "26.0.0-alpha.8.1"
 edition = "2021"
 authors = ["Sails <sails@example.com>"]
 license = "Apache-2.0"
@@ -43,7 +43,9 @@ thiserror = "1.0"
 
 # File operations
 sha1 = "0.10"
+sha2 = "0.10"
 zip = "2.2"
+walkdir = "2.5"
 # Java runtime archive extraction (tar.gz on Linux/macOS)
 tar = "0.4"
 flate2 = "1.0"
@@ -53,12 +55,24 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "5.0"
 regex = "1.10"
 sysinfo = "0.30"
+indicatif = "0.17"
+console = "0.15"
 
 # HTTP server
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 futures-util = "0.3"
+
+# Image encoding (screenshot PNG output)
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Base64 encoding for screenshot API responses
+base64 = "0.22"
+
+[target.'cfg(windows)'.dependencies]
+# High-performance window capture via Windows.Graphics.Capture
+windows-capture = "2"
 
 [dev-dependencies]
 tokio-test = "0.4"

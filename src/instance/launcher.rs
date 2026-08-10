@@ -23,7 +23,7 @@ use crate::version::manifest::VersionMetadata;
 /// Acquire the global launch lock, blocking (polling) if another MDL-managed
 /// instance is already running. Returns the path to the lock file so the
 /// caller can release it with `release_launch_lock`.
-async fn acquire_launch_lock() -> Result<PathBuf> {
+async fn acquire_launch_lock(no_queue: bool) -> Result<Option<PathBuf>> {
     let lock_path = crate::util::paths::get_data_dir()?.join("launching.lock");
     let mut waiting_logged = false;
 
@@ -33,10 +33,18 @@ async fn acquire_launch_lock() -> Result<PathBuf> {
             if let Ok(content) = fs::read_to_string(&lock_path).await {
                 if let Ok(pid) = content.trim().parse::<u32>() {
                     if is_pid_running(pid) {
+                        if no_queue {
+                            // Queueing disabled: launch in parallel without
+                            // touching the existing lock.
+                            tracing::info!(
+                                "Another instance is running (PID {}), but --no-queue was                                  given - launching in parallel without queueing.",
+                                pid
+                            );
+                            return Ok(None);
+                        }
                         if !waiting_logged {
                             tracing::info!(
-                                "Another instance is already running (PID {}). \
-                                 Waiting for it to close...",
+                                "Another instance is already running (PID {}).                                  Waiting for it to close...",
                                 pid
                             );
                             waiting_logged = true;
@@ -44,7 +52,7 @@ async fn acquire_launch_lock() -> Result<PathBuf> {
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                         continue;
                     }
-                    // Stale lock from a crashed process — remove it.
+                    // Stale lock from a crashed process - remove it.
                     tracing::debug!("Removing stale launch lock (PID {} not running)", pid);
                 }
             }
@@ -57,7 +65,7 @@ async fn acquire_launch_lock() -> Result<PathBuf> {
         }
         fs::write(&lock_path, our_pid.to_string()).await
             .context("Failed to write launch lock file")?;
-        return Ok(lock_path);
+        return Ok(Some(lock_path));
     }
 }
 
@@ -261,6 +269,39 @@ pub struct LaunchOptions {
     pub width: Option<u32>,
     /// Window height in pixels
     pub height: Option<u32>,
+    /// Return immediately after spawning the game process instead of waiting
+    /// for it to exit. Required for agent workflows and the agent API.
+    pub detach: bool,
+    /// Enable agent control via the Despotes mod (must be installed in the
+    /// passes the control-server port to the game via a JVM property, and
+    /// disables pause-on-lost-focus so the game keeps running while the
+    /// user focuses other applications.
+    pub agent: bool,
+    /// TCP port for the Despotes control server (default 25585).
+    pub agent_port: Option<u16>,
+    /// Custom Java executable path (overrides auto-detection).
+    pub java_path: Option<String>,
+    /// Explicit memory allocation like "4G"/"2048M".
+    pub memory: Option<String>,
+    /// Allocate memory dynamically from system RAM when `memory` is unset.
+    pub dynamic_memory: bool,
+    /// Attach the Aprism JE Native loader as a javaagent.
+    pub aprism: bool,
+    /// After the game is ready, auto-enter (or create) the test world via Despotes.
+    pub enter_test_world: bool,
+    /// Block until the game broadcasts ready (agent mode).
+    pub wait_ready: bool,
+    /// Skip the instance queue: launch even if another instance is running.
+    pub no_queue: bool,
+}
+
+/// Result of a successful launch.
+#[derive(Debug)]
+pub struct LaunchOutcome {
+    /// Process ID of the spawned game (java) process.
+    pub pid: u32,
+    /// True when the launcher returned without waiting for the game to exit.
+    pub detached: bool,
 }
 
 pub struct InstanceLauncher {
@@ -298,7 +339,7 @@ impl InstanceLauncher {
         Ok(Self { java_path: java_runtime.path })
     }
 
-    pub async fn launch(&self, name: &str, options: &LaunchOptions) -> Result<()> {
+    pub async fn launch(&self, name: &str, options: &LaunchOptions) -> Result<LaunchOutcome> {
         let instances_dir = crate::util::paths::get_instances_dir()?;
         let instance_dir = instances_dir.join(name);
 
@@ -306,19 +347,28 @@ impl InstanceLauncher {
             anyhow::bail!("Instance '{}' does not exist", name);
         }
 
-        // Acquire the global launch lock. Blocks (with a log message) if another
-        // MDL-managed instance is already running, then proceeds when it exits.
-        let lock_path = acquire_launch_lock().await?;
+        let lock_path = acquire_launch_lock(options.no_queue).await?;
 
-        // Run the actual launch inside a closure so we can always release the
-        // lock, even if an error is returned early.
+        // Run the actual launch; then handle the lock depending on outcome.
         let result = self.do_launch(name, &instance_dir, options).await;
 
-        release_launch_lock(&lock_path).await;
+        if let Some(lp) = &lock_path {
+            match &result {
+                Ok(outcome) if outcome.detached => {
+                    // Detached: transfer the lock to the game process so the
+                    // single-instance guarantee holds after this launcher
+                    // returns. The lock becomes stale once the game exits.
+                    if let Err(e) = fs::write(lp, outcome.pid.to_string()).await {
+                        tracing::warn!("Failed to transfer launch lock to game process: {}", e);
+                    }
+                }
+                _ => release_launch_lock(lp).await,
+            }
+        }
         result
     }
 
-    async fn do_launch(&self, name: &str, instance_dir: &Path, options: &LaunchOptions) -> Result<()> {
+    async fn do_launch(&self, name: &str, instance_dir: &Path, options: &LaunchOptions) -> Result<LaunchOutcome> {
         let config_path = instance_dir.join("instance.json");
         let config_data = fs::read_to_string(&config_path).await?;
         let config: InstanceConfig = serde_json::from_str(&config_data)?;
@@ -328,16 +378,22 @@ impl InstanceLauncher {
         let version_metadata = self.load_version_metadata(&version_dir, &config.version).await?;
         let required_java = version_metadata.required_java_version();
 
-        // Resolve a suitable Java runtime, auto-downloading one from Adoptium if
-        // the system has none that meets the version requirement. This replaces
-        // the previous hard failure on a missing/too-old Java.
-        let java_runtime = crate::version::java::JavaRuntime::ensure_version(required_java)
-            .await
-            .context("Failed to obtain a suitable Java runtime")?;
-        let java_path = java_runtime.path.clone();
+        // Resolve a suitable Java runtime. A user-supplied --java-path wins;
+        // otherwise auto-download one from Adoptium when the system lacks a
+        // runtime meeting the version requirement.
+        let java_path: std::path::PathBuf;
+        if let Some(custom) = &options.java_path {
+            java_path = std::path::PathBuf::from(custom);
+            tracing::info!("Using custom Java: {}", java_path.display());
+        } else {
+            let java_runtime = crate::version::java::JavaRuntime::ensure_version(required_java)
+                .await
+                .context("Failed to obtain a suitable Java runtime")?;
+            java_path = java_runtime.path.clone();
+            tracing::info!("Using Java {} (required: Java {})", java_runtime.major_version, required_java);
+        }
 
         tracing::info!("Launching instance '{}'...", name);
-        tracing::info!("Using Java {} (required: Java {})", java_runtime.major_version, required_java);
         tracing::info!("Building classpath and downloading libraries...");
 
         // Build classpath and get main class
@@ -357,14 +413,114 @@ impl InstanceLauncher {
         // they are missing the game launches with no textures and logs
         // "Can't open the resource index file". This is idempotent and only
         // fetches what is missing.
+        // Pre-launch integrity check (Alpha 8.1): verify the client JAR and
+        // libraries against their sha1 checksums and re-download anything
+        // corrupted, so a damaged cache self-heals instead of breaking launch.
+        let libraries_dir_verify = crate::util::paths::get_libraries_cache_dir()?;
+        match crate::instance::verify::verify_and_repair_core_files(
+            self,
+            &version_dir,
+            &version_metadata,
+            &libraries_dir_verify,
+        )
+        .await
+        {
+            Ok(n) => {
+                if n > 0 {
+                    tracing::info!("Integrity check repaired {} file(s)", n);
+                }
+            }
+            Err(e) => tracing::warn!("Integrity check failed (continuing): {}", e),
+        }
+
         if let Some(asset_index) = &version_metadata.asset_index {
             tracing::info!("Verifying game assets...");
+            // Verify asset objects once per index id (removes corrupt objects),
+            // then download whatever is missing. Both steps are idempotent.
+            if let Err(e) = crate::instance::verify::verify_assets(
+                &assets_dir,
+                &asset_index.id,
+                &asset_index.url,
+            )
+            .await
+            {
+                tracing::warn!("Asset verification failed (continuing): {}", e);
+            }
             crate::version::assets::download_assets(asset_index, &assets_dir).await?;
         }
 
         // Load loader-specific JVM and game args from version.json
         let libraries_dir = crate::util::paths::get_libraries_cache_dir()?;
         let (loader_jvm_args, loader_game_args) = self.load_loader_args(&version_dir, &config, &libraries_dir).await?;
+
+        // Agent mode (Alpha 6): prepare the instance for programmatic control.
+        // 1. Install the companion mod (in-process input injection) for Fabric.
+        // 2. Force pauseOnLostFocus:false so the game keeps running while the
+        //    user focuses other apps — a hard requirement for agent control.
+        // 3. Record the requested control port for post-launch discovery.
+        // Agent mode (Alpha 7): prepare the instance for programmatic control
+        // via the Despotes mod (https://github.com/NDBlockConnect/Despotes),
+        // which replaced MDL's old bundled companion:
+        // 1. Verify Despotes is present (it is offered at `create` time).
+        // 2. Force pauseOnLostFocus:false so the game keeps running while the
+        //    user focuses other apps — a hard requirement for agent control.
+        // 3. Record the requested control port for post-launch discovery.
+        let agent_port = options.agent_port.unwrap_or(crate::game::DEFAULT_DESPOTES_PORT);
+        if options.agent {
+            if crate::game::despotes::is_installed(instance_dir) {
+                tracing::info!("Agent control enabled via Despotes");
+            } else {
+                tracing::warn!(
+                    "Agent control requested but Despotes is not installed in this instance. \
+                     Create the instance with Despotes (see `mdl create`) or install its JAR \
+                     into mods/. The game will launch without in-game control support."
+                );
+            }
+            match crate::game::options::ensure_no_pause_on_lost_focus(instance_dir) {
+                Ok(true) => tracing::info!("Set pauseOnLostFocus:false (game keeps running when unfocused)"),
+                Ok(false) => tracing::debug!("pauseOnLostFocus already disabled"),
+                Err(e) => tracing::warn!("Failed to set pauseOnLostFocus: {}", e),
+            }
+            // Record the requested Despotes port so `mdl game ...` commands can
+            // locate the control server after launch.
+            let runtime_dir = instance_dir.join("runtime");
+            fs::create_dir_all(&runtime_dir).await?;
+            fs::write(runtime_dir.join(crate::game::DESPOTES_PORT_FILE), agent_port.to_string()).await?;
+        }
+
+        // Fabric instances: ensure Fabric API is present before launch. The
+        // create-time install is best-effort (warns on failure), so a failure
+        // there — or a user removing the file — leaves the instance without
+        // it, and most Fabric mods then refuse to load ("Fabric API not
+        // installed"). Detect and repair it here so launches are resilient.
+        if config.loader.as_ref().map(|l| l.loader_type.as_str()) == Some("fabric") {
+            let mods_dir_probe = instance_dir.join("mods");
+            let has_fabric_api = std::fs::read_dir(&mods_dir_probe)
+                .map(|entries| {
+                    entries.flatten().any(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .to_lowercase()
+                            .contains("fabric-api")
+                    })
+                })
+                .unwrap_or(false);
+            if !has_fabric_api {
+                tracing::warn!("Fabric API missing from mods/ - downloading it before launch...");
+                match crate::loader::fabric::FabricInstaller::install_fabric_api(
+                    &version_metadata.id,
+                    &mods_dir_probe,
+                )
+                .await
+                {
+                    Ok(()) => tracing::info!("Fabric API installed"),
+                    Err(e) => tracing::warn!(
+                        "Could not auto-install Fabric API: {} (mods may fail to load)",
+                        e
+                    ),
+                }
+            }
+        }
 
         // Enumerate installed mods and display them before launch so the
         // operator can confirm the test context. Also sets the console window
@@ -386,10 +542,45 @@ impl InstanceLauncher {
         // Build launch command
         let mut cmd = Command::new(&java_path);
 
-        // JVM arguments
-        cmd.arg("-Xmx2G");
-        cmd.arg("-Xms512M");
+        // JVM arguments: memory. An explicit --memory wins; otherwise a
+        // dynamic allocation derived from system RAM (half of total, capped
+        // 8G) is used; final fallback is 2G.
+        let (xmx, xms) = match &options.memory {
+            Some(m) => (m.clone(), "512M".to_string()),
+            None if options.dynamic_memory => {
+                use sysinfo::System;
+                let mut sys = System::new();
+                sys.refresh_memory();
+                let total_mb = sys.total_memory() / 1024 / 1024;
+                let alloc = ((total_mb / 2).min(8192)).max(2048);
+                (format!("{}M", alloc), "512M".to_string())
+            }
+            None => ("2G".to_string(), "512M".to_string()),
+        };
+        cmd.arg(format!("-Xmx{}", xmx));
+        cmd.arg(format!("-Xms{}", xms));
+        // Dynamic performance tuning: pick GC by allocation tier.
+        if options.dynamic_memory {
+            let mb: u64 = if let Some(v) = xmx.strip_suffix('G') {
+                v.parse::<u64>().unwrap_or(2) * 1024
+            } else if let Some(v) = xmx.strip_suffix('M') {
+                v.parse::<u64>().unwrap_or(2048)
+            } else {
+                2048
+            };
+            if mb >= 4096 {
+                cmd.arg("-XX:+UseG1GC");
+                cmd.arg("-XX:MaxGCPauseMillis=50");
+            } else {
+                cmd.arg("-XX:+UseSerialGC");
+            }
+        }
         cmd.arg(format!("-Djava.library.path={}", natives_dir.display()));
+        if options.agent {
+            // Hand the control-server port to Despotes via its documented
+            // system property override (-Ddespotes.port=NNNN).
+            cmd.arg(format!("-D{}={}", crate::game::DESPOTES_PORT_PROPERTY, agent_port));
+        }
 
         if !loader_jvm_args.is_empty() {
             // Use loader-provided JVM args (NeoForge: includes correct -p, --add-opens, DlibraryDirectory, etc.)
@@ -423,11 +614,34 @@ impl InstanceLauncher {
         self.add_game_arguments(&mut cmd, &config, &version_metadata, &game_dir, &assets_dir, &main_class, &version_dir, &loader_game_args, &window_title, options)?;
 
         cmd.current_dir(&game_dir);
-        cmd.stdout(Stdio::inherit());
-        cmd.stderr(Stdio::inherit());
+        // In detached mode the game outlives this launcher process, so its
+        // output cannot inherit the launcher console. Redirect stdout/stderr
+        // into a launch log file instead. In attached mode keep inheriting so
+        // the operator sees live game output as before.
+        let log_file = if options.detach {
+            let log_dir = instance_dir.join("logs");
+            tokio::fs::create_dir_all(&log_dir).await?;
+            let path = log_dir.join("launch_detached.log");
+            let file = std::fs::File::create(&path)
+                .with_context(|| format!("Failed to create launch log {}", path.display()))?;
+            cmd.stdout(file.try_clone()?);
+            cmd.stderr(file);
+            Some(path)
+        } else {
+            cmd.stdout(Stdio::inherit());
+            cmd.stderr(Stdio::inherit());
+            None
+        };
 
         tracing::info!("Starting Minecraft...");
         tracing::debug!("Command: {:?}", cmd);
+
+        // Detach mode: clear inherit flags on console/pipe handles so the
+        // game process does not hold the launcher's pipes open (the calling
+        // shell would otherwise hang on the pipe until the game exits).
+        if options.detach {
+            crate::loader::server::clear_stdio_inherit_flags();
+        }
 
         let mut child = cmd.spawn().context("Failed to spawn Minecraft process")?;
         let pid = child.id();
@@ -437,6 +651,16 @@ impl InstanceLauncher {
         tokio::fs::create_dir_all(&pid_dir).await?;
         let pid_file = pid_dir.join("pid");
         tokio::fs::write(&pid_file, pid.to_string()).await?;
+
+        if options.detach {
+            // Return immediately; the game keeps running in the background.
+            // The launch lock was transferred to the game process in launch().
+            if let Some(log) = log_file {
+                tracing::info!("Game output is being written to {}", log.display());
+            }
+            tracing::info!("Instance '{}' launched in background (PID {})", name, pid);
+            return Ok(LaunchOutcome { pid, detached: true });
+        }
 
         let status = child.wait().context("Failed to wait for Minecraft process")?;
 
@@ -449,7 +673,7 @@ impl InstanceLauncher {
         }
 
         tracing::info!("Minecraft closed successfully");
-        Ok(())
+        Ok(LaunchOutcome { pid, detached: false })
     }
 
     async fn build_classpath(&self, version_dir: &Path, config: &InstanceConfig) -> Result<(String, String, Vec<String>)> {
@@ -792,7 +1016,7 @@ impl InstanceLauncher {
         Ok((classpath, main_class, module_path_entries))
     }
 
-    async fn download_library(&self, url: &str, path: &Path, expected_sha1: &str) -> Result<()> {
+    pub async fn download_library(&self, url: &str, path: &Path, expected_sha1: &str) -> Result<()> {
         use crate::version::downloader::download_file;
 
         // Create parent directory
@@ -864,7 +1088,7 @@ impl InstanceLauncher {
         )
     }
 
-    fn get_library_path_from_name(&self, name: &str, libraries_dir: &Path) -> PathBuf {
+    pub fn get_library_path_from_name(&self, name: &str, libraries_dir: &Path) -> PathBuf {
         let parts: Vec<&str> = name.split(':').collect();
         if parts.len() < 3 {
             return libraries_dir.join(name);
@@ -966,7 +1190,7 @@ impl InstanceLauncher {
         Some(format!("{}-{}", mc_version, neoform_version))
     }
 
-    fn check_rules(&self, rules: &[Rule]) -> bool {
+    pub fn check_rules(&self, rules: &[Rule]) -> bool {
         let os_name = std::env::consts::OS;
 
         for rule in rules {
@@ -1274,4 +1498,19 @@ impl InstanceLauncher {
 
         Ok(())
     }
+}
+
+/// Download (cache) and attach the Aprism JE javaagent for a MC version.
+async fn attach_aprism(
+    cmd: &mut Command,
+    mc_version: &str,
+    instance_dir: &std::path::Path,
+) -> Result<String> {
+    let releases = crate::loader::aprism::fetch_releases().await?;
+    let (release, asset) = crate::loader::aprism::select_release(&releases, mc_version, true)
+        .context("No applicable Aprism JE artifact for this Minecraft version")?;
+    let jar = crate::loader::aprism::download_asset(&asset).await?;
+    let arg = crate::loader::aprism::javaagent_arg(&jar, &release.tag, mc_version, instance_dir);
+    cmd.arg(&arg);
+    Ok(format!("{} ({})", release.tag, jar.display()))
 }

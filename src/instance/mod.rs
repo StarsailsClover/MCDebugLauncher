@@ -8,6 +8,7 @@ pub mod status;
 pub mod mods;
 pub mod config_mgmt;
 pub mod backup;
+pub mod verify;
 
 pub use manager::*;
 pub use launcher::*;

@@ -119,12 +119,12 @@ fn split_version(v: &str) -> (Vec<u64>, Option<String>) {
 /// Query the GitHub Releases API for the latest release tag. Returns the tag
 /// and its release page URL.
 async fn fetch_latest_release() -> Result<(String, String)> {
+    let client = crate::util::http::create_http_client()?;
     let url = format!(
         "https://api.github.com/repos/{}/{}/releases/latest",
         GITHUB_OWNER, GITHUB_REPO
     );
 
-    let client = crate::util::http::create_http_client()?;
     let response = client
         .get(&url)
         .header("Accept", "application/vnd.github+json")
@@ -132,17 +132,38 @@ async fn fetch_latest_release() -> Result<(String, String)> {
         .await
         .context("Failed to query GitHub releases API")?;
 
-    if !response.status().is_success() {
-        anyhow::bail!("GitHub releases API returned HTTP {}", response.status());
+    if response.status().is_success() {
+        let release: GitHubRelease = response
+            .json()
+            .await
+            .context("Failed to parse GitHub release JSON")?;
+        return Ok((release.tag_name, release.html_url));
     }
 
-    let release: GitHubRelease = response
-        .json()
-        .await
-        .context("Failed to parse GitHub release JSON")?;
-
-    let _ = release.prerelease; // reserved for future filtering
-    Ok((release.tag_name, release.html_url))
+    // No stable "latest" release exists (404) — fall back to the newest
+    // pre-release so self-update works while only Pre-Releases are published.
+    if response.status().as_u16() == 404 {
+        let list_url = format!(
+            "https://api.github.com/repos/{}/{}/releases?per_page=10",
+            GITHUB_OWNER, GITHUB_REPO
+        );
+        let list_resp = client
+            .get(&list_url)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await
+            .context("Failed to query GitHub releases list")?;
+        if list_resp.status().is_success() {
+            let releases: Vec<GitHubRelease> = list_resp
+                .json()
+                .await
+                .context("Failed to parse releases list")?;
+            if let Some(first) = releases.into_iter().find(|r| !r.tag_name.is_empty()) {
+                return Ok((first.tag_name, first.html_url));
+            }
+        }
+    }
+    anyhow::bail!("GitHub releases API returned HTTP {}", response.status())
 }
 
 /// Check whether a newer release than the running version is available.

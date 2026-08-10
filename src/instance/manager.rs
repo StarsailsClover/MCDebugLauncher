@@ -70,11 +70,24 @@ impl InstanceManager {
         let client_jar_path = version_dir.join(format!("{}.jar", version_info.id));
 
         tracing::info!("Downloading client jar...");
-        crate::version::downloader::download_file(
+        
+        // Create progress bar for client jar download
+        let pb = crate::util::progress::create_download_bar(0);
+        pb.set_message(format!("Downloading {}.jar", version_info.id));
+        
+        crate::version::downloader::download_file_with_progress(
             client_url,
             &client_jar_path,
             Some(&version_metadata.downloads.client.sha1),
+            |downloaded, total| {
+                if total > 0 && pb.length() != Some(total) {
+                    pb.set_length(total);
+                }
+                pb.set_position(downloaded);
+            },
         ).await?;
+        
+        pb.finish_with_message(format!("✓ Downloaded {}.jar", version_info.id));
 
         let version_json_path = version_dir.join(format!("{}.json", version_info.id));
         let version_json = serde_json::to_string_pretty(&version_metadata)?;
@@ -113,6 +126,18 @@ impl InstanceManager {
                     .await
                     {
                         tracing::warn!("Could not install Fabric API (install it manually): {}", e);
+                    }
+
+                    // Also install Mod Menu (modmenu) so users get a
+                    // convenient in-game mod list UI. Best-effort like
+                    // the Fabric API install above.
+                    if let Err(e) = crate::loader::fabric::FabricInstaller::install_mod_menu(
+                        &version_info.id,
+                        &mods_dir,
+                    )
+                    .await
+                    {
+                        tracing::warn!("Could not install Mod Menu (install it manually): {}", e);
                     }
                 }
                 "forge" => {

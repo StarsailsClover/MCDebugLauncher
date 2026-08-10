@@ -5,6 +5,90 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.0.0-alpha.8.1] - 2026-08-10
+
+### Added
+- **Modrinth modpack import** — `mdl import <name> <pack.mrpack>` parses `modrinth.index.json`, creates the instance with the pack's exact Minecraft version and loader, copies `overrides/` into the instance, then auto-completes every indexed file (sha1-verified download, skipped when already intact — fully idempotent). Zip-slip paths are rejected. `--no-download` imports structure only.
+- **Java Edition dedicated servers** — `mdl server create|list|launch|stop|status`: downloads the official server.jar (sha1-verified) from the version manifest, writes `eula.txt` and a default `server.properties`, launches detached with PID tracking, background log at `<server>/server.log`, and stops via taskkill. Supports JSON output for agents.
+- **Startup update digest** — every MDL run now prints the four most recent version digests (parsed from the CHANGELOG embedded at build time) so returning users see what changed; suppressed under `--format json` to keep machine-readable output clean.
+
+### Fixed
+- **Detached spawn pipe-handle leak (UX)** — on Windows the launcher's stdout/stderr handles were inherited by detached children (game and server processes), keeping the caller's pipe open so `mdl launch --detach` / `mdl server launch` appeared to hang until the game exited. The launcher now clears the inherit flags and creates detached children with `DETACHED_PROCESS`, so both commands return immediately. This also applies to the existing client `--detach` path.
+
+### Changed
+- Fabric instances additionally benefit from the launch-time Fabric API repair introduced in Alpha 8 (verified working end-to-end in 8.1).
+- README rewritten to reflect Alpha 5–8.1 capabilities (modpack import, servers, agent control, mirrors, accounts).
+
+## [26.0.0-alpha.8] - 2026-08-09
+
+### Added
+- **Mirror sources with live probing** — built-in Chinese mirror (BMCLAPI) + official; probes are ranked by latency and cached 10 min; every download prefers the best mirror and falls back down the list (flexible source switching).
+- **Chunked parallel downloads** — large artifacts split into 4 parallel HTTP Range chunks when the server supports it; single-shot otherwise; auto-fallback across sources on failure.
+- **Download cache (7-day copy-install)** — downloaded versions/mods/etc. are stored once and instances install a *copy*; entries unused for 7 days are evicted (`mdl cache info` / `mdl cache clean`).
+- **Content search & install** — `mdl search mod|resourcepack|shader <query>` via Modrinth with numbered selection and per-instance install into mods/ / resourcepacks/ / shaderpacks/.
+- **Microsoft account login** — `mdl account login` (OAuth Device Code flow, headless-friendly); `mdl account list`; `mdl account skin` to download the skin PNG / print avatar URL.
+- **Test worlds & auto-entry** — `mdl create --with-test-world` marks the instance; `mdl launch --enter-test-world --wait-ready` enters (or creates) the test world via Despotes once the game broadcasts ready.
+- **JDK customization & dynamic memory/perf** — `--java-path` override; `--memory` explicit or dynamic (half of system RAM, capped 8G); GC chosen by allocation tier (G1 for >=4G).
+- **Aprism JE Native support** — `mdl launch --aprism` detects the applicable Aprism artifact (stable-first / pre-release fallback), downloads+ caches it and attaches `-javaagent:...=aprismVersion=...;mcEdit=JE;mcVersion=...;gameRoot=...`.
+- **Minecraft BE (BDS) support** — `mdl bedrock install|launch` downloads and runs the official Bedrock Dedicated Server for Windows (version probing against the stable link pattern).
+- **dll/exe injector** — `mdl inject <pid|name> --dll <path>` (CreateRemoteThread/LoadLibraryW), groundwork for Aprism BE Native.
+- **Logging** — persistent `<data>/logs/mdl.log` (tee stdout+file), `--log-file` override, and `--lang zh` Chinese launcher messages.
+
+### Added (Alpha 8)
+- **Game-ready broadcast** — the agent server polls Despotes after launch and emits a `game_ready` WebSocket/JSON event when the game finishes booting; `GET /api/v1/game/:instance/ready` reports readiness; `mdl launch --wait-ready` blocks until ready.
+
+### Technical Notes
+- Mirror URL mapping follows the OpenBMCLAPI convention (root/maven/assets).
+- BDS Windows client is UWP-locked; client-side BE support is limited to injection (injector) pending Aprism BE.
+- Microsoft device flow uses the public PrismLauncher client id; re-login required on token expiry (offline_access simplification).
+
+## [26.0.0-alpha.7] - 2026-08-09
+
+### Added
+- **Despotes integration (Alpha 7, first slice)** — MDL now detects, downloads and installs the [Despotes](https://github.com/NDBlockConnect/Despotes) control mod, replacing the old bundled companion:
+  - `Latest Release` detection with Pre-Release policy: stable releases are preferred; Pre-Releases require explicit confirmation; when no applicable stable exists, the newest applicable Pre-Release is the fallback candidate.
+  - Asset matching by loader + Minecraft version, covering the v26.0 compatibility matrix (fabric 1.20-1.21.11 / 26.x, etc.).
+  - `mdl create` now lists applicable Despotes packages with numbered selection; non-interactive sessions auto-select the newest stable (pre-releases still need explicit opt-in). New flags: `--no-despotes`, `--despotes-prerelease`.
+  - Downloads are sha256-verified and cached in `<data>/despotes/`; instances install a copy.
+- **Mod Menu auto-install** — Fabric instances now automatically install [ModMenu](https://modrinth.com/mod/modmenu) from Modrinth during creation (best-effort).
+- **Dual-channel screenshots** — `mdl game screenshot` prefers the Despotes in-game framebuffer (works when minimized) and falls back to Windows.Graphics.Capture.
+
+### Changed
+- Game control runtime migrated from the MDL TCP companion to the Despotes HTTP protocol (`/despotes/v1/actions`, `/query`, `/screenshot`). `mdl game ...` and the agent API endpoints are unchanged at the CLI/HTTP surface.
+- Agent launch now passes `-Ddespotes.port` and records `runtime/despotes.port`; the old `mdl.agent.port`/`agent.port` mechanism is removed.
+
+### Removed
+- The bundled `mdl-agent-companion` source tree and local-JAR install path. Use Despotes instead.
+
+### Technical Notes
+- Despotes releases are fetched from the GitHub Releases API (`NDBlockConnect/Despotes`); asset names follow `Despotes-<tag>-<loader>-<mc>.jar`.
+- Remaining Alpha 7 roadmap (mirrors, chunked downloads, mod/resource/shader search, auth, BE, Aprism, cache eviction, etc.) continues in subsequent pre-releases.
+
+## [26.0.0-alpha.6] - 2026-08-08
+
+### Added
+- **Agent Game Control (highlight)** — the agent can now observe and operate a running Minecraft instance without touching the user's keyboard/mouse or stealing window focus:
+  - **High-performance screenshots** via Windows.Graphics.Capture: GPU-accelerated per-window capture that works while the game is unfocused, occluded, or in the background (764 ms round-trip in testing). New `mdl game screenshot <instance>` and `GET /api/v1/game/:instance/screenshot` (raw PNG or `?base64=true` JSON).
+  - **In-game input injection** via the new `mdl-agent-companion` Fabric mod (bundled with MDL, auto-installed on `--agent` launch): keys (`mdl game key`), view rotation (`mdl game look`), mouse/GUI clicks (`mdl game click`), hotbar scroll (`mdl game scroll`), chat/commands (`mdl game chat`) — plus `POST /api/v1/game/:instance/input`. Verified end-to-end: menu navigation, world entry, movement and look all work while the user's focus stays in other apps.
+  - **Game state queries** (`mdl game status`, `GET /api/v1/game/:instance/status`): in-world flag, pause state, screen, player position/rotation.
+  - **No-pause-while-multitasking**: agent launches automatically set `pauseOnLostFocus:false` and pass `mdl.agent.keepFocus=true`, so the game never shows the pause menu when the user focuses another application.
+  - New `mdl game windows` and `GET /api/v1/game/windows` to list MDL game windows visible for capture.
+- **Detached launching** — `mdl launch <instance> --detach` now actually works: returns immediately with the real PID, game output goes to `logs/launch_detached.log`. The launch lock is transferred to the game process so the single-instance guarantee still holds.
+- `--agent` / `--agent-port` launch options.
+
+### Changed
+- Agent API `launch` command is no longer blocking: it launches detached and returns the real PID immediately (previously the HTTP request hung until the game exited and reported PID 0). The server now tracks running instances and emits `instance_stopped` events.
+- Game window discovery is PID-first (titles are unreliable — some clients ignore `--title`), with title-prefix matching as fallback.
+
+### Fixed
+- CLI commands could hang for minutes at exit on machines where the background GitHub update check hits an unresponsive network path; the check is now hard-capped and the process exits explicitly.
+- HTTP client gained a connect timeout so slow networks fail fast instead of blocking.
+
+### Technical Notes
+- Companion mod protocol v1 over a local TCP socket (JSON lines, 127.0.0.1 only, default port 25590). The bound port is reported via `runtime/agent.port`.
+- The companion is shipped as `mdl-agent-companion-1.0.0.jar` alongside the launcher and is installed into Fabric/Quilt instances at agent launch.
+- Input works without focus because the companion injects through Minecraft's own keybinding/screen systems on the client thread, and the keepFocus Mixin defeats the game's internal focus gating.
+
 ## [26.0.0-alpha.5.1] - 2026-08-01
 
 ### Fixed
