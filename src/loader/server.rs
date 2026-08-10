@@ -260,7 +260,7 @@ pub fn clear_stdio_inherit_flags() {
     }
 }
 
-fn is_pid_alive(pid: u32) -> bool {
+pub fn is_pid_alive(pid: u32) -> bool {
     #[cfg(windows)]
     {
         unsafe {
@@ -283,7 +283,7 @@ fn is_pid_alive(pid: u32) -> bool {
     }
 }
 
-fn kill_pid(pid: u32) -> Result<()> {
+pub fn kill_pid(pid: u32) -> Result<()> {
     #[cfg(windows)]
     {
         let out = std::process::Command::new("taskkill")

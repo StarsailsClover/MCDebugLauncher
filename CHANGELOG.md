@@ -5,6 +5,29 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.1.0-alpha.2] - 2026-08-11
+
+### Added (v26.1 Alpha 2: better Agent experience)
+- **`stop` execute command**: the agent can now stop a running instance via
+  `POST /api/v1/execute {command:"stop", args:[name]}`. Kills the game
+  process tree, cleans the PID file, updates server state, and emits an
+  `instance_stopped` event.
+- **Machine-readable error codes**: every execute failure now carries an
+  `error_code` field (`UNKNOWN_COMMAND`, `BAD_REQUEST`, `NOT_FOUND`,
+  `ALREADY_EXISTS`, `NOT_RUNNING`, `BUSY`, `INTERNAL`) and the matching HTTP
+  status (400/404/409/500) instead of a blanket 500.
+- **Capability manifest updated**: declares `stop` and the full `error_codes`
+  contract so agents can discover both at runtime.
+
+### Changed
+- `kill_pid` / `is_pid_alive` in `loader::server` are now `pub` for reuse by
+  the agent API.
+
+### Verified
+- 70 unit tests green.
+- Live HTTP tests: `stop` on missing instance → NOT_FOUND (404), missing args
+  → BAD_REQUEST (400), unknown command → UNKNOWN_COMMAND (400).
+
 ## [26.1.0-alpha.1] - 2026-08-11
 
 ### Added (v26.1 Alpha 1: AI integration)

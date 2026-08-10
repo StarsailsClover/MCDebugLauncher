@@ -59,6 +59,11 @@ struct ExecuteResponse {
     status: String,
     exit_code: i32,
     stdout: String,
+    /// Machine-readable error classification (v26.1-alpha.2). Present only on
+    /// failure; lets an agent branch on the failure kind instead of parsing
+    /// free-form English text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<serde_json::Value>,
 }
@@ -271,19 +276,47 @@ async fn handle_execute(
                 status: "success".to_string(),
                 exit_code: 0,
                 stdout,
+                error_code: None,
                 data,
             };
             (StatusCode::OK, Json(response))
         }
         Err(e) => {
+            // v26.1-alpha.2: classify the failure into a machine-readable
+            // error_code so agents can branch without parsing English text.
+            let msg = format!("{}", e);
+            let (code, http) = classify_error(&msg);
             let response = ExecuteResponse {
                 status: "error".to_string(),
                 exit_code: 1,
-                stdout: format!("Error: {}", e),
+                stdout: format!("Error: {}", msg),
+                error_code: Some(code.to_string()),
                 data: None,
             };
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(response))
+            (http, Json(response))
         }
+    }
+}
+
+/// Map an execute-command failure to a stable, machine-readable error code
+/// and the most fitting HTTP status. Codes are additive: new kinds may appear
+/// in future versions; consumers must treat unknown codes as "internal".
+fn classify_error(msg: &str) -> (&'static str, StatusCode) {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("unknown command") {
+        ("UNKNOWN_COMMAND", StatusCode::BAD_REQUEST)
+    } else if m.contains("not found") || m.contains("no instance named") || m.contains("does not exist") {
+        ("NOT_FOUND", StatusCode::NOT_FOUND)
+    } else if m.contains("already exists") {
+        ("ALREADY_EXISTS", StatusCode::CONFLICT)
+    } else if m.contains("is not running") || m.contains("not running") {
+        ("NOT_RUNNING", StatusCode::CONFLICT)
+    } else if m.contains("name required") || m.contains("required") {
+        ("BAD_REQUEST", StatusCode::BAD_REQUEST)
+    } else if m.contains("in use") || m.contains("another instance") {
+        ("BUSY", StatusCode::CONFLICT)
+    } else {
+        ("INTERNAL", StatusCode::INTERNAL_SERVER_ERROR)
     }
 }
 
@@ -781,6 +814,40 @@ async fn execute_command(
                 "note": "Launch runs in the background; watch launch_progress/launch_completed/launch_failed events"
             });
             Ok((format!("Instance '{}' launch started (background)", name), Some(data)))
+        }
+        // v26.1-alpha.2: the agent can launch instances but previously had no
+        // way to stop them. `stop` kills the game process tree of a running
+        // instance (resolved via its runtime/pid file) and cleans up state.
+        "stop" => {
+            if args.is_empty() {
+                anyhow::bail!("Instance name required");
+            }
+            let name = &args[0];
+            let manager = InstanceManager::new()?;
+            let instance = manager.get(name).await?;
+            let pid_file = instance.path.join("runtime").join("pid");
+            let Some(pid) = crate::loader::server::running_pid(&instance.path) else {
+                anyhow::bail!("Instance '{}' is not running", name);
+            };
+            crate::loader::server::kill_pid(pid)?;
+            let _ = tokio::fs::remove_file(&pid_file).await;
+            let _ = pid_file;
+            // Drop it from the server's running-instance table too.
+            {
+                let mut s = state.write().await;
+                s.running_instances.remove(name);
+            }
+            let _ = event_tx.send(ServerEvent::InstanceStopped {
+                instance: name.to_string(),
+                exit_code: None,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            });
+            let data = serde_json::json!({
+                "instance": name,
+                "pid": pid,
+                "status": "stopped"
+            });
+            Ok((format!("Instance '{}' stopped (PID {})", name, pid), Some(data)))
         }
         _ => {
             anyhow::bail!("Unknown command: {}", command)

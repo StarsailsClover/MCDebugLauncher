@@ -70,6 +70,17 @@ pub struct Capabilities {
     pub game_inputs: Vec<GameInput>,
     /// WebSocket event stream contract.
     pub events: EventsSpec,
+    /// Machine-readable error codes that `POST /api/v1/execute` may return in
+    /// the `error_code` field on failure (v26.1-alpha.2). Additive: unknown
+    /// codes must be treated as "internal".
+    pub error_codes: Vec<ErrorCodeSpec>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ErrorCodeSpec {
+    pub code: &'static str,
+    pub http_status: u16,
+    pub description: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,6 +154,14 @@ pub fn manifest() -> Capabilities {
                     OptionSpec { key: "no-queue", values: "true", description: "Skip the instance launch queue" },
                 ],
             },
+            ExecCommand {
+                command: "stop",
+                description: "Stop a running instance (kills its game process tree)",
+                args: vec![
+                    ArgSpec { name: "name", required: true, description: "Instance name" },
+                ],
+                options: vec![],
+            },
         ],
         game_inputs: vec![
             GameInput {
@@ -200,6 +219,15 @@ pub fn manifest() -> Capabilities {
                 "game_ready",
             ],
         },
+        error_codes: vec![
+            ErrorCodeSpec { code: "UNKNOWN_COMMAND",  http_status: 400, description: "The execute command name is not recognized" },
+            ErrorCodeSpec { code: "BAD_REQUEST",      http_status: 400, description: "A required argument is missing or invalid" },
+            ErrorCodeSpec { code: "NOT_FOUND",        http_status: 404, description: "The referenced instance does not exist" },
+            ErrorCodeSpec { code: "ALREADY_EXISTS",   http_status: 409, description: "An instance with that name already exists" },
+            ErrorCodeSpec { code: "NOT_RUNNING",      http_status: 409, description: "The instance is not running (stop was requested)" },
+            ErrorCodeSpec { code: "BUSY",             http_status: 409, description: "Another instance holds the launch lock" },
+            ErrorCodeSpec { code: "INTERNAL",         http_status: 500, description: "Unclassified internal error" },
+        ],
     }
 }
 
@@ -226,10 +254,16 @@ mod tests {
                 path
             );
         }
-        // All four execute commands must be declared.
+        // All five execute commands must be declared (v26.1-alpha.2 adds stop).
         let cmds: Vec<&str> = caps.execute_commands.iter().map(|c| c.command).collect();
-        for c in ["list", "create", "info", "launch"] {
+        for c in ["list", "create", "info", "launch", "stop"] {
             assert!(cmds.contains(&c), "missing execute command {}", c);
+        }
+        // Machine-readable error codes must be declared and non-empty.
+        assert!(!caps.error_codes.is_empty(), "error_codes must be declared");
+        for ec in &caps.error_codes {
+            assert!(!ec.code.is_empty());
+            assert!(ec.http_status >= 400);
         }
         // All five game input types must be declared.
         let types: Vec<&str> = caps.game_inputs.iter().map(|g| g.input_type).collect();
