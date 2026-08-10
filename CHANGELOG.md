@@ -5,6 +5,23 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.0.0-alpha.11] - 2026-08-11
+
+### Added (Alpha 11: download progress display)
+- **Live download progress bars** for every real file download driven through
+  `download_file` (libraries, jars, Despotes/Refract/Prismate artifacts, BDS,
+  modpack files). Both the single-stream path and the chunked-parallel path
+  stream bytes through an `indicatif` bar showing `[bar] downloaded/total (ETA)`.
+- Progress bars are **gated**: only shown when stderr is an interactive TTY,
+  the terminal supports ANSI, and the file is at least 1 MB (small files would
+  just flicker). Non-interactive / agent / JSON-output runs are untouched, so
+  `mdl list --format json` stays parseable.
+- Unknown-size transfers still get a bar (position updated as bytes arrive).
+
+### Verified
+- 67 unit tests green; release build green.
+- Non-interactive runs confirmed to emit clean JSON (progress suppressed).
+
 ## [26.0.0-alpha.10] - 2026-08-11
 
 ### Added (Alpha 10: Aprism product matrix)

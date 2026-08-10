@@ -87,6 +87,25 @@ impl Default for DownloadProgress {
     }
 }
 
+/// Minimum file size (bytes) that warrants a visible progress bar. Smaller
+/// files finish so fast that a bar would only flicker.
+const PROGRESS_MIN_BYTES: u64 = 1024 * 1024;
+
+/// Whether a download progress bar should be shown for a file of the given
+/// size. Requires an interactive stderr TTY, ANSI support, and a size above
+/// the flicker threshold. When the total size is unknown (0) we still allow a
+/// spinner-style bar so long transfers are visible.
+pub fn should_show_download_progress(total_bytes: u64) -> bool {
+    use std::io::IsTerminal;
+    if !std::io::stderr().is_terminal() {
+        return false;
+    }
+    if !supports_ansi() {
+        return false;
+    }
+    total_bytes == 0 || total_bytes >= PROGRESS_MIN_BYTES
+}
+
 /// Create a simple standalone progress bar for a single download.
 pub fn create_download_bar(total_bytes: u64) -> ProgressBar {
     let pb = ProgressBar::new(total_bytes);

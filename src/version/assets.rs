@@ -98,7 +98,27 @@ pub async fn download_assets(asset_index: &AssetIndex, assets_dir: &Path) -> Res
         index.objects.len()
     );
 
-    // 3. Download missing objects with bounded concurrency.
+    // 3. Download missing objects with bounded concurrency. A collection-level
+    // progress bar (one bar for the whole batch, gated to interactive TTYs)
+    // shows aggregate progress instead of hundreds of per-file bars.
+    let show_pb = crate::util::progress::should_show_download_progress(0);
+    let batch_bar = if show_pb {
+        let bar = indicatif::ProgressBar::new(missing.len() as u64);
+        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            bar.set_style(
+                indicatif::ProgressStyle::default_bar()
+                    .template("{msg} [{bar:40.green/blue}] {pos}/{len} ({eta})")
+                    .unwrap()
+                    .progress_chars("=>-"),
+            );
+            bar.set_message("Assets".to_string());
+            bar.set_draw_target(indicatif::ProgressDrawTarget::stderr_with_hz(10));
+        }
+        Some(std::sync::Arc::new(bar))
+    } else {
+        None
+    };
+
     let objects_dir = Arc::new(objects_dir.to_path_buf());
     let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_DOWNLOADS));
     let mut tasks = Vec::new();
@@ -106,9 +126,14 @@ pub async fn download_assets(asset_index: &AssetIndex, assets_dir: &Path) -> Res
     for object in missing {
         let objects_dir = Arc::clone(&objects_dir);
         let semaphore = Arc::clone(&semaphore);
+        let bar = batch_bar.clone();
         tasks.push(tokio::spawn(async move {
             let _permit = semaphore.acquire().await.unwrap();
-            download_object(&object, &objects_dir).await
+            let res = download_object(&object, &objects_dir).await;
+            if let Some(b) = &bar {
+                b.inc(1);
+            }
+            res
         }));
     }
 
@@ -125,6 +150,9 @@ pub async fn download_assets(asset_index: &AssetIndex, assets_dir: &Path) -> Res
                 tracing::warn!("Asset download task panicked: {}", e);
             }
         }
+    }
+    if let Some(bar) = batch_bar {
+        bar.finish_and_clear();
     }
 
     if failures > 0 {

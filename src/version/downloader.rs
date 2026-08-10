@@ -50,8 +50,15 @@ pub async fn download_file(
     let candidates = crate::util::mirrors::candidate_urls(url).await;
     let mut last_err: Option<anyhow::Error> = None;
 
+    // Display name for the progress bar: prefer the destination filename.
+    let display_name = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("download")
+        .to_string();
+
     for candidate in &candidates {
-        match try_single_source(candidate, dest, expected_sha1).await {
+        match try_single_source(candidate, dest, expected_sha1, Some(&display_name)).await {
             Ok(bytes) => {
                 write_and_sync(dest, &bytes).await?;
                 // Register the downloaded bytes as the cache source file.
@@ -85,6 +92,7 @@ async fn try_single_source(
     url: &str,
     dest: &Path,
     expected_sha1: Option<&str>,
+    display_name: Option<&str>,
 ) -> Result<Vec<u8>> {
     let client = crate::util::http::create_download_client()?;
 
@@ -123,8 +131,9 @@ async fn try_single_source(
 
     let bytes = if ranged && total >= CHUNK_THRESHOLD {
         debug!("Chunked download ({} bytes, {} chunks)", total, CHUNK_COUNT);
-        chunked_download(&client, url, total).await?
+        chunked_download(&client, url, total, display_name).await?
     } else {
+        use futures_util::StreamExt;
         let response = client
             .get(url)
             .send()
@@ -133,11 +142,31 @@ async fn try_single_source(
         if !response.status().is_success() {
             anyhow::bail!("HTTP error {}: {}", response.status(), url);
         }
-        response
-            .bytes()
-            .await
-            .with_context(|| format!("Failed to read response body from {}", url))?
-            .to_vec()
+        // Stream the body so a progress bar can track real network progress.
+        let show_pb = display_name
+            .map(|_| crate::util::progress::should_show_download_progress(total))
+            .unwrap_or(false);
+        let pb = if show_pb {
+            let bar = crate::util::progress::create_download_bar(total);
+            bar.set_message(display_name.unwrap_or("download").to_string());
+            Some(bar)
+        } else {
+            None
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk
+                .with_context(|| format!("Failed to read response body from {}", url))?;
+            buf.extend_from_slice(&chunk);
+            if let Some(bar) = &pb {
+                bar.set_position(buf.len() as u64);
+            }
+        }
+        if let Some(bar) = pb {
+            bar.finish_and_clear();
+        }
+        buf
     };
 
     if total > 0 && bytes.len() as u64 != total {
@@ -163,7 +192,9 @@ async fn chunked_download(
     client: &reqwest::Client,
     url: &str,
     total: u64,
+    display_name: Option<&str>,
 ) -> Result<Vec<u8>> {
+    use futures_util::StreamExt;
     let chunk_size = (total + CHUNK_COUNT as u64 - 1) / CHUNK_COUNT as u64;
     let mut ranges = Vec::new();
     let mut start = 0u64;
@@ -173,6 +204,18 @@ async fn chunked_download(
         start = end + 1;
     }
 
+    // Shared progress bar across all parallel chunks (driven by received bytes).
+    let show_pb = display_name
+        .map(|_| crate::util::progress::should_show_download_progress(total))
+        .unwrap_or(false);
+    let pb: Option<std::sync::Arc<indicatif::ProgressBar>> = if show_pb {
+        let bar = crate::util::progress::create_download_bar(total);
+        bar.set_message(display_name.unwrap_or("download").to_string());
+        Some(std::sync::Arc::new(bar))
+    } else {
+        None
+    };
+
     let url_owned = url.to_string();
     let client = client.clone();
     let handles: Vec<_> = ranges
@@ -180,6 +223,7 @@ async fn chunked_download(
         .map(|(s, e)| {
             let client = client.clone();
             let url = url_owned.clone();
+            let pb = pb.clone();
             tokio::spawn(async move {
                 let resp = client
                     .get(&url)
@@ -190,7 +234,16 @@ async fn chunked_download(
                 if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
                     anyhow::bail!("Chunk returned HTTP {} for {}", resp.status(), url);
                 }
-                Ok::<Vec<u8>, anyhow::Error>(resp.bytes().await?.to_vec())
+                let mut buf: Vec<u8> = Vec::new();
+                let mut stream = resp.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk?;
+                    buf.extend_from_slice(&chunk);
+                    if let Some(bar) = &pb {
+                        bar.inc(chunk.len() as u64);
+                    }
+                }
+                Ok::<Vec<u8>, anyhow::Error>(buf)
             })
         })
         .collect();
@@ -202,6 +255,9 @@ async fn chunked_download(
             .context("Chunk task panicked")?
             .context("Chunk download failed")?;
         out.extend_from_slice(&chunk);
+    }
+    if let Some(bar) = pb {
+        bar.finish_and_clear();
     }
     if out.len() as u64 != total {
         anyhow::bail!("Chunked reassembly size mismatch: {} != {}", out.len(), total);
@@ -342,7 +398,7 @@ pub async fn download_bytes(url: &str, expected_sha1: Option<&str>) -> Result<Ve
     let candidates = crate::util::mirrors::candidate_urls(url).await;
     let mut last_err: Option<anyhow::Error> = None;
     for candidate in &candidates {
-        match try_single_source(candidate, Path::new(""), expected_sha1).await {
+        match try_single_source(candidate, Path::new(""), expected_sha1, None).await {
             Ok(bytes) => return Ok(bytes),
             Err(e) => last_err = Some(e),
         }
