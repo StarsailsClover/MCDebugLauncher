@@ -734,6 +734,10 @@ enum Commands {
     /// network reachability) and print a pass/fail report
     Doctor,
 
+    /// Print the machine-readable capability manifest (endpoints, execute
+    /// commands, game inputs, events) as JSON for AI/agent consumers
+    Capabilities,
+
     /// Update MDL to the latest version
     Update {
         /// Check for updates without installing
@@ -858,10 +862,16 @@ async fn main() -> Result<()> {
         .open(&log_path)
         .ok();
 
+    // Machine-readable commands must emit ONLY their payload on stdout:
+    // v26.1-alpha.1 adds `capabilities` to the JSON-mode log suppression so an
+    // AI agent can parse the manifest without log noise.
+    let machine_readable =
+        cli.format == "json" || matches!(cli.command, Commands::Capabilities);
+
     let subscriber = FmtSubscriber::builder()
         .with_max_level(log_level)
         .with_ansi(!cli.no_color)
-        .with_writer(TeeMakeWriter::new(file_writer, cli.format == "json"))
+        .with_writer(TeeMakeWriter::new(file_writer, machine_readable))
         .finish();
 
     tracing::subscriber::set_global_default(subscriber)?;
@@ -873,7 +883,7 @@ async fn main() -> Result<()> {
     let update_check = tokio::spawn(util::update::check_for_update());
 
     // Alpha 8.1: show the four most recent version digests at startup.
-    util::changelog::print_recent_updates(cli.format == "json");
+    util::changelog::print_recent_updates(machine_readable);
 
     // Execute command
     match cli.command {
@@ -1053,6 +1063,10 @@ async fn main() -> Result<()> {
         }
         Commands::Doctor => {
             cmd_doctor().await?;
+        }
+        Commands::Capabilities => {
+            let manifest = agent::capabilities::manifest();
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
         Commands::Update { check } => {
             cmd_update(check).await?;

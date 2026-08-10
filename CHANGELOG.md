@@ -5,6 +5,26 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.1.0-alpha.1] - 2026-08-11
+
+### Added (v26.1 Alpha 1: AI integration)
+- **Machine-readable capability manifest** so LLM agents can discover MDL's
+  full command surface without scraping help text:
+  - `GET /api/v1/capabilities` — REST endpoint on the agent server.
+  - `mdl capabilities` — CLI command printing the same manifest.
+  - Schema `mdl.capabilities/v1`: additive-only contract listing every
+    `/api/v1/*` endpoint, every `execute` command (args + options), every
+    game input type, and the WebSocket event kinds.
+- **Agent launch option expansion**: POST /api/v1/execute `launch` now honors
+  `java-path`, `memory`, `aprism` and `enter-test-world` in its options map.
+- **Pure stdout for machine-readable commands**: `capabilities` (and
+  `--format json`) suppress the stdout log tee and startup banner, so the
+  payload is cleanly parseable.
+
+### Verified
+- 70 unit tests green (3 new capability-manifest tests).
+- `mdl capabilities` and `GET /api/v1/capabilities` both return valid JSON.
+
 ## [26.0.0] - 2026-08-11
 
 ### v26.0 Official Release

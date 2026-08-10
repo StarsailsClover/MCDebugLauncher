@@ -155,6 +155,8 @@ impl AgentServer {
             .route("/api/v1/status", get(handle_status))
             .route("/api/v1/execute", post(handle_execute))
             .route("/api/v1/events", get(handle_websocket))
+            // v26.1-alpha.1: machine-readable capability manifest for AI agents
+            .route("/api/v1/capabilities", get(handle_capabilities))
             // Alpha 6 game control endpoints
             .route("/api/v1/game/windows", get(handle_game_windows))
             .route("/api/v1/game/:instance/status", get(handle_game_status))
@@ -174,6 +176,14 @@ impl AgentServer {
 
         Ok(())
     }
+}
+
+/// v26.1-alpha.1: machine-readable capability manifest. Lets an AI agent
+/// discover MDL's full command surface (REST endpoints, execute commands,
+/// game inputs, WebSocket events) without parsing help text. The schema is
+/// additive-only (see agent/capabilities.rs).
+async fn handle_capabilities() -> impl IntoResponse {
+    Json(crate::agent::capabilities::manifest())
 }
 
 async fn handle_status(
@@ -613,6 +623,18 @@ async fn execute_command(
             }
             if let Some(port) = options.get("agent-port").and_then(|v| v.parse().ok()) {
                 launch_options.agent_port = Some(port);
+            }
+            if let Some(java_path) = options.get("java-path") {
+                launch_options.java_path = Some(java_path.clone());
+            }
+            if let Some(memory) = options.get("memory") {
+                launch_options.memory = Some(memory.clone());
+            }
+            if options.get("aprism").map(|v| v == "true").unwrap_or(false) {
+                launch_options.aprism = true;
+            }
+            if options.get("enter-test-world").map(|v| v == "true").unwrap_or(false) {
+                launch_options.enter_test_world = true;
             }
             if options.get("no-queue").map(|v| v == "true").unwrap_or(false) {
                 launch_options.no_queue = true;

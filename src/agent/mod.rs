@@ -4,3 +4,4 @@
 pub mod server;
 pub mod commands;
 pub mod events;
+pub mod capabilities;
