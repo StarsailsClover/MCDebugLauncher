@@ -5,6 +5,31 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.1.0] - 2026-08-11
+
+### v26.1 Official Release
+
+Second official release. Collapses the entire v26.1 mainline (Alpha 1 through
+Alpha 5) into a stable, non-prerelease build.
+
+Highlights across the line:
+- **Alpha 1 — Better AI integration**: machine-readable capability manifest
+  (`GET /api/v1/capabilities` + `mdl capabilities`, schema
+  `mdl.capabilities/v1`); agent `launch` honors `java-path`/`memory`/
+  `aprism`/`enter-test-world`; machine-readable commands emit pure stdout.
+- **Alpha 2 — Better Agent experience**: agent `stop` command; every execute
+  failure carries a machine-readable `error_code` + fitting HTTP status.
+- **Alpha 3 — More Bedrock launch support**: full BDS lifecycle
+  (stop/status/EULA/log capture/PID tracking/already-running guard) and the
+  detached-spawn pipe-hang fix.
+- **Alpha 4 — Feature parity**: instance `clone` and `rename`.
+- **Alpha 5 — Stability**: zero compiler warnings; fixed dead-store,
+  snake_case serde fields, must-use Result, deprecated image API, two
+  type-visibility issues, and triplicated Win32 FFI declarations.
+
+Verified: 74 unit tests green, release build clean, `mdl doctor` 8/0,
+`mdl capabilities` returns the full manifest.
+
 ## [26.1.0-alpha.5] - 2026-08-11
 
 ### Changed (v26.1 Alpha 5: stability & code hygiene)
