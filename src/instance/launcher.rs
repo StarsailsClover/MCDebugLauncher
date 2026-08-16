@@ -293,6 +293,14 @@ pub struct LaunchOptions {
     pub wait_ready: bool,
     /// Skip the instance queue: launch even if another instance is running.
     pub no_queue: bool,
+    /// Idle watchdog timeout in seconds. When the game produces no log output
+    /// for this duration, it is terminated automatically. Pass `None` to
+    /// disable the watchdog entirely. Default (when `Some(0)`) uses
+    /// `game::watchdog::DEFAULT_IDLE_TIMEOUT_SECS`.
+    pub idle_timeout: Option<u64>,
+    /// Whether the idle watchdog is explicitly disabled (via --no-idle-timeout).
+    /// When true, `idle_timeout` is ignored and no watchdog is started.
+    pub no_idle_timeout: bool,
 }
 
 /// Result of a successful launch.
@@ -686,10 +694,30 @@ impl InstanceLauncher {
         if options.detach {
             // Return immediately; the game keeps running in the background.
             // The launch lock was transferred to the game process in launch().
-            if let Some(log) = log_file {
+            if let Some(log) = &log_file {
                 tracing::info!("Game output is being written to {}", log.display());
             }
             tracing::info!("Instance '{}' launched in background (PID {})", name, pid);
+
+            // Start the idle watchdog if requested. The watchdog monitors the
+            // game's log output and terminates the process after a configurable
+            // idle period (default 60s). This prevents zombie game processes
+            // in unattended / agent-driven workflows.
+            if !options.no_idle_timeout {
+                let timeout = match options.idle_timeout {
+                    Some(0) | None => crate::game::watchdog::DEFAULT_IDLE_TIMEOUT_SECS,
+                    Some(secs) => secs,
+                };
+                let watchdog = crate::game::watchdog::IdleWatchdog::new(
+                    pid,
+                    name.to_string(),
+                    log_file.as_deref().unwrap_or(std::path::Path::new("")),
+                    timeout,
+                );
+                watchdog.start();
+                tracing::info!("Idle watchdog armed: {}s timeout", timeout);
+            }
+
             return Ok(LaunchOutcome { pid, detached: true });
         }
 

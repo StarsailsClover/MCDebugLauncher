@@ -16,6 +16,7 @@
 pub mod client;
 pub mod despotes;
 pub mod options;
+pub mod watchdog;
 
 #[cfg(windows)]
 pub mod capture;

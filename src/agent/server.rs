@@ -38,6 +38,9 @@ pub enum ServerEvent {
     /// Alpha 8: broadcast when the game has finished booting and is ready
     /// (either in-game or at a menu), detected via the Despotes control mod.
     GameReady { instance: String, pid: u32, in_world: bool, timestamp: String },
+    /// v26.2-alpha.1: broadcast when the idle watchdog terminates a game
+    /// process after a configurable period of no log output.
+    GameIdleTimeout { instance: String, pid: u32, idle_seconds: u64, last_line: String, timestamp: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -167,6 +170,8 @@ impl AgentServer {
             .route("/api/v1/game/:instance/status", get(handle_game_status))
             .route("/api/v1/game/:instance/screenshot", get(handle_game_screenshot))
             .route("/api/v1/game/:instance/ready", get(handle_game_ready))
+            // v26.2-alpha.1: idle watchdog status
+            .route("/api/v1/game/:instance/idle-status", get(handle_idle_status))
             .route("/api/v1/game/:instance/input", post(handle_game_input))
             .with_state((self.state.clone(), self.event_tx.clone()));
 
@@ -429,6 +434,79 @@ async fn handle_game_ready(Path(instance): Path<String>) -> impl IntoResponse {
             Json(serde_json::json!({"status": "error", "error": e.to_string()})),
         ),
     }
+}
+
+/// v26.2-alpha.1: report the idle-watchdog status for a running instance.
+/// Returns the last-output age, threshold, and remaining time before
+/// termination. Returns 404 if the instance is not found, or 503 if no
+/// game process is running for the instance.
+async fn handle_idle_status(Path(instance): Path<String>) -> impl IntoResponse {
+    let dir = match resolve_instance_dir(&instance).await {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+            );
+        }
+    };
+
+    // Read the PID from the runtime pid file.
+    let pid: Option<u32> = tokio::fs::read_to_string(dir.join("runtime").join("pid"))
+        .await
+        .ok()
+        .and_then(|c| c.trim().parse().ok());
+
+    let pid = match pid {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": format!("No running game process for instance '{}'", instance),
+                    "error_code": "NOT_RUNNING",
+                })),
+            );
+        }
+    };
+
+    // Read the idle timeout marker (if the watchdog fired).
+    let marker_path = dir.join("runtime").join("idle_timeout");
+    let fired = tokio::fs::read_to_string(&marker_path).await.ok();
+
+    // Read the launch log's last modification time as a proxy for last output.
+    let log_path = dir.join("logs").join("launch_detached.log");
+    let last_output_age_secs = match std::fs::metadata(&log_path) {
+        Ok(meta) => {
+            if let Ok(modified) = meta.modified() {
+                modified
+                    .elapsed()
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+            } else {
+                0
+            }
+        }
+        Err(_) => 0,
+    };
+
+    // Check if the process is still alive.
+    let alive = pid_alive(pid);
+
+    let response = serde_json::json!({
+        "instance": instance,
+        "pid": pid,
+        "process_alive": alive,
+        "last_output_age_secs": last_output_age_secs,
+        "idle_timeout_fired": fired.is_some(),
+        "idle_timeout_event": fired,
+    });
+
+    (
+        if alive { StatusCode::OK } else { StatusCode::GONE },
+        Json(serde_json::json!({ "status": "success", "data": response })),
+    )
 }
 
 async fn handle_game_screenshot(

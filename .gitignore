@@ -40,9 +40,20 @@ launch.log
 # Session migration data (Cherry Studio)
 .cherry_migration/
 
+# Agent session data (Qwen / other AI tools)
+.qwen-agent-sessions/
+
 # Release zip artifacts (built, not committed)
 mdl-v26*-windows-x64.zip
 
 # Documentation files (release notes, changelogs)
 RELEASE_NOTES*.md
 CHANGELOG.md
+
+# Installer logs (NeoForge/Forge)
+neoforge-*-installer.jar.log
+
+# Misc build/test artifacts
+release_build.log
+build_output.txt
+
