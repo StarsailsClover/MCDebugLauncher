@@ -59,19 +59,22 @@ pub async fn download_file(
 
     for candidate in &candidates {
         match try_single_source(candidate, dest, expected_sha1, Some(&display_name)).await {
-            Ok(bytes) => {
-                write_and_sync(dest, &bytes).await?;
-                // Register the downloaded bytes as the cache source file.
+            Ok(bytes_written) => {
+                // Register the downloaded file in the cache by copying it
+                // from the destination into the cache dir. This avoids
+                // buffering the full file in memory — the previous
+                // implementation returned Vec<u8> and held the entire
+                // download in RAM, causing ~1.9GB peak usage on first launch.
                 if let Ok(mut cache) = crate::util::cache::DownloadCache::new() {
                     let rel = std::path::Path::new("dl")
                         .join(sanitize_for_cache(&cache_key))
                         .with_extension("bin");
                     let src = cache.root().join(&rel);
-                    if let Ok(()) = write_and_sync(&src, &bytes).await {
-                        cache.register(&cache_key, &rel, bytes.len() as u64);
+                    if let Ok(()) = copy_file_for_cache(dest, &src).await {
+                        cache.register(&cache_key, &rel, bytes_written);
                     }
                 }
-                info!("Downloaded {} ({} bytes) from {}", dest.display(), bytes.len(), candidate);
+                info!("Downloaded {} ({} bytes) from {}", dest.display(), bytes_written, candidate);
                 return Ok(());
             }
             Err(e) => {
@@ -85,15 +88,38 @@ pub async fn download_file(
         .with_context(|| format!("All sources failed for {}", url))
 }
 
+/// Copy a file into the cache directory. Uses a bounded buffer to avoid
+/// loading the entire file into memory.
+async fn copy_file_for_cache(src: &Path, dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    let mut reader = fs::File::open(src).await?;
+    let mut writer = fs::File::create(dest).await?;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = tokio::io::AsyncReadExt::read(&mut reader, &mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        tokio::io::AsyncWriteExt::write_all(&mut writer, &buf[..n]).await?;
+    }
+    writer.sync_all().await?;
+    Ok(())
+}
+
 /// Try one source URL: HEAD to learn size/range support, then either
-/// chunked-parallel or single-shot GET. Returns the full byte buffer after
-/// optional sha1 verification.
+/// chunked-parallel or single-shot GET. Streams the response body directly
+/// to `dest` (or a temp file when dest is empty), avoiding holding the
+/// full download in memory.
+///
+/// Returns the number of bytes written.
 async fn try_single_source(
     url: &str,
-    _dest: &Path,
+    dest: &Path,
     expected_sha1: Option<&str>,
     display_name: Option<&str>,
-) -> Result<Vec<u8>> {
+) -> Result<u64> {
     let client = crate::util::http::create_download_client()?;
 
     // Probe for size + range support. Some hosts reject HEAD, so fall back
@@ -129,9 +155,21 @@ async fn try_single_source(
         }
     }
 
-    let bytes = if ranged && total >= CHUNK_THRESHOLD {
+    // Choose the output target: the real destination, or a temp file when
+    // the caller only wants bytes (download_bytes path passes "").
+    let use_temp = dest.as_os_str().is_empty();
+    let out_path: std::path::PathBuf = if use_temp {
+        std::env::temp_dir().join(format!("mdl_dl_{}", std::process::id()))
+    } else {
+        dest.to_path_buf()
+    };
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent).await.ok();
+    }
+
+    let bytes_written = if ranged && total >= CHUNK_THRESHOLD {
         debug!("Chunked download ({} bytes, {} chunks)", total, CHUNK_COUNT);
-        chunked_download(&client, url, total, display_name).await?
+        chunked_download_to_file(&client, url, total, display_name, &out_path).await?
     } else {
         use futures_util::StreamExt;
         let response = client
@@ -142,7 +180,8 @@ async fn try_single_source(
         if !response.status().is_success() {
             anyhow::bail!("HTTP error {}: {}", response.status(), url);
         }
-        // Stream the body so a progress bar can track real network progress.
+        // Stream the body directly to disk so we never hold the full file
+        // in memory. This is the critical fix for the 1.9GB memory issue.
         let show_pb = display_name
             .map(|_| crate::util::progress::should_show_download_progress(total))
             .unwrap_or(false);
@@ -153,47 +192,62 @@ async fn try_single_source(
         } else {
             None
         };
-        let mut buf: Vec<u8> = Vec::new();
+        let mut file = fs::File::create(&out_path).await
+            .with_context(|| format!("Failed to create output file {}", out_path.display()))?;
+        let mut written: u64 = 0;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk
                 .with_context(|| format!("Failed to read response body from {}", url))?;
-            buf.extend_from_slice(&chunk);
+            file.write_all(&chunk).await?;
+            written += chunk.len() as u64;
             if let Some(bar) = &pb {
-                bar.set_position(buf.len() as u64);
+                bar.set_position(written);
             }
         }
+        file.sync_all().await?;
         if let Some(bar) = pb {
             bar.finish_and_clear();
         }
-        buf
+        written
     };
 
-    if total > 0 && bytes.len() as u64 != total {
+    if total > 0 && bytes_written != total {
         anyhow::bail!(
             "Size mismatch for {}: expected {} bytes, got {}",
             url,
             total,
-            bytes.len()
+            bytes_written
         );
     }
 
+    // Verify checksum from disk (reads in 64KB chunks, not the full file).
     if let Some(expected) = expected_sha1 {
-        if !verify_sha1(&bytes, expected) {
+        let ok = crate::util::checksum::verify_sha1_file(&out_path, expected)
+            .await
+            .unwrap_or(false);
+        if !ok {
+            if use_temp {
+                let _ = fs::remove_file(&out_path).await;
+            }
             anyhow::bail!("Checksum mismatch for {}", url);
         }
     }
-    Ok(bytes)
+
+    Ok(bytes_written)
 }
 
 /// Download `total` bytes in `CHUNK_COUNT` parallel Range requests and
-/// reassemble in order.
-async fn chunked_download(
+/// write them to `out_path` in order. Each chunk streams directly to a
+/// temp file and is concatenated, avoiding holding the full download in
+/// memory.
+async fn chunked_download_to_file(
     client: &reqwest::Client,
     url: &str,
     total: u64,
     display_name: Option<&str>,
-) -> Result<Vec<u8>> {
+    out_path: &Path,
+) -> Result<u64> {
     use futures_util::StreamExt;
     let chunk_size = (total + CHUNK_COUNT as u64 - 1) / CHUNK_COUNT as u64;
     let mut ranges = Vec::new();
@@ -216,14 +270,24 @@ async fn chunked_download(
         None
     };
 
+    // Each chunk writes to its own temp file, then we concatenate them
+    // sequentially into out_path. This bounds memory to the chunk size.
+    let temp_dir = std::env::temp_dir();
+    let chunk_temp_paths: Vec<std::path::PathBuf> = (0..ranges.len())
+        .map(|i| temp_dir.join(format!("mdl_chunk_{}_{}", std::process::id(), i)))
+        .collect();
+
     let url_owned = url.to_string();
     let client = client.clone();
+    let chunk_paths_clone = chunk_temp_paths.clone();
     let handles: Vec<_> = ranges
         .into_iter()
-        .map(|(s, e)| {
+        .enumerate()
+        .map(|(i, (s, e))| {
             let client = client.clone();
             let url = url_owned.clone();
             let pb = pb.clone();
+            let chunk_path = chunk_paths_clone[i].clone();
             tokio::spawn(async move {
                 let resp = client
                     .get(&url)
@@ -234,44 +298,60 @@ async fn chunked_download(
                 if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
                     anyhow::bail!("Chunk returned HTTP {} for {}", resp.status(), url);
                 }
-                let mut buf: Vec<u8> = Vec::new();
+                let mut file = fs::File::create(&chunk_path).await?;
                 let mut stream = resp.bytes_stream();
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk?;
-                    buf.extend_from_slice(&chunk);
+                    file.write_all(&chunk).await?;
                     if let Some(bar) = &pb {
                         bar.inc(chunk.len() as u64);
                     }
                 }
-                Ok::<Vec<u8>, anyhow::Error>(buf)
+                file.sync_all().await?;
+                Ok::<(), anyhow::Error>(())
             })
         })
         .collect();
 
-    let mut out = Vec::with_capacity(total as usize);
+    let mut chunk_errors = Vec::new();
     for h in handles {
-        let chunk = h
-            .await
-            .context("Chunk task panicked")?
-            .context("Chunk download failed")?;
-        out.extend_from_slice(&chunk);
+        if let Err(e) = h.await {
+            chunk_errors.push(e);
+        }
     }
     if let Some(bar) = pb {
         bar.finish_and_clear();
     }
-    if out.len() as u64 != total {
-        anyhow::bail!("Chunked reassembly size mismatch: {} != {}", out.len(), total);
+    if !chunk_errors.is_empty() {
+        // Clean up temp files
+        for p in &chunk_temp_paths {
+            let _ = fs::remove_file(p).await;
+        }
+        anyhow::bail!("Chunked download failed: {} error(s)", chunk_errors.len());
     }
-    Ok(out)
-}
 
-async fn write_and_sync(dest: &Path, bytes: &[u8]) -> Result<()> {
-    let mut file = fs::File::create(dest)
-        .await
-        .context("Failed to create file")?;
-    file.write_all(bytes).await.context("Failed to write file")?;
-    file.sync_all().await.context("Failed to sync file to disk")?;
-    Ok(())
+    // Concatenate chunk files into the output file.
+    let mut out_file = fs::File::create(out_path).await?;
+    let mut written: u64 = 0;
+    for chunk_path in &chunk_temp_paths {
+        let mut reader = fs::File::open(chunk_path).await?;
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = tokio::io::AsyncReadExt::read(&mut reader, &mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            out_file.write_all(&buf[..n]).await?;
+            written += n as u64;
+        }
+        let _ = fs::remove_file(chunk_path).await;
+    }
+    out_file.sync_all().await?;
+
+    if written != total {
+        anyhow::bail!("Chunked reassembly size mismatch: {} != {}", written, total);
+    }
+    Ok(written)
 }
 
 fn cache_key(url: &str, sha1: Option<&str>) -> String {
@@ -340,6 +420,7 @@ where
 }
 
 /// Try to download from a single source with streaming progress updates.
+/// Streams directly to disk — the full body is never buffered in memory.
 async fn try_download_with_progress<F>(
     url: &str,
     dest: &Path,
@@ -350,10 +431,8 @@ where
     F: FnMut(u64, u64),
 {
     use futures_util::StreamExt;
-    
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
-        .build()?;
+
+    let client = crate::util::http::create_download_client()?;
 
     let response = client
         .get(url)
@@ -367,39 +446,49 @@ where
 
     let total_size = response.content_length().unwrap_or(0);
     let mut downloaded: u64 = 0;
-    let mut buffer = Vec::new();
 
     // Report initial progress
     progress_callback(0, total_size);
 
+    // Stream directly to the destination file — no in-memory buffer.
+    let mut file = fs::File::create(dest).await
+        .with_context(|| format!("Failed to create output file {}", dest.display()))?;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.with_context(|| format!("Failed to read chunk from {}", url))?;
-        buffer.extend_from_slice(&chunk);
+        file.write_all(&chunk).await?;
         downloaded += chunk.len() as u64;
         progress_callback(downloaded, total_size);
     }
+    file.sync_all().await?;
 
-    // Verify checksum if provided
+    // Verify checksum from disk (bounded memory).
     if let Some(expected) = expected_sha1 {
-        if !verify_sha1(&buffer, expected) {
+        let ok = crate::util::checksum::verify_sha1_file(dest, expected)
+            .await
+            .unwrap_or(false);
+        if !ok {
             anyhow::bail!("Checksum mismatch for {}", url);
         }
     }
 
-    // Write to disk
-    write_and_sync(dest, &buffer).await?;
-
-    Ok(buffer.len() as u64)
+    Ok(downloaded)
 }
 
 /// Fetch bytes only (no file write), with mirror fallback.
+/// Streams to a temp file then reads it back — the temp file is cleaned up.
 pub async fn download_bytes(url: &str, expected_sha1: Option<&str>) -> Result<Vec<u8>> {
     let candidates = crate::util::mirrors::candidate_urls(url).await;
     let mut last_err: Option<anyhow::Error> = None;
     for candidate in &candidates {
         match try_single_source(candidate, Path::new(""), expected_sha1, None).await {
-            Ok(bytes) => return Ok(bytes),
+            Ok(_bytes_written) => {
+                // The data was written to a temp file; read it back.
+                let temp_path = std::env::temp_dir().join(format!("mdl_dl_{}", std::process::id()));
+                let result = fs::read(&temp_path).await;
+                let _ = fs::remove_file(&temp_path).await;
+                return result.map_err(|e| anyhow::anyhow!("Failed to read downloaded temp file: {}", e));
+            }
             Err(e) => last_err = Some(e),
         }
     }

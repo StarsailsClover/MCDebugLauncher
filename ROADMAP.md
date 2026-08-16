@@ -30,7 +30,7 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha | 主题 | 内容 | 状态 |
 |---|---|---|---|
 | Alpha 1 | 进程生命周期与看门狗 | 空闲超时自动关闭：监控游戏日志输出，N 秒无新输出自动终止；`--idle-timeout <seconds>` 可配，`--no-idle-timeout` 禁用；Agent API `GET /api/v1/game/:instance/idle-status`；WebSocket `game_idle_timeout` 事件；白名单日志模式重置计时器 | ✅ 已完成 |
-| Alpha 2 | 诊断系统补全 + 性能优化 | 实现 `log_parser.rs`（集成 mclog-analyzer）；crash report stack trace 提取；结构化 JSON 诊断输出；流式下载替代内存缓冲（修复 1.9GB 内存问题） | 📋 规划中 |
+| Alpha 2 | 诊断系统补全 + 性能优化 | 实现 `log_parser.rs`（集成 mclog-analyzer）；crash report stack trace 提取；结构化 JSON 诊断输出；流式下载替代内存缓冲（修复 1.9GB 内存问题） | ✅ 已完成 |
 | Alpha 3 | Agent 命令面收敛 | 实现或移除 `agent/commands.rs`；统一 CLI/HTTP 命令映射；错误码一致性审计 | 📋 规划中 |
 | Alpha 4 | 实例运维与导出 | `mdl export <instance> <output.mrpack>`；批量 mod 操作；磁盘占用报告；实例健康评分 | 📋 规划中 |
 | Alpha 5 | 下载与网络容灾 | 镜像源健康度持续监测；自动换源；HTTP Range 断点续传；asset 预取优化 | 📋 规划中 |

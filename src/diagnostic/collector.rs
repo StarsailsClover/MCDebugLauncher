@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
+use super::log_parser::{self, LogParser, Severity};
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DiagnosticReport {
     pub instance_name: String,
@@ -13,6 +15,25 @@ pub struct DiagnosticReport {
     pub logs: Vec<LogEntry>,
     pub crash_reports: Vec<CrashReport>,
     pub errors: Vec<ErrorEntry>,
+    /// v26.2-alpha.2: structured log analysis (categories, crash type,
+    /// detected mods, top stack frames) produced by the integrated
+    /// mclog-analyzer parser.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<LogAnalysisSummary>,
+}
+
+/// Structured analysis summary embedded in the diagnostic report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogAnalysisSummary {
+    pub total_lines: u64,
+    pub error_count: u64,
+    pub warning_count: u64,
+    pub crash_count: u64,
+    pub detected_mods: Vec<String>,
+    pub crash_type: Option<String>,
+    pub stack_trace_top: Vec<String>,
+    pub categories: std::collections::HashMap<String, u64>,
+    pub top_errors: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,7 +85,38 @@ impl DiagnosticCollector {
         let system_info = self.collect_system_info().await?;
         let logs = self.collect_logs().await?;
         let crash_reports = self.collect_crash_reports().await?;
-        let errors = self.extract_errors(&logs).await?;
+        let errors = self.extract_errors(&logs, &crash_reports).await?;
+
+        // v26.2-alpha.2: run the integrated log analyzer on the collected
+        // log entries to produce a structured summary (crash type, mods,
+        // categories, stack traces). This replaces the previous TODO at
+        // line 213 (stack_trace: None).
+        let parser = LogParser::new();
+        let parsed_entries: Vec<log_parser::LogEntry> = logs.iter().map(|l| {
+            log_parser::LogEntry {
+                line_number: 0,
+                timestamp: Some(l.timestamp.clone()),
+                severity: Severity::from_str(&l.level).unwrap_or(Severity::Info),
+                source: Some(l.source.clone()),
+                message: l.message.clone(),
+                is_exception: false,
+                exception_type: None,
+                is_crash_marker: l.level == "FATAL",
+                categories: Vec::new(),
+            }
+        }).collect();
+        let analysis_result = parser.analyze(&parsed_entries);
+        let analysis = Some(LogAnalysisSummary {
+            total_lines: analysis_result.total_lines,
+            error_count: analysis_result.error_count,
+            warning_count: analysis_result.warning_count,
+            crash_count: analysis_result.crash_count,
+            detected_mods: analysis_result.detected_mods,
+            crash_type: analysis_result.crash_type,
+            stack_trace_top: analysis_result.stack_trace_top,
+            categories: analysis_result.categories,
+            top_errors: analysis_result.top_errors,
+        });
 
         Ok(DiagnosticReport {
             instance_name: instance_name.to_string(),
@@ -73,6 +125,7 @@ impl DiagnosticCollector {
             logs,
             crash_reports,
             errors,
+            analysis,
         })
     }
 
@@ -136,29 +189,20 @@ impl DiagnosticCollector {
     }
 
     fn parse_log_content(&self, content: &str) -> Result<Vec<LogEntry>> {
-        let mut entries = Vec::new();
+        // v26.2-alpha.2: use the integrated mclog-analyzer parser instead
+        // of the previous inline regex. This gives us proper severity
+        // detection, categorization, and crash-marker recognition.
+        let parser = LogParser::new();
+        let parsed = parser.parse_content(content);
 
-        for line in content.lines().take(1000) {  // Limit to last 1000 lines
-            if let Some(entry) = self.parse_log_line(line) {
-                entries.push(entry);
-            }
-        }
+        let entries: Vec<LogEntry> = parsed.into_iter().map(|p| LogEntry {
+            timestamp: p.timestamp.unwrap_or_default(),
+            level: p.severity.as_str().to_string(),
+            source: p.source.unwrap_or_default(),
+            message: p.message,
+        }).collect();
 
         Ok(entries)
-    }
-
-    fn parse_log_line(&self, line: &str) -> Option<LogEntry> {
-        // Parse Minecraft log format: [HH:MM:SS] [Thread/LEVEL]: Message
-        let re = regex::Regex::new(r"^\[([^\]]+)\] \[([^/]+)/([^\]]+)\]: (.+)$").ok()?;
-
-        let caps = re.captures(line)?;
-
-        Some(LogEntry {
-            timestamp: caps.get(1)?.as_str().to_string(),
-            source: caps.get(2)?.as_str().to_string(),
-            level: caps.get(3)?.as_str().to_string(),
-            message: caps.get(4)?.as_str().to_string(),
-        })
     }
 
     async fn collect_crash_reports(&self) -> Result<Vec<CrashReport>> {
@@ -201,16 +245,30 @@ impl DiagnosticCollector {
             .unwrap_or_else(|| "Unknown".to_string())
     }
 
-    async fn extract_errors(&self, logs: &[LogEntry]) -> Result<Vec<ErrorEntry>> {
+    async fn extract_errors(&self, logs: &[LogEntry], crash_reports: &[CrashReport]) -> Result<Vec<ErrorEntry>> {
         let mut errors = Vec::new();
+
+        // v26.2-alpha.2: extract stack traces from crash reports using
+        // the integrated log_parser. Previously this was a TODO (line 213).
+        let crash_text: String = crash_reports.iter()
+            .map(|c| c.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
 
         for log in logs {
             if log.level == "ERROR" || log.level == "FATAL" {
+                let stack_trace = log_parser::extract_stack_trace(&crash_text, 10);
+                let stack_trace_str = if stack_trace.is_empty() {
+                    None
+                } else {
+                    Some(stack_trace.join("\n"))
+                };
+
                 errors.push(ErrorEntry {
                     timestamp: log.timestamp.clone(),
                     error_type: self.classify_error(&log.message),
                     message: log.message.clone(),
-                    stack_trace: None,  // TODO: Extract stack traces
+                    stack_trace: stack_trace_str,
                 });
             }
         }

@@ -203,6 +203,9 @@ async fn download_object(object: &AssetObject, objects_dir: &Path) -> Result<()>
 }
 
 async fn try_download_asset(url: &str, target_path: &Path, hash: &str) -> Result<()> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
     let response = reqwest::get(url)
         .await
         .with_context(|| format!("Failed to fetch asset from {}", url))?;
@@ -210,12 +213,25 @@ async fn try_download_asset(url: &str, target_path: &Path, hash: &str) -> Result
         anyhow::bail!("HTTP {} for asset {}", response.status(), &hash[..8]);
     }
 
-    let bytes = response.bytes().await?;
+    // Stream the body directly to disk so we never hold the full asset in
+    // memory. With 16 concurrent downloads this bounds peak memory.
+    let mut file = tokio::fs::File::create(target_path).await?;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        file.write_all(&chunk).await?;
+    }
+    file.sync_all().await?;
+    drop(file);
 
-    if !crate::util::checksum::verify_sha1(&bytes, hash) {
+    // Verify SHA1 from disk (reads in 64KB chunks).
+    let ok = crate::util::checksum::verify_sha1_file(target_path, hash)
+        .await
+        .unwrap_or(false);
+    if !ok {
+        let _ = tokio::fs::remove_file(target_path).await;
         anyhow::bail!("SHA1 mismatch for asset {}", &hash[..8]);
     }
 
-    fs::write(target_path, bytes).await?;
     Ok(())
 }

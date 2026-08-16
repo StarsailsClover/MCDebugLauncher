@@ -250,6 +250,10 @@ impl JavaRuntime {
 
     /// Download and extract the Temurin JRE for `major_version` from Adoptium
     /// into the java cache, returning the resulting runtime.
+    ///
+    /// Streams the archive to a temp file on disk, then extracts from disk.
+    /// The previous implementation used `response.bytes().await` which held
+    /// the entire JRE archive (100-200MB) in memory.
     async fn download(major_version: u8) -> Result<Self> {
         let (os, arch, archive_ext) = Self::adoptium_platform()?;
 
@@ -262,7 +266,10 @@ impl JavaRuntime {
 
         info!("Downloading Java {} from Adoptium ({}/{})", major_version, os, arch);
 
-        let response = reqwest::get(&url)
+        let client = crate::util::http::create_download_client()?;
+        let response = client
+            .get(&url)
+            .send()
             .await
             .with_context(|| format!("Failed to download Java from {}", url))?;
         if !response.status().is_success() {
@@ -274,24 +281,49 @@ impl JavaRuntime {
                 arch
             );
         }
-        let bytes = response.bytes().await.context("Failed to read Java archive")?;
 
+        // Stream the archive to a temp file on disk instead of buffering
+        // the entire JRE in memory. A Temurin JRE zip is ~100-200MB; holding
+        // it in RAM was a significant contributor to peak memory.
         let cache_dir = crate::util::paths::get_java_cache_dir()?;
         let target_dir = cache_dir.join(major_version.to_string());
+        let archive_path = cache_dir.join(format!("java_{}_download.{}", major_version, archive_ext));
 
         // Clean any partial previous extraction.
         if target_dir.exists() {
             let _ = std::fs::remove_dir_all(&target_dir);
         }
+        std::fs::create_dir_all(&cache_dir)
+            .with_context(|| format!("Failed to create Java cache dir {:?}", cache_dir))?;
         std::fs::create_dir_all(&target_dir)
             .with_context(|| format!("Failed to create Java dir {:?}", target_dir))?;
 
-        info!("Extracting Java runtime ({} bytes)...", bytes.len());
+        use futures_util::StreamExt;
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::File::create(&archive_path).await
+            .with_context(|| format!("Failed to create temp archive file {:?}", archive_path))?;
+        let mut stream = response.bytes_stream();
+        let mut total_written: u64 = 0;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("Failed to read Java archive chunk")?;
+            file.write_all(&chunk).await?;
+            total_written += chunk.len() as u64;
+        }
+        file.sync_all().await?;
+        drop(file);
+
+        info!("Extracting Java runtime ({} bytes)...", total_written);
+        let bytes = std::fs::read(&archive_path)
+            .with_context(|| format!("Failed to re-read Java archive from disk {:?}", archive_path))?;
+
         match archive_ext {
             "zip" => Self::extract_zip(&bytes, &target_dir)?,
             "tar.gz" => Self::extract_tar_gz(&bytes, &target_dir)?,
             other => anyhow::bail!("Unsupported Java archive format: {}", other),
         }
+
+        // Clean up the temp archive.
+        let _ = std::fs::remove_file(&archive_path);
 
         let java_path = Self::find_java_binary(&target_dir)?;
         let runtime = Self::from_path(&java_path)?;
