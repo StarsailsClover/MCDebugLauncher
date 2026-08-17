@@ -750,6 +750,13 @@ async fn execute_command(
             if options.get("no-queue").map(|v| v == "true").unwrap_or(false) {
                 launch_options.no_queue = true;
             }
+            // v26.2-alpha.1: idle watchdog options.
+            if let Some(timeout) = options.get("idle-timeout").and_then(|v| v.parse().ok()) {
+                launch_options.idle_timeout = Some(timeout);
+            }
+            if options.get("no-idle-timeout").map(|v| v == "true").unwrap_or(false) {
+                launch_options.no_idle_timeout = true;
+            }
 
             // Validate the instance exists before handing off.
             let manager = InstanceManager::new()?;

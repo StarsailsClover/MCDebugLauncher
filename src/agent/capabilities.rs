@@ -105,6 +105,7 @@ pub fn manifest() -> Capabilities {
             Endpoint { method: "GET",  path: "/api/v1/game/:instance/status",    purpose: "In-game status of an instance via Despotes" },
             Endpoint { method: "GET",  path: "/api/v1/game/:instance/screenshot",purpose: "PNG screenshot (Despotes framebuffer, WGC fallback)" },
             Endpoint { method: "GET",  path: "/api/v1/game/:instance/ready",     purpose: "Whether the game broadcast ready (in world)" },
+            Endpoint { method: "GET",  path: "/api/v1/game/:instance/idle-status",purpose: "Idle watchdog status (last output age, threshold, remaining)" },
             Endpoint { method: "POST", path: "/api/v1/game/:instance/input",     purpose: "Inject an in-game input (key/click/look/chat/scroll)" },
         ],
         execute_commands: vec![
@@ -152,6 +153,8 @@ pub fn manifest() -> Capabilities {
                     OptionSpec { key: "aprism", values: "true", description: "Attach the Aprism JE javaagent" },
                     OptionSpec { key: "enter-test-world", values: "true", description: "Auto-enter test world when ready" },
                     OptionSpec { key: "no-queue", values: "true", description: "Skip the instance launch queue" },
+                    OptionSpec { key: "idle-timeout", values: "<seconds>", description: "Idle watchdog timeout (default 60s; 0=use default)" },
+                    OptionSpec { key: "no-idle-timeout", values: "true", description: "Disable the idle watchdog entirely" },
                 ],
             },
             ExecCommand {
@@ -211,12 +214,14 @@ pub fn manifest() -> Capabilities {
         events: EventsSpec {
             websocket_path: "/api/v1/events",
             kinds: vec![
-                "instance_created",
-                "instance_deleted",
+                "launch_started",
                 "launch_progress",
                 "launch_completed",
                 "launch_failed",
+                "log_line",
+                "instance_stopped",
                 "game_ready",
+                "game_idle_timeout",
             ],
         },
         error_codes: vec![
@@ -226,6 +231,10 @@ pub fn manifest() -> Capabilities {
             ErrorCodeSpec { code: "ALREADY_EXISTS",   http_status: 409, description: "An instance with that name already exists" },
             ErrorCodeSpec { code: "NOT_RUNNING",      http_status: 409, description: "The instance is not running (stop was requested)" },
             ErrorCodeSpec { code: "BUSY",             http_status: 409, description: "Another instance holds the launch lock" },
+            ErrorCodeSpec { code: "NOT_IMPLEMENTED",   http_status: 501, description: "The endpoint is not supported on this platform" },
+            ErrorCodeSpec { code: "SERVICE_UNAVAILABLE", http_status: 503, description: "The required component (Despotes, game process) is not available" },
+            ErrorCodeSpec { code: "BAD_GATEWAY",      http_status: 502, description: "An upstream request (e.g. to the Despotes mod) failed" },
+            ErrorCodeSpec { code: "GONE",             http_status: 410, description: "The game process is no longer running (idle-status after exit)" },
             ErrorCodeSpec { code: "INTERNAL",         http_status: 500, description: "Unclassified internal error" },
         ],
     }
@@ -247,6 +256,7 @@ mod tests {
             "/api/v1/capabilities",
             "/api/v1/game/:instance/status",
             "/api/v1/game/:instance/input",
+            "/api/v1/game/:instance/idle-status",
         ] {
             assert!(
                 caps.endpoints.iter().any(|e| e.path == path),
@@ -270,8 +280,24 @@ mod tests {
         for t in ["key", "look", "click", "scroll", "chat"] {
             assert!(types.contains(&t), "missing game input {}", t);
         }
-        // Event stream contract must include game_ready.
-        assert!(caps.events.kinds.contains(&"game_ready"));
+        // Event stream contract must include all actual ServerEvent kinds.
+        for k in [
+            "launch_started",
+            "launch_progress",
+            "launch_completed",
+            "launch_failed",
+            "log_line",
+            "instance_stopped",
+            "game_ready",
+            "game_idle_timeout",
+        ] {
+            assert!(caps.events.kinds.contains(&k), "missing event kind {}", k);
+        }
+        // Launch command must declare the idle-timeout option (v26.2-alpha.1).
+        let launch_cmd = caps.execute_commands.iter().find(|c| c.command == "launch").unwrap();
+        let launch_opts: Vec<&str> = launch_cmd.options.iter().map(|o| o.key).collect();
+        assert!(launch_opts.contains(&"idle-timeout"), "launch missing idle-timeout option");
+        assert!(launch_opts.contains(&"no-idle-timeout"), "launch missing no-idle-timeout option");
     }
 
     #[test]

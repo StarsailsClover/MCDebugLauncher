@@ -45,6 +45,7 @@ launch.log
 
 # Release zip artifacts (built, not committed)
 mdl-v26*-windows-x64.zip
+mdl-v26*-windows-x64/
 
 # Documentation files (release notes, changelogs)
 RELEASE_NOTES*.md
