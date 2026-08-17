@@ -757,6 +757,13 @@ async fn execute_command(
             if options.get("no-idle-timeout").map(|v| v == "true").unwrap_or(false) {
                 launch_options.no_idle_timeout = true;
             }
+            // v26.2-alpha.4: OOM protection options.
+            if let Some(val) = options.get("oom-protect") {
+                launch_options.oom_protect = val == "true";
+            }
+            if options.get("oom-aggressive").map(|v| v == "true").unwrap_or(false) {
+                launch_options.oom_aggressive = true;
+            }
 
             // Validate the instance exists before handing off.
             let manager = InstanceManager::new()?;

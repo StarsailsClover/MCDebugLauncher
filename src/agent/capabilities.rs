@@ -155,6 +155,8 @@ pub fn manifest() -> Capabilities {
                     OptionSpec { key: "no-queue", values: "true", description: "Skip the instance launch queue" },
                     OptionSpec { key: "idle-timeout", values: "<seconds>", description: "Idle watchdog timeout (default 60s; 0=use default)" },
                     OptionSpec { key: "no-idle-timeout", values: "true", description: "Disable the idle watchdog entirely" },
+                    OptionSpec { key: "oom-protect", values: "true|false", description: "Enable OOM self-protection: kill stale MC processes, trim working sets (default: true)" },
+                    OptionSpec { key: "oom-aggressive", values: "true", description: "Aggressive OOM protection: also purge system standby list (requires admin)" },
                 ],
             },
             ExecCommand {
@@ -298,6 +300,8 @@ mod tests {
         let launch_opts: Vec<&str> = launch_cmd.options.iter().map(|o| o.key).collect();
         assert!(launch_opts.contains(&"idle-timeout"), "launch missing idle-timeout option");
         assert!(launch_opts.contains(&"no-idle-timeout"), "launch missing no-idle-timeout option");
+        assert!(launch_opts.contains(&"oom-protect"), "launch missing oom-protect option");
+        assert!(launch_opts.contains(&"oom-aggressive"), "launch missing oom-aggressive option");
     }
 
     #[test]

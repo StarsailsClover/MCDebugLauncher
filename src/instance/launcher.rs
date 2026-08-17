@@ -301,6 +301,13 @@ pub struct LaunchOptions {
     /// Whether the idle watchdog is explicitly disabled (via --no-idle-timeout).
     /// When true, `idle_timeout` is ignored and no watchdog is started.
     pub no_idle_timeout: bool,
+    /// Enable OOM self-protection before launching: kill stale Minecraft
+    /// processes, trim working sets, and optionally purge standby memory
+    /// (v26.2-alpha.4). Default: true.
+    pub oom_protect: bool,
+    /// Aggressive OOM protection: also purge system standby list (requires
+    /// admin privileges; silently falls back when not elevated).
+    pub oom_aggressive: bool,
 }
 
 /// Result of a successful launch.
@@ -546,6 +553,34 @@ impl InstanceLauncher {
             let names: Vec<&str> = mods.iter().map(|m| m.name.as_str()).collect();
             format!("MDL: {} [{}]", name, names.join(", "))
         };
+
+        // OOM self-protection (v26.2-alpha.4): before spawning the JVM,
+        // kill stale Minecraft processes and trim system working sets so
+        // the new instance has enough physical RAM to allocate its heap.
+        if options.oom_protect {
+            tracing::info!("OOM protection: scanning for stale processes and trimming working sets...");
+            match crate::game::oom_guard::pre_launch_protection(false, options.oom_aggressive).await {
+                Ok(report) => {
+                    if report.killed_processes > 0 {
+                        tracing::warn!(
+                            "OOM protection: terminated {} stale process(es)",
+                            report.killed_processes
+                        );
+                    }
+                    let freed_mb = report.ws_freed_bytes / 1024 / 1024;
+                    let avail_mb = report.available_after_bytes / 1024 / 1024;
+                    tracing::info!(
+                        "OOM protection complete: ~{} MB freed, {} MB available, standby purged={}",
+                        freed_mb,
+                        avail_mb,
+                        report.standby_purged
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("OOM protection failed (continuing): {}", e);
+                }
+            }
+        }
 
         // Build launch command
         let mut cmd = Command::new(&java_path);

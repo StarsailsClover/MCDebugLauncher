@@ -627,6 +627,16 @@ enum Commands {
         /// Disable the idle watchdog entirely (game runs until manually stopped).
         #[arg(long)]
         no_idle_timeout: bool,
+
+        /// Enable OOM self-protection before launching: kill stale Minecraft
+        /// processes and trim system working sets (default: on).
+        #[arg(long, default_value = "true")]
+        oom_protect: bool,
+
+        /// Aggressive OOM protection: also purge system standby list
+        /// (requires admin privileges; no-op when not elevated).
+        #[arg(long)]
+        oom_aggressive: bool,
     },
 
     /// Diagnose instance issues
@@ -941,8 +951,8 @@ async fn main() -> Result<()> {
         Commands::List { version, loader, sort } => {
             cmd_list(&cli.format, version.as_deref(), loader.as_deref(), &sort).await?;
         }
-        Commands::Launch { name, username, server, fullscreen, width, height, detach, no_queue, agent, agent_port, java_path, memory, dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout } => {
-            cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach, no_queue, agent, agent_port, java_path.as_deref(), memory.as_deref(), dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout).await?;
+        Commands::Launch { name, username, server, fullscreen, width, height, detach, no_queue, agent, agent_port, java_path, memory, dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive } => {
+            cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach, no_queue, agent, agent_port, java_path.as_deref(), memory.as_deref(), dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive).await?;
         }
         Commands::Diagnose { name, export, analyze } => {
             cmd_diagnose(&name, export.as_deref(), analyze).await?;
@@ -1388,6 +1398,8 @@ async fn cmd_launch(
     wait_ready: bool,
     idle_timeout: Option<u64>,
     no_idle_timeout: bool,
+    oom_protect: bool,
+    oom_aggressive: bool,
 ) -> Result<()> {
     use instance::{InstanceLauncher, launcher::LaunchOptions};
 
@@ -1409,6 +1421,8 @@ async fn cmd_launch(
         no_queue,
         idle_timeout,
         no_idle_timeout,
+        oom_protect,
+        oom_aggressive,
     };
 
     let launcher = InstanceLauncher::new()?;
