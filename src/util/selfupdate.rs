@@ -5,7 +5,12 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use tokio::fs;
 
-/// Check if a newer version is available on GitHub
+/// Check if a newer version is available on GitHub.
+///
+/// Queries the GitHub Releases API. Since the project currently publishes
+/// only Pre-Releases, the `/releases/latest` endpoint returns 404. We fall
+/// back to the full releases list (which includes pre-releases) and compare
+/// each tag against the running version using `version_compare`.
 pub async fn check_for_update() -> Result<Option<String>> {
     let client = reqwest::Client::builder()
         .user_agent("MCDebugLauncher")
@@ -17,44 +22,56 @@ pub async fn check_for_update() -> Result<Option<String>> {
         .send()
         .await?;
 
-    let release: serde_json::Value = if response.status().is_success() {
-        response.json().await?
-    } else if response.status().as_u16() == 404 {
-        // No stable "latest" release exists — fall back to the newest release
-        // (including Pre-Releases), matching the project's release policy.
-        let list = client
-            .get("https://api.github.com/repos/StarsailsClover/MCDebugLauncher/releases?per_page=10")
-            .send()
-            .await?;
-        if !list.status().is_success() {
-            anyhow::bail!("Failed to fetch latest release: {}", list.status());
+    // Try the "latest" (stable) endpoint first.
+    if response.status().is_success() {
+        let release: serde_json::Value = response.json().await?;
+        let latest_version = release["tag_name"]
+            .as_str()
+            .context("Missing tag_name in release")?
+            .trim_start_matches('v');
+        if version_compare(latest_version, current_version())? {
+            return Ok(Some(latest_version.to_string()));
         }
-        let releases: Vec<serde_json::Value> = list.json().await?;
-        releases
-            .into_iter()
-            .next()
-            .context("No releases found")?
-    } else {
-        anyhow::bail!("Failed to fetch latest release: {}", response.status());
-    };
-
-    let latest_version = release["tag_name"]
-        .as_str()
-        .context("Missing tag_name in release")?
-        .trim_start_matches('v');
-
-    let current_version = env!("CARGO_PKG_VERSION");
-
-    if version_compare(latest_version, current_version)? {
-        Ok(Some(latest_version.to_string()))
-    } else {
-        Ok(None)
+        return Ok(None);
     }
+
+    // No stable "latest" release (404) — query the full releases list
+    // (includes pre-releases, newest first) and find the first one that
+    // is actually newer than the running version.
+    let list = client
+        .get("https://api.github.com/repos/StarsailsClover/MCDebugLauncher/releases?per_page=10")
+        .send()
+        .await?;
+
+    if !list.status().is_success() {
+        anyhow::bail!("Failed to fetch releases list: {}", list.status());
+    }
+
+    let releases: Vec<serde_json::Value> = list.json().await?;
+    let current = current_version();
+
+    for release in &releases {
+        let tag = match release["tag_name"].as_str() {
+            Some(t) => t.trim_start_matches('v'),
+            None => continue,
+        };
+        if version_compare(tag, current)? {
+            return Ok(Some(tag.to_string()));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Return the compiled-in crate version string.
+fn current_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
 }
 
 /// Compare two semantic versions. Returns true if `new` is greater than `current`.
+/// Handles pre-release suffixes (e.g. `26.2.0-alpha.4` vs `26.2.0-alpha.3`).
 fn version_compare(new: &str, current: &str) -> Result<bool> {
-    let parse = |v: &str| -> Result<Vec<u32>> {
+    let parse_nums = |v: &str| -> Result<Vec<u32>> {
         v.split('-')
             .next()
             .context("Invalid version format")?
@@ -63,9 +80,10 @@ fn version_compare(new: &str, current: &str) -> Result<bool> {
             .collect()
     };
 
-    let new_parts = parse(new)?;
-    let current_parts = parse(current)?;
+    let new_parts = parse_nums(new)?;
+    let current_parts = parse_nums(current)?;
 
+    // Compare numeric release components first.
     for (n, c) in new_parts.iter().zip(current_parts.iter()) {
         if n > c {
             return Ok(true);
@@ -73,8 +91,29 @@ fn version_compare(new: &str, current: &str) -> Result<bool> {
             return Ok(false);
         }
     }
+    if new_parts.len() != current_parts.len() {
+        return Ok(new_parts.len() > current_parts.len());
+    }
 
-    Ok(new_parts.len() > current_parts.len())
+    // Numeric versions equal: compare pre-release suffixes.
+    let new_pre = new.split_once('-').map(|(_, pre)| pre);
+    let current_pre = current.split_once('-').map(|(_, pre)| pre);
+
+    match (new_pre, current_pre) {
+        (None, None) => Ok(false), // identical versions
+        (None, Some(_)) => Ok(true), // new is full release, current is pre → newer
+        (Some(_), None) => Ok(false), // new is pre, current is full → not newer
+        (Some(np), Some(cp)) => {
+            // Both are pre-releases: compare the pre-release identifier.
+            // Parse the trailing number after the last dot (alpha.4 → 4).
+            let n_num = np.rsplit('.').next().and_then(|s| s.parse::<u32>().ok());
+            let c_num = cp.rsplit('.').next().and_then(|s| s.parse::<u32>().ok());
+            match (n_num, c_num) {
+                (Some(n), Some(c)) => Ok(n > c),
+                _ => Ok(np > cp), // fall back to lexical comparison
+            }
+        }
+    }
 }
 
 /// Download and install the latest version
@@ -204,4 +243,35 @@ fn is_in_path(dir: &Path) -> Result<bool> {
 
     Ok(path_var.split(';')
         .any(|p| p.trim().eq_ignore_ascii_case(&dir_str)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_version_compare_numeric() {
+        assert!(version_compare("26.2.0", "26.1.0").unwrap());
+        assert!(version_compare("27.0.0", "26.2.0").unwrap());
+        assert!(!version_compare("26.1.0", "26.2.0").unwrap());
+        assert!(!version_compare("26.2.0", "26.2.0").unwrap());
+    }
+
+    #[test]
+    fn test_version_compare_prerelease() {
+        // Pre-release newer than older pre-release of same version
+        assert!(version_compare("26.2.0-alpha.4", "26.2.0-alpha.3").unwrap());
+        assert!(!version_compare("26.2.0-alpha.3", "26.2.0-alpha.4").unwrap());
+        // Full release is newer than pre-release of same version
+        assert!(version_compare("26.2.0", "26.2.0-alpha.4").unwrap());
+        assert!(!version_compare("26.2.0-alpha.4", "26.2.0").unwrap());
+    }
+
+    #[test]
+    fn test_version_compare_cross_version() {
+        // Pre-release of newer version is newer than stable of older version
+        assert!(version_compare("26.2.0-alpha.1", "26.1.0").unwrap());
+        // Pre-release of older version is NOT newer than stable of newer version
+        assert!(!version_compare("26.1.0-alpha.99", "26.2.0").unwrap());
+    }
 }

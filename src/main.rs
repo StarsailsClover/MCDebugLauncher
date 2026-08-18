@@ -2746,7 +2746,10 @@ Checking Despotes releases for {}/{} ...",
 
     let chosen = if stable.is_empty() {
         // No applicable stable release: the newest applicable pre-release is
-        // the fallback, but using it requires explicit confirmation.
+        // the fallback. Despotes currently has no stable release, so blocking
+        // pre-releases entirely would make the mod unavailable. Auto-select
+        // the pre-release in non-interactive sessions; prompt only when a
+        // terminal is available.
         let Some((rel, asset)) =
             despotes::select_release(&releases, dloader.slug(), &mc_version, true)
         else {
@@ -2761,16 +2764,19 @@ Checking Despotes releases for {}/{} ...",
             format_bytes(asset.size)
         );
         if !stdin_is_interactive() {
-            println!("Non-interactive session: pre-releases require explicit opt-in. Skipping.");
-            return Ok(());
+            // Non-interactive (agent/CI): auto-install the pre-release since
+            // no stable alternative exists.
+            println!("Non-interactive session: auto-installing latest pre-release (no stable available).");
+            Some((rel, asset))
+        } else {
+            print!("Install this pre-release? [y/N] ");
+            let _ = std::io::stdout().flush();
+            if !read_choice_line().eq_ignore_ascii_case("y") {
+                println!("Skipped Despotes pre-release.");
+                return Ok(());
+            }
+            Some((rel, asset))
         }
-        print!("Install this pre-release? [y/N] ");
-        let _ = std::io::stdout().flush();
-        if !read_choice_line().eq_ignore_ascii_case("y") {
-            println!("Skipped Despotes pre-release.");
-            return Ok(());
-        }
-        Some((rel, asset))
     } else if !stdin_is_interactive() {
         // Non-interactive: auto-select the newest applicable stable build.
         let pick = stable.into_iter().next().unwrap();
