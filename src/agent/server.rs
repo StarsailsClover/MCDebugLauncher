@@ -672,6 +672,7 @@ async fn execute_command(
                 name: name.to_string(),
                 version: version.to_string(),
                 loader: None,
+                javaagents: Vec::new(),
             };
 
             let manager = InstanceManager::new()?;
@@ -763,6 +764,16 @@ async fn execute_command(
             }
             if options.get("oom-aggressive").map(|v| v == "true").unwrap_or(false) {
                 launch_options.oom_aggressive = true;
+            }
+            // v26.2-alpha.5: ad-hoc JavaAgent attachment.
+            if let Some(ja) = options.get("javaagent") {
+                // Comma-separated list of `jar` or `jar=params` specs.
+                for spec in ja.split(',') {
+                    let spec = spec.trim();
+                    if !spec.is_empty() {
+                        launch_options.javaagents.push(spec.to_string());
+                    }
+                }
             }
 
             // Validate the instance exists before handing off.

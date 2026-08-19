@@ -379,6 +379,7 @@ mod tests {
             name: name.to_string(),
             version: "1.21.4".to_string(),
             loader: None,
+            javaagents: Vec::new(),
         }
     }
 

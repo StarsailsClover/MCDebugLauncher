@@ -9,6 +9,7 @@ pub mod mods;
 pub mod config_mgmt;
 pub mod backup;
 pub mod verify;
+pub mod javaagent;
 
 pub use manager::*;
 pub use launcher::*;

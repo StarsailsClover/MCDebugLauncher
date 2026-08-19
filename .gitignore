@@ -43,6 +43,10 @@ launch.log
 # Agent session data (Qwen / other AI tools)
 .qwen-agent-sessions/
 
+# AI tool session data (OpenCode / Trae)
+.opencode-data/
+.trae/
+
 # Release zip artifacts (built, not committed)
 mdl-v26*-windows-x64.zip
 mdl-v26*-windows-x64/

@@ -308,6 +308,9 @@ pub struct LaunchOptions {
     /// Aggressive OOM protection: also purge system standby list (requires
     /// admin privileges; silently falls back when not elevated).
     pub oom_aggressive: bool,
+    /// Ad-hoc JavaAgent JARs to attach at launch (from `--javaagent` CLI
+    /// flags). Each entry is either a bare path or `path=params`.
+    pub javaagents: Vec<String>,
 }
 
 /// Result of a successful launch.
@@ -676,6 +679,33 @@ impl InstanceLauncher {
             }
         } else if crate::loader::prismate::is_installed(instance_dir) {
             tracing::info!("AprismPrismate present in mods/ (host loader will load .aje packs)");
+        }
+
+        // Instance-registered JavaAgents (v26.2-alpha.5): attach all
+        // enabled agents from instance.json before ad-hoc CLI agents.
+        match crate::instance::javaagent::build_agent_args(instance_dir).await {
+            Ok(agents) => {
+                for arg in &agents {
+                    cmd.arg(arg);
+                    tracing::info!("Attached registered JavaAgent: {}", arg);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read registered JavaAgents: {}", e);
+            }
+        }
+
+        // Ad-hoc JavaAgents from CLI `--javaagent` flags (v26.2-alpha.5).
+        // Each entry is either a bare path or `path=params`, matching the
+        // JVM `-javaagent` syntax. These are attached after registered agents.
+        for spec in &options.javaagents {
+            let arg = if let Some((jar, params)) = spec.split_once('=') {
+                format!("-javaagent:{}={}", jar, params)
+            } else {
+                format!("-javaagent:{}", spec)
+            };
+            cmd.arg(&arg);
+            tracing::info!("Attached ad-hoc JavaAgent: {}", arg);
         }
 
         cmd.arg("-cp");

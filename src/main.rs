@@ -57,10 +57,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum ModCommands {
-    /// List mods in an instance
+    /// List mods in an instance (or all instances with --all-instances)
     List {
-        /// Instance name
+        /// Instance name (ignored when --all-instances is set)
         instance: String,
+        /// List mods across all instances
+        #[arg(long)]
+        all_instances: bool,
     },
 
     /// Install a mod from a local file
@@ -376,6 +379,50 @@ enum CacheCommands {
 }
 
 #[derive(Subcommand)]
+enum JavaAgentCommands {
+    /// Install a JavaAgent JAR into an instance
+    Install {
+        /// Instance name
+        instance: String,
+        /// Path to the agent JAR file
+        jar: String,
+        /// Optional parameters (e.g. `port=25585`)
+        #[arg(long)]
+        params: Option<String>,
+    },
+
+    /// List registered JavaAgents in an instance
+    List {
+        /// Instance name
+        instance: String,
+    },
+
+    /// Remove a registered JavaAgent from an instance
+    Remove {
+        /// Instance name
+        instance: String,
+        /// Agent name
+        name: String,
+    },
+
+    /// Enable a disabled JavaAgent
+    Enable {
+        /// Instance name
+        instance: String,
+        /// Agent name
+        name: String,
+    },
+
+    /// Disable a JavaAgent (keeps the file, skips at launch)
+    Disable {
+        /// Instance name
+        instance: String,
+        /// Agent name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum AprismCommands {
     /// Manage AprismRefract loader-support extensions (.aep)
     #[command(subcommand)]
@@ -637,6 +684,11 @@ enum Commands {
         /// (requires admin privileges; no-op when not elevated).
         #[arg(long)]
         oom_aggressive: bool,
+
+        /// Attach an ad-hoc JavaAgent JAR at launch. Use `jar` or `jar=params`.
+        /// Can be repeated to attach multiple agents.
+        #[arg(long = "javaagent")]
+        javaagents: Vec<String>,
     },
 
     /// Diagnose instance issues
@@ -708,6 +760,10 @@ enum Commands {
     /// Bedrock Dedicated Server support
     #[command(subcommand)]
     Bedrock(BedrockCommands),
+
+    /// Manage JavaAgents attached to an instance at launch
+    #[command(subcommand)]
+    Javaagent(JavaAgentCommands),
 
     /// Download cache management
     #[command(subcommand)]
@@ -806,12 +862,15 @@ enum Commands {
         versions: usize,
     },
 
-    /// Export an instance to a zip file
+    /// Export an instance to a zip file or .mrpack modpack
     Export {
         /// Instance name
         instance: String,
-        /// Output path for the zip file
+        /// Output path for the archive (.zip or .mrpack)
         path: PathBuf,
+        /// Export format: zip (default) or mrpack (Modrinth modpack)
+        #[arg(long, default_value = "zip")]
+        format: String,
     },
 
     /// Import an instance from a zip file
@@ -951,8 +1010,8 @@ async fn main() -> Result<()> {
         Commands::List { version, loader, sort } => {
             cmd_list(&cli.format, version.as_deref(), loader.as_deref(), &sort).await?;
         }
-        Commands::Launch { name, username, server, fullscreen, width, height, detach, no_queue, agent, agent_port, java_path, memory, dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive } => {
-            cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach, no_queue, agent, agent_port, java_path.as_deref(), memory.as_deref(), dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive).await?;
+        Commands::Launch { name, username, server, fullscreen, width, height, detach, no_queue, agent, agent_port, java_path, memory, dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive, javaagents } => {
+            cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach, no_queue, agent, agent_port, java_path.as_deref(), memory.as_deref(), dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive, &javaagents).await?;
         }
         Commands::Diagnose { name, export, analyze } => {
             cmd_diagnose(&name, export.as_deref(), analyze).await?;
@@ -965,8 +1024,12 @@ async fn main() -> Result<()> {
         }
         Commands::Mod(mod_cmd) => {
             match mod_cmd {
-                ModCommands::List { instance } => {
-                    cmd_mod_list(&cli.format, &instance).await?;
+                ModCommands::List { instance, all_instances } => {
+                    if all_instances {
+                        cmd_mod_list_all(&cli.format).await?;
+                    } else {
+                        cmd_mod_list(&cli.format, &instance).await?;
+                    }
                 }
                 ModCommands::Install { instance, mod_path } => {
                     cmd_mod_install(&instance, &mod_path).await?;
@@ -1054,8 +1117,8 @@ async fn main() -> Result<()> {
         Commands::InstanceInfo { name } => {
             cmd_instance_info(&cli.format, &name).await?;
         }
-        Commands::Export { instance, path } => {
-            cmd_export(&instance, &path).await?;
+        Commands::Export { instance, path, format } => {
+            cmd_export(&instance, &path, &format).await?;
         }
         Commands::ImportInstance { path, name } => {
             cmd_import_instance(&path, name.as_deref()).await?;
@@ -1085,6 +1148,23 @@ async fn main() -> Result<()> {
         Commands::Cache(cc) => match cc {
             CacheCommands::Info => { cmd_cache_info(); }
             CacheCommands::Clean { days } => { cmd_cache_clean(days); }
+        },
+        Commands::Javaagent(ja) => match ja {
+            JavaAgentCommands::Install { instance, jar, params } => {
+                cmd_javaagent_install(&instance, &jar, params.as_deref()).await?;
+            }
+            JavaAgentCommands::List { instance } => {
+                cmd_javaagent_list(&instance).await?;
+            }
+            JavaAgentCommands::Remove { instance, name } => {
+                cmd_javaagent_remove(&instance, &name).await?;
+            }
+            JavaAgentCommands::Enable { instance, name } => {
+                cmd_javaagent_enable(&instance, &name).await?;
+            }
+            JavaAgentCommands::Disable { instance, name } => {
+                cmd_javaagent_disable(&instance, &name).await?;
+            }
         },
         Commands::Aprism(ac) => match ac {
             AprismCommands::Refract(rc) => match rc {
@@ -1278,6 +1358,7 @@ async fn cmd_create(name: &str, version: &str, loader: Option<&str>, loader_vers
         name: name.to_string(),
         version: version.to_string(),
         loader: loader_config,
+        javaagents: Vec::new(),
     };
 
     let manager = InstanceManager::new()?;
@@ -1400,6 +1481,7 @@ async fn cmd_launch(
     no_idle_timeout: bool,
     oom_protect: bool,
     oom_aggressive: bool,
+    javaagents: &[String],
 ) -> Result<()> {
     use instance::{InstanceLauncher, launcher::LaunchOptions};
 
@@ -1423,6 +1505,7 @@ async fn cmd_launch(
         no_idle_timeout,
         oom_protect,
         oom_aggressive,
+        javaagents: javaagents.to_vec(),
     };
 
     let launcher = InstanceLauncher::new()?;
@@ -1968,24 +2051,37 @@ async fn count_files_in_dir(path: &std::path::Path) -> usize {
     count
 }
 
-async fn cmd_export(instance_name: &str, output_path: &std::path::Path) -> Result<()> {
+async fn cmd_export(instance_name: &str, output_path: &std::path::Path, format: &str) -> Result<()> {
     use anyhow::Context;
     use instance::InstanceManager;
-    use std::fs::File;
-    use zip::write::{FileOptions, ZipWriter};
-    use zip::CompressionMethod;
-    
-    info!("Exporting instance '{}'...", instance_name);
-    
+
+    info!("Exporting instance '{}' (format: {})...", instance_name, format);
+
     let manager = InstanceManager::new()?;
     let instance = manager.get(instance_name).await?;
     let instance_path = &instance.path;
-    
+
     if !instance_path.exists() {
         return Err(anyhow::anyhow!("Instance directory does not exist"));
     }
-    
-    // Create output file
+
+    if format == "mrpack" || output_path.extension().and_then(|e| e.to_str()) == Some("mrpack") {
+        // Export as Modrinth .mrpack format.
+        let config_data = tokio::fs::read_to_string(instance_path.join("instance.json")).await?;
+        let config: instance::config::InstanceConfig = serde_json::from_str(&config_data)?;
+
+        let (mods, overrides) = loader::modpack::export_to_mrpack(instance_path, &config, output_path)?;
+        println!("Successfully exported instance '{}' to {} (Modrinth .mrpack)", instance_name, output_path.display());
+        println!("  Mods indexed: {}", mods);
+        println!("  Override files: {}", overrides);
+        return Ok(());
+    }
+
+    // Default: plain zip export.
+    use std::fs::File;
+    use zip::write::{FileOptions, ZipWriter};
+    use zip::CompressionMethod;
+
     let output_file = File::create(output_path)
         .with_context(|| format!("Failed to create output file: {}", output_path.display()))?;
     
@@ -2217,6 +2313,59 @@ async fn cmd_mod_list(format: &str, instance: &str) -> Result<()> {
             println!();
             println!("Total: {} mod(s)", mods.len());
         }
+    }
+
+    Ok(())
+}
+
+/// List mods across all instances (v26.2-alpha.5).
+async fn cmd_mod_list_all(format: &str) -> Result<()> {
+    use instance::{InstanceManager, ModManager};
+
+    let manager = InstanceManager::new()?;
+    let instances = manager.list().await?;
+    let mod_manager = ModManager::new()?;
+
+    let mut all_data = Vec::new();
+    let mut total_mods = 0usize;
+
+    for inst in &instances {
+        let mods = mod_manager.list_mods(&inst.name).await.unwrap_or_default();
+        total_mods += mods.len();
+        all_data.push(serde_json::json!({
+            "instance": inst.name,
+            "version": inst.config.version,
+            "loader": inst.config.loader.as_ref().map(|l| l.loader_type.as_str()).unwrap_or("none"),
+            "mods": mods,
+            "mod_count": mods.len()
+        }));
+    }
+
+    if format == "json" {
+        let json = serde_json::json!({
+            "status": "success",
+            "data": {
+                "instances": all_data,
+                "instance_count": instances.len(),
+                "total_mods": total_mods
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&json)?);
+    } else {
+        println!("Mods across all {} instances:", instances.len());
+        println!();
+        println!("{:<24} {:<12} {:<10} {:>6}  {}", "INSTANCE", "VERSION", "LOADER", "MODS", "SAMPLE");
+        println!("{}", "-".repeat(80));
+
+        for inst in &instances {
+            let mods = mod_manager.list_mods(&inst.name).await.unwrap_or_default();
+            let loader = inst.config.loader.as_ref().map(|l| l.loader_type.as_str()).unwrap_or("none");
+            let sample = mods.first().map(|m| m.filename.as_str()).unwrap_or("-");
+            println!("{:<24} {:<12} {:<10} {:>6}  {}", inst.name, inst.config.version, loader, mods.len(), sample);
+        }
+
+        println!();
+        println!("Total: {} mod(s) across {} instance(s)", total_mods, instances.len());
     }
 
     Ok(())
@@ -3126,6 +3275,79 @@ fn cmd_cache_clean(days: u64) {
     }
 }
 
+// ---------- v26.2-alpha.5: JavaAgent management ----------
+
+async fn cmd_javaagent_install(instance: &str, jar: &str, params: Option<&str>) -> Result<()> {
+    use instance::InstanceManager;
+
+    let manager = InstanceManager::new()?;
+    let inst = manager.get(instance).await?;
+    let jar_path = std::path::Path::new(jar);
+    if !jar_path.exists() {
+        anyhow::bail!("JAR file not found: {}", jar);
+    }
+
+    let name = instance::javaagent::install(&inst.path, jar_path, params).await?;
+    println!("JavaAgent '{}' installed in instance '{}'", name, instance);
+    if let Some(p) = params {
+        println!("  Parameters: {}", p);
+    }
+    Ok(())
+}
+
+async fn cmd_javaagent_list(instance: &str) -> Result<()> {
+    use instance::InstanceManager;
+
+    let manager = InstanceManager::new()?;
+    let inst = manager.get(instance).await?;
+    let agents = instance::javaagent::list(&inst.path).await?;
+
+    if agents.is_empty() {
+        println!("No JavaAgents registered in instance '{}'", instance);
+        return Ok(());
+    }
+
+    println!("JavaAgents in instance '{}':", instance);
+    println!("{:<24} {:<12} {:<10} {}", "NAME", "ENABLED", "PARAMS", "PATH");
+    println!("{}", "-".repeat(70));
+    for a in &agents {
+        let enabled = if a.enabled { "yes" } else { "no" };
+        let params = a.params.as_deref().unwrap_or("-");
+        println!("{:<24} {:<12} {:<10} {}", a.name, enabled, params, a.path);
+    }
+    Ok(())
+}
+
+async fn cmd_javaagent_remove(instance: &str, name: &str) -> Result<()> {
+    use instance::InstanceManager;
+
+    let manager = InstanceManager::new()?;
+    let inst = manager.get(instance).await?;
+    instance::javaagent::remove(&inst.path, name).await?;
+    println!("JavaAgent '{}' removed from instance '{}'", name, instance);
+    Ok(())
+}
+
+async fn cmd_javaagent_enable(instance: &str, name: &str) -> Result<()> {
+    use instance::InstanceManager;
+
+    let manager = InstanceManager::new()?;
+    let inst = manager.get(instance).await?;
+    instance::javaagent::enable(&inst.path, name).await?;
+    println!("JavaAgent '{}' enabled in instance '{}'", name, instance);
+    Ok(())
+}
+
+async fn cmd_javaagent_disable(instance: &str, name: &str) -> Result<()> {
+    use instance::InstanceManager;
+
+    let manager = InstanceManager::new()?;
+    let inst = manager.get(instance).await?;
+    instance::javaagent::disable(&inst.path, name).await?;
+    println!("JavaAgent '{}' disabled in instance '{}'", name, instance);
+    Ok(())
+}
+
 async fn cmd_inject(target: &str, dll: &str) -> Result<()> {
     let pid: u32 = target.parse().unwrap_or_else(|_| {
         util::injector::find_pid_by_name(target).unwrap_or_else(|e| {
@@ -3167,6 +3389,7 @@ async fn cmd_import(name: &str, pack: &str, no_download: bool) -> Result<()> {
             loader_type: t.to_string(),
             version: v.to_string(),
         }),
+        javaagents: Vec::new(),
     };
     let manager = InstanceManager::new()?;
     let instance = manager.create(config, true).await?;

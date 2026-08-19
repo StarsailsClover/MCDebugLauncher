@@ -157,6 +157,7 @@ pub fn manifest() -> Capabilities {
                     OptionSpec { key: "no-idle-timeout", values: "true", description: "Disable the idle watchdog entirely" },
                     OptionSpec { key: "oom-protect", values: "true|false", description: "Enable OOM self-protection: kill stale MC processes, trim working sets (default: true)" },
                     OptionSpec { key: "oom-aggressive", values: "true", description: "Aggressive OOM protection: also purge system standby list (requires admin)" },
+                    OptionSpec { key: "javaagent", values: "<jar>[,<jar=params>...]", description: "Ad-hoc JavaAgent JAR(s) to attach at launch (comma-separated)" },
                 ],
             },
             ExecCommand {
@@ -302,6 +303,7 @@ mod tests {
         assert!(launch_opts.contains(&"no-idle-timeout"), "launch missing no-idle-timeout option");
         assert!(launch_opts.contains(&"oom-protect"), "launch missing oom-protect option");
         assert!(launch_opts.contains(&"oom-aggressive"), "launch missing oom-aggressive option");
+        assert!(launch_opts.contains(&"javaagent"), "launch missing javaagent option");
     }
 
     #[test]
