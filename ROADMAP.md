@@ -35,7 +35,7 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha 4 | OOM 自阻止与实例运维 | 启动前 OOM 自保护：杀死残留 Minecraft/Java 进程、裁剪系统 Working Set（EmptyWorkingSet）、可选清空 Standby List（NtSetSystemInformation）；`--oom-protect`/`--oom-aggressive` CLI 参数；Agent API `oom-protect`/`oom-aggressive` 选项 | ✅ 已完成 |
 | Alpha 5 | 实例运维与导出 | `mdl instance export --format mrpack`（modrinth.index.json + overrides，与 import 成往返）；`mdl javaagent` 实例级 agent 管理；启动时 `--javaagent <jar>[=params]` 可重复注入 | ✅ 已完成 |
 | Alpha 6 | 指定 Agent 注入 + 账号会话 | `mdl game inject-agent <instance> <jar>` 运行中 JVM 热附加（内嵌 AttachHelper + jdk.attach/agentmain）；`mdl account refresh [--all]` token 刷新（登录保存 refresh_token）；`mdl status --disk` 磁盘占用报告（单实例含子目录分解） | ✅ 已完成 |
-| Alpha 7 | 测试世界与服务端自动化 | `--with-test-world` 超平坦世界；`--enter-world`/`--enter-server`；测试服生命周期自动化 | 📋 规划中 |
+| Alpha 7 | 测试世界与服务端自动化 | `mdl server launch --wait-ready`（日志 Done 行轮询）；RCON 集成（create 自动启用，密码入 server.json）；`mdl server stop` 优雅停止（RCON stop → 20s 等待 → taskkill 兜底）；`mdl server cmd <name> <cmd>` 控制台命令通道；`--enter-test-world` 自适应补全（创建确认按钮 + 已有世界 Play 路径 + inGame 终态确认） | ✅ 已完成 |
 | Alpha 8 | Aprism BE Native 与跨平台 | Aprism BE Native 适配；Linux/macOS 构建验证；非 Windows 截图替代方案 | 📋 规划中 |
 | Alpha 9 | 可观测性与遥测 | 结构化 JSON 日志；启动指标（time-to-ready、下载字节、缓存命中率）；`mdl metrics` 命令 | 📋 规划中 |
 | Alpha 10 | 稳定性、文档与正式发布 | 零 warning 构建；全量文档刷新；回归测试套件；v26.2 正式版发布 | 📋 规划中 |

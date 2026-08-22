@@ -13,4 +13,5 @@ pub mod refract;
 pub mod prismate;
 pub mod modpack;
 pub mod server;
+pub mod rcon;
 

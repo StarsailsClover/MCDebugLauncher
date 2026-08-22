@@ -27,6 +27,14 @@ pub struct ServerInfo {
     pub version: String,
     #[serde(default)]
     pub memory: Option<String>,
+    /// RCON port written into server.properties at create time
+    /// (v26.2-alpha.7). None for servers created before alpha.7.
+    #[serde(default)]
+    pub rcon_port: Option<u16>,
+    /// Generated RCON password (v26.2-alpha.7). Kept in server.json so MDL
+    /// can drive the console programmatically without user secrets.
+    #[serde(default)]
+    pub rcon_password: Option<String>,
 }
 
 impl ServerInfo {
@@ -102,11 +110,21 @@ pub async fn create_server(name: &str, mc_version: &str, memory: Option<&str>) -
     )
     .await?;
 
+    // v26.2-alpha.7: enable RCON with a generated password so MDL can stop
+    // the server gracefully (world save) and run console commands for
+    // automated testing (`mdl server cmd`).
+    let rcon_port: u16 = 25575;
+    let rcon_password = generate_rcon_password();
+
     // Minimal default properties; users can edit freely.
     if !dir.join("server.properties").exists() {
         fs::write(
             dir.join("server.properties"),
-            "server-port=25565\nmotd=MDL managed server\nonline-mode=false\n",
+            format!(
+                "server-port=25565\nmotd=MDL managed server\nonline-mode=false\n\
+                 enable-rcon=true\nrcon.port={}\nrcon.password={}\n",
+                rcon_port, rcon_password
+            ),
         )
         .await?;
     }
@@ -116,6 +134,8 @@ pub async fn create_server(name: &str, mc_version: &str, memory: Option<&str>) -
         name: name.to_string(),
         version: version_info.id.clone(),
         memory: memory.map(str::to_string),
+        rcon_port: Some(rcon_port),
+        rcon_password: Some(rcon_password),
     };
     fs::write(dir.join("server.json"), serde_json::to_string_pretty(&info)?).await?;
 
@@ -215,13 +235,107 @@ pub async fn launch_server(info: &ServerInfo, detach: bool) -> Result<u32> {
     Ok(pid)
 }
 
-/// Stop a running server. Prefers a graceful exit via the `stop` console
-/// command (stdin pipe) when available; falls back to terminating the process.
+/// Wait until the server finishes booting by tailing server.log for the
+/// vanilla readiness line: "Done (X.XXXs)! For help, type \"help\"".
+/// Returns Ok(()) when ready, Err on timeout. Poll interval is 1s.
+pub async fn wait_for_ready(dir: &Path, timeout_secs: u64) -> Result<()> {
+    use tokio::io::AsyncSeekExt;
+    let log_path = dir.join("server.log");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let mut offset: u64 = 0;
+    let mut buf = Vec::new();
+
+    loop {
+        if let Ok(mut f) = fs::File::open(&log_path).await {
+            // Read only newly appended bytes each round.
+            if f.seek(std::io::SeekFrom::Start(offset)).await.is_ok() {
+                buf.clear();
+                if tokio::io::AsyncReadExt::read_to_end(&mut f, &mut buf).await.is_ok() {
+                    offset += buf.len() as u64;
+                    let text = String::from_utf8_lossy(&buf);
+                    for line in text.lines() {
+                        if line.contains("Done (") && line.contains(")!") {
+                            tracing::info!("Server ready: {}", line.trim());
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Bail out early if the process died before becoming ready.
+        if let Some(pid_raw) = read_pid_file(dir) {
+            if !is_pid_alive(pid_raw) {
+                anyhow::bail!("Server process exited before reaching ready state");
+            }
+        } else {
+            anyhow::bail!("Server PID file disappeared before ready state");
+        }
+
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("Timed out after {}s waiting for server 'Done' line", timeout_secs);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
+fn read_pid_file(dir: &Path) -> Option<u32> {
+    let raw = std::fs::read_to_string(dir.join("runtime").join("pid")).ok()?;
+    raw.trim().parse().ok()
+}
+
+/// RCON endpoint for a managed server, if configured.
+pub fn rcon_addr(info: &ServerInfo) -> Option<String> {
+    let port = info.rcon_port?;
+    let password = info.rcon_password.as_deref()?;
+    if password.is_empty() {
+        return None;
+    }
+    Some(format!("127.0.0.1:{}|{}", port, password))
+}
+
+/// Run one console command on a managed server via RCON.
+pub async fn run_console_command(info: &ServerInfo, command: &str) -> Result<String> {
+    let addr = rcon_addr(info)
+        .ok_or_else(|| anyhow::anyhow!(
+            "Server '{}' has no RCON config (re-create it or enable-rcon manually in server.properties)",
+            info.name
+        ))?;
+    let (endpoint, password) = addr.split_once('|').context("Invalid RCON address")?;
+    crate::loader::rcon::run_command(endpoint, password, command).await
+}
+
+/// Stop a running server. v26.2-alpha.7 prefers a graceful shutdown via the
+/// RCON `stop` command (world save + clean exit), waiting up to 20s, and
+/// falls back to forceful termination when RCON is unavailable or times out.
 pub async fn stop_server(info: &ServerInfo) -> Result<()> {
     let dir = info.dir()?;
     let Some(pid) = running_pid(&dir) else {
         anyhow::bail!("Server '{}' is not running", info.name);
     };
+
+    // Graceful path: RCON stop, then poll for exit.
+    if rcon_addr(info).is_some() {
+        match run_console_command(info, "stop").await {
+            Ok(_) => {
+                tracing::info!("Sent graceful stop via RCON; waiting for exit...");
+                for _ in 0..20 {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    if !is_pid_alive(pid) {
+                        let _ = fs::remove_file(dir.join("runtime").join("pid")).await;
+                        tracing::info!("Server '{}' stopped gracefully", info.name);
+                        return Ok(());
+                    }
+                }
+                tracing::warn!("Server did not exit within 20s of RCON stop; falling back to kill");
+            }
+            Err(e) => {
+                tracing::warn!("RCON stop failed ({}); falling back to kill", e);
+            }
+        }
+    }
+
+    // Forceful fallback.
     kill_pid(pid)?;
     let _ = fs::remove_file(dir.join("runtime").join("pid")).await;
     tracing::info!("Server '{}' stopped (PID {})", info.name, pid);
@@ -308,6 +422,29 @@ pub fn kill_pid(pid: u32) -> Result<()> {
     }
 }
 
+/// Generate a random-looking RCON password (24 hex chars). Entropy comes
+/// from the current time (nanos), the process id and an atomic counter,
+/// hashed through SHA1 — sufficient for a localhost-only control channel
+/// that never leaves the machine.
+fn generate_rcon_password() -> String {
+    use sha1::{Digest, Sha1};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let mut hasher = Sha1::new();
+    hasher.update(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos().to_le_bytes())
+            .unwrap_or([0u8; 16]),
+    );
+    hasher.update(std::process::id().to_le_bytes());
+    hasher.update(COUNTER.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+    let digest = hasher.finalize();
+    // Hex-encode the first 12 bytes -> 24 hex chars.
+    let hex: String = digest[..12].iter().map(|b| format!("{:02x}", b)).collect();
+    hex
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,10 +455,40 @@ mod tests {
             name: "demo".into(),
             version: "1.21.4".into(),
             memory: Some("4G".into()),
+            rcon_port: Some(25575),
+            rcon_password: Some("abc123".into()),
         };
         let raw = serde_json::to_string(&info).unwrap();
         let back: ServerInfo = serde_json::from_str(&raw).unwrap();
         assert_eq!(back.name, "demo");
         assert_eq!(back.memory.as_deref(), Some("4G"));
+        assert_eq!(back.rcon_port, Some(25575));
+        assert_eq!(back.rcon_password.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn test_server_info_backward_compat() {
+        // Pre-alpha.7 server.json lacks the RCON fields; defaults must apply.
+        let raw = r#"{"name":"old","version":"1.21.4","memory":null}"#;
+        let back: ServerInfo = serde_json::from_str(raw).unwrap();
+        assert!(back.rcon_port.is_none());
+        assert!(back.rcon_password.is_none());
+    }
+
+    #[test]
+    fn test_generate_rcon_password() {
+        let a = generate_rcon_password();
+        let b = generate_rcon_password();
+        assert_eq!(a.len(), 24);
+        assert_ne!(a, b);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_wait_for_ready_timeout_on_missing_log() {
+        // No log file + no pid file -> immediate error, not a hang.
+        let dir = tempfile::tempdir().unwrap();
+        let result = tokio_test::block_on(wait_for_ready(dir.path(), 2));
+        assert!(result.is_err());
     }
 }

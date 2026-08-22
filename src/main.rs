@@ -530,11 +530,26 @@ enum ServerCommands {
         /// Run attached (foreground, blocks until the server exits)
         #[arg(long)]
         attach: bool,
+        /// Block until the server logs its ready line "Done (...s)!" (v26.2-alpha.7)
+        #[arg(long)]
+        wait_ready: bool,
+        /// Timeout in seconds for --wait-ready (default 180)
+        #[arg(long, default_value = "180")]
+        ready_timeout: u64,
     },
-    /// Stop a running server
+    /// Stop a running server (graceful via RCON when configured)
     Stop {
         /// Server name
         name: String,
+    },
+    /// Run a console command on a server via RCON (v26.2-alpha.7).
+    /// Enables agent-driven test automation: op, gamerule, whitelist, ...
+    Cmd {
+        /// Server name
+        name: String,
+        /// Console command text (e.g. "gamerule doDaylightCycle false")
+        #[arg(allow_hyphen_values = true)]
+        command: Vec<String>,
     },
     /// Show server status (running PID, version)
     Status {
@@ -1227,10 +1242,13 @@ async fn main() -> Result<()> {
                 cmd_server_create(&name, &mc_version, memory.as_deref()).await?;
             }
             ServerCommands::List => { cmd_server_list(&cli.format); }
-            ServerCommands::Launch { name, attach } => {
-                cmd_server_launch(&name, attach).await?;
+            ServerCommands::Launch { name, attach, wait_ready, ready_timeout } => {
+                cmd_server_launch(&name, attach, wait_ready, ready_timeout).await?;
             }
             ServerCommands::Stop { name } => { cmd_server_stop(&name).await?; }
+            ServerCommands::Cmd { name, command } => {
+                cmd_server_cmd(&name, &command.join(" ")).await?;
+            }
             ServerCommands::Status { name } => { cmd_server_status(&cli.format, &name); }
         },
         Commands::Inject { target, dll } => { cmd_inject(&target, &dll).await?; }
@@ -1595,27 +1613,87 @@ async fn wait_game_ready(outcome: &instance::launcher::LaunchOutcome, name: &str
 }
 
 /// After the game is ready, use Despotes to enter (or create) the test world.
+///
+/// v26.2-alpha.7 completes the previously truncated flow: the old version
+/// clicked Singleplayer -> Create New World and stopped there, never pressing
+/// the final "Create" button, so no world was ever generated. The new flow is
+/// screen-adaptive: it polls the Despotes status between steps instead of
+/// blind sleeps, and handles both paths:
+///   - existing test world (marker from --with-test-world or a prior run):
+///       Title -> Singleplayer -> select first slot -> Play Selected World
+///   - fresh instance:
+///       Title -> Singleplayer -> Create New World -> Create (confirm)
+///
+/// Coordinates assume GUI scale 2 at the default window size (verified in the
+/// v26.0 Alpha 7 E2E). Best-effort by contract: failures only warn.
 async fn enter_world_after_ready(name: &str) -> Result<()> {
     use instance::InstanceManager;
     let manager = InstanceManager::new()?;
     let inst = manager.get(name).await?;
-    // If we pre-created a test world, type-select it by clicking the entry then
-    // "Play Selected World". For a fresh instance, create one instead.
-    // This is best-effort; failures only warn.
-    // Navigate from the title screen: Singleplayer -> Create New World.
-    // Coordinates use GUI scale 2 (client area = screenshot px / 2), verified
-    // in Alpha 7 E2E. Best-effort: any failure only warns.
+
+    // A world already exists when we seeded one at create time or a previous
+    // run completed creation (saves/<world>/level.dat present).
+    let has_world = inst.path.join("mdl-test-world").exists()
+        || saves_contain_level(&inst.path);
+
     let click = |x: f64, y: f64| {
         let path = inst.path.clone();
         async move {
             let _ = game::client::mouse_input(&path, "left", "tap", Some(x), Some(y), None).await;
-            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         }
     };
-    click(213.0, 136.0).await; // Singleplayer
-    click(131.0, 226.0).await; // Create New World
-    tracing::info!("enter_test_world: navigated to create-world; game will generate a test world");
+    let sleep = |ms: u64| async move {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    };
+
+    // Step 1: title screen -> Singleplayer.
+    click(213.0, 136.0).await;
+    sleep(1500).await;
+
+    if has_world {
+        // Select World screen: first save slot sits near the top of the list,
+        // then confirm with "Play Selected World" at the lower center.
+        click(213.0, 80.0).await;  // first world entry
+        sleep(600).await;
+        click(213.0, 233.0).await; // Play Selected World
+        tracing::info!("enter_test_world: selected existing test world");
+    } else {
+        // Select World screen -> Create New World button.
+        click(131.0, 226.0).await;
+        sleep(1200).await;
+        // Create World screen: confirm with the final Create button
+        // (bottom center). Defaults are fine for testing: name "New World",
+        // survival, seed random.
+        click(213.0, 233.0).await;
+        tracing::info!("enter_test_world: requested world creation; game will generate it");
+        // Mark so subsequent runs take the faster "play existing" path.
+        let _ = std::fs::write(inst.path.join("mdl-test-world"), "true");
+    }
+
+    // Wait up to 90s for in-game state as the final confirmation signal.
+    for _ in 0..45 {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        if let Ok(st) = game::client::game_status(&inst.path).await {
+            if st.get("inGame").and_then(|v| v.as_bool()) == Some(true) {
+                tracing::info!("enter_test_world: player is in the world");
+                return Ok(());
+            }
+        }
+    }
+    tracing::warn!("enter_test_world: did not observe inGame=true within 90s (continuing)");
     Ok(())
+}
+
+/// Whether any save directory under <instance>/saves contains a level.dat.
+fn saves_contain_level(instance_dir: &std::path::Path) -> bool {
+    let saves = instance_dir.join("saves");
+    let Ok(entries) = std::fs::read_dir(&saves) else { return false };
+    for e in entries.flatten() {
+        if e.path().is_dir() && e.path().join("level.dat").exists() {
+            return true;
+        }
+    }
+    false
 }
 
 async fn cmd_diagnose(name: &str, export: Option<&str>, analyze: bool) -> Result<()> {
@@ -3695,12 +3773,39 @@ fn cmd_server_list(format: &str) {
     }
 }
 
-async fn cmd_server_launch(name: &str, attach: bool) -> Result<()> {
+async fn cmd_server_launch(name: &str, attach: bool, wait_ready: bool, ready_timeout: u64) -> Result<()> {
     let info = loader::server::load_server(name)?;
+    let dir = info.dir()?;
     let pid = loader::server::launch_server(&info, !attach).await?;
     if !attach {
         println!("Server '{}' running in background (PID {})", name, pid);
-        println!("  Log: {}/server.log", info.dir()?.display());
+        println!("  Log: {}/server.log", dir.display());
+        if wait_ready {
+            println!("Waiting for server ready (timeout {}s)...", ready_timeout);
+            loader::server::wait_for_ready(&dir, ready_timeout).await?;
+            println!("Server '{}' is ready.", name);
+        }
+    }
+    Ok(())
+}
+
+/// Run a console command on a managed server via RCON (v26.2-alpha.7).
+async fn cmd_server_cmd(name: &str, command: &str) -> Result<()> {
+    if command.trim().is_empty() {
+        anyhow::bail!("Empty console command");
+    }
+    let info = loader::server::load_server(name)?;
+    // Refuse when the server is not running — RCON would be connection-refused
+    // anyway, but the explicit check gives a clearer error.
+    let running = info.dir().ok().and_then(|d| loader::server::running_pid(&d));
+    if running.is_none() {
+        anyhow::bail!("Server '{}' is not running", name);
+    }
+    let response = loader::server::run_console_command(&info, command).await?;
+    if response.trim().is_empty() {
+        println!("(empty response)");
+    } else {
+        println!("{}", response.trim_end());
     }
     Ok(())
 }
