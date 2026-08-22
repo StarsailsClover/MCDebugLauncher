@@ -33,8 +33,8 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha 2 | 诊断系统补全 + 性能优化 | 实现 `log_parser.rs`（集成 mclog-analyzer）；crash report stack trace 提取；结构化 JSON 诊断输出；流式下载替代内存缓冲（修复 1.9GB 内存问题） | ✅ 已完成 |
 | Alpha 3 | Agent 命令面收敛 | 实现或移除 `agent/commands.rs`；统一 CLI/HTTP 命令映射；错误码一致性审计 | ✅ 已完成 |
 | Alpha 4 | OOM 自阻止与实例运维 | 启动前 OOM 自保护：杀死残留 Minecraft/Java 进程、裁剪系统 Working Set（EmptyWorkingSet）、可选清空 Standby List（NtSetSystemInformation）；`--oom-protect`/`--oom-aggressive` CLI 参数；Agent API `oom-protect`/`oom-aggressive` 选项 | ✅ 已完成 |
-| Alpha 5 | 实例运维与导出 | `mdl export <instance> <output.mrpack>`；批量 mod 操作；磁盘占用报告；实例健康评分 | 📋 规划中 |
-| Alpha 6 | 微软账号与认证 | 多账号会话管理；token 自动刷新；皮肤下载与头像渲染 | 📋 规划中 |
+| Alpha 5 | 实例运维与导出 | `mdl instance export --format mrpack`（modrinth.index.json + overrides，与 import 成往返）；`mdl javaagent` 实例级 agent 管理；启动时 `--javaagent <jar>[=params]` 可重复注入 | ✅ 已完成 |
+| Alpha 6 | 指定 Agent 注入 + 账号会话 | `mdl game inject-agent <instance> <jar>` 运行中 JVM 热附加（内嵌 AttachHelper + jdk.attach/agentmain）；`mdl account refresh [--all]` token 刷新（登录保存 refresh_token）；`mdl status --disk` 磁盘占用报告（单实例含子目录分解） | ✅ 已完成 |
 | Alpha 7 | 测试世界与服务端自动化 | `--with-test-world` 超平坦世界；`--enter-world`/`--enter-server`；测试服生命周期自动化 | 📋 规划中 |
 | Alpha 8 | Aprism BE Native 与跨平台 | Aprism BE Native 适配；Linux/macOS 构建验证；非 Windows 截图替代方案 | 📋 规划中 |
 | Alpha 9 | 可观测性与遥测 | 结构化 JSON 日志；启动指标（time-to-ready、下载字节、缓存命中率）；`mdl metrics` 命令 | 📋 规划中 |

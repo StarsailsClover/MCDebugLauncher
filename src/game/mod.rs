@@ -25,6 +25,10 @@ pub mod capture;
 #[cfg(windows)]
 pub mod window;
 
+// Hot-attach JavaAgent injection (v26.2-alpha.6). Cross-platform: works
+// wherever a JDK-family runtime with the jdk.attach module exists.
+pub mod attach;
+
 /// Default HTTP port of the Despotes in-game control server. The launcher
 /// passes the port to the game via the `despotes.port` system property and
 /// records it in `runtime/despotes.port` for post-launch discovery.

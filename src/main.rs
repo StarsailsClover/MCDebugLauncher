@@ -279,6 +279,26 @@ enum GameCommands {
         message: String,
     },
 
+    /// Hot-attach a Java agent JAR into the RUNNING game JVM (v26.2-alpha.6).
+    /// Uses the JVM Attach API (agentmain); the agent must implement
+    /// agentmain in its manifest. Unlike launch-time --javaagent this works
+    /// while the game is already up, without restarting it.
+    InjectAgent {
+        /// Instance name
+        instance: String,
+
+        /// Path to the agent JAR (or an entry name registered via `mdl javaagent install`)
+        jar: String,
+
+        /// Agent options string (text after `=` in -javaagent syntax)
+        #[arg(short, long)]
+        params: Option<String>,
+
+        /// Custom java executable (default: auto-detect / instance runtime)
+        #[arg(long)]
+        java_path: Option<String>,
+    },
+
     /// List MDL game windows visible for capture
     Windows,
 }
@@ -330,6 +350,14 @@ enum AccountCommands {
     Login,
     /// List cached accounts
     List,
+    /// Refresh access token(s) using stored refresh tokens (v26.2-alpha.6)
+    Refresh {
+        /// UUID or username; omit with --all to refresh every account
+        account: Option<String>,
+        /// Refresh all cached accounts
+        #[arg(long)]
+        all: bool,
+    },
     /// Download the account's skin PNG
     Skin {
         /// UUID or username
@@ -731,6 +759,10 @@ enum Commands {
         /// Show detailed instance information (config, mods, etc.)
         #[arg(short, long)]
         detail: bool,
+
+        /// Report per-instance disk usage (v26.2-alpha.6)
+        #[arg(long)]
+        disk: bool,
     },
 
     /// Manage mods
@@ -1019,8 +1051,11 @@ async fn main() -> Result<()> {
         Commands::Logs { name, follow, lines, level } => {
             cmd_logs(&name, follow, lines, level.as_deref()).await?;
         }
-        Commands::Status { name, detail } => {
+        Commands::Status { name, detail, disk } => {
             cmd_status(&cli.format, name.as_deref(), detail).await?;
+            if disk {
+                cmd_status_disk(&cli.format, name.as_deref()).await?;
+            }
         }
         Commands::Mod(mod_cmd) => {
             match mod_cmd {
@@ -1100,6 +1135,9 @@ async fn main() -> Result<()> {
                 GameCommands::Chat { instance, message } => {
                     cmd_game_chat(&instance, &message).await?;
                 }
+                GameCommands::InjectAgent { instance, jar, params, java_path } => {
+                    cmd_game_inject_agent(&instance, &jar, params.as_deref(), java_path.as_deref()).await?;
+                }
                 GameCommands::Windows => {
                     cmd_game_windows(&cli.format)?;
                 }
@@ -1137,6 +1175,7 @@ async fn main() -> Result<()> {
         Commands::Account(ac) => match ac {
             AccountCommands::Login => { cmd_account_login().await?; }
             AccountCommands::List => { cmd_account_list(); }
+            AccountCommands::Refresh { account, all } => { cmd_account_refresh(account.as_deref(), all).await?; }
             AccountCommands::Skin { account, output } => { cmd_account_skin(&account, output.as_deref()).await?; }
         },
         Commands::Bedrock(bc) => match bc {
@@ -1841,6 +1880,111 @@ async fn cmd_status(format: &str, name: Option<&str>, detail: bool) -> Result<()
     }
 
     Ok(())
+}
+
+/// Per-instance disk usage report (v26.2-alpha.6). Walks each instance
+/// directory summing file sizes. With `name`, reports one instance plus a
+/// breakdown by top-level subdirectory; otherwise lists all instances
+/// sorted largest-first.
+async fn cmd_status_disk(format: &str, name: Option<&str>) -> Result<()> {
+    use instance::InstanceManager;
+
+    let manager = InstanceManager::new()?;
+    let instances = if let Some(n) = name {
+        vec![manager.get(n).await?]
+    } else {
+        manager.list().await?
+    };
+
+    // (name, total_bytes, breakdown) — breakdown only for single-instance.
+    let mut rows: Vec<(String, u64, Option<Vec<(String, u64)>>)> = Vec::new();
+    for inst in &instances {
+        let total = dir_size(&inst.path).await;
+        let breakdown = if name.is_some() {
+            let mut subs: Vec<(String, u64)> = Vec::new();
+            if let Ok(mut entries) = tokio::fs::read_dir(&inst.path).await {
+                while let Some(entry) = entries.next_entry().await.ok().flatten() {
+                    let p = entry.path();
+                    let size = if p.is_dir() { dir_size(&p).await } else { 0 };
+                    subs.push((
+                        p.file_name().map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_default(),
+                        size,
+                    ));
+                }
+            }
+            subs.sort_by(|a, b| b.1.cmp(&a.1));
+            Some(subs)
+        } else {
+            None
+        };
+        rows.push((inst.name.clone(), total, breakdown));
+    }
+
+    if !name.is_some() {
+        rows.sort_by(|a, b| b.1.cmp(&a.1));
+    }
+
+    if format == "json" {
+        let data: Vec<serde_json::Value> = rows.iter().map(|(n, t, b)| {
+            let mut v = serde_json::json!({ "instance": n, "bytes": t, "human": format_bytes(*t) });
+            if let Some(subs) = b {
+                v["breakdown"] = serde_json::json!(subs.iter().map(|(sn, sb)| serde_json::json!(
+                    {"path": sn, "bytes": sb, "human": format_bytes(*sb)}
+                )).collect::<Vec<_>>());
+            }
+            v
+        }).collect();
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "status": "success",
+            "data": { "instances": data }
+        }))?);
+        return Ok(());
+    }
+
+    match name {
+        Some(n) => {
+            println!("Disk usage for '{}':", n);
+            if let Some((_, total, Some(breakdown))) = rows.first().map(|r| (&r.0, r.1, r.2.as_ref())) {
+                for (sub, size) in breakdown.iter().take(12) {
+                    if *size > 0 {
+                        println!("  {:<24} {:>10}", sub, format_bytes(*size));
+                    }
+                }
+                println!("  {}", "-".repeat(36));
+                println!("  {:<24} {:>10}", "TOTAL", format_bytes(total));
+            }
+        }
+        None => {
+            println!("{:<28} {:>12}", "INSTANCE", "DISK USAGE");
+            println!("{}", "-".repeat(42));
+            let mut grand = 0u64;
+            for (n, total, _) in &rows {
+                grand += total;
+                println!("{:<28} {:>12}", n, format_bytes(*total));
+            }
+            println!("{}", "-".repeat(42));
+            println!("{:<28} {:>12}  ({} instance(s))", "TOTAL", format_bytes(grand), rows.len());
+        }
+    }
+    Ok(())
+}
+
+/// Recursively sum file sizes under `dir` using a blocking walkdir on a
+/// spawn_blocking task (walkdir is synchronous; avoids starving the runtime).
+fn dir_size(dir: &std::path::Path) -> impl std::future::Future<Output = u64> + Send + '_ {
+    let path = dir.to_path_buf();
+    async move {
+        tokio::task::spawn_blocking(move || walkdir::WalkDir::new(path)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.metadata().ok())
+            .filter(|m| m.is_file())
+            .map(|m| m.len())
+            .sum::<u64>())
+        .await
+        .unwrap_or(0)
+    }
 }
 
 async fn cmd_instance_detail(format: &str, instance_name: &str, status_info: &instance::InstanceStatusInfo) -> Result<()> {
@@ -2777,6 +2921,73 @@ async fn cmd_game_chat(instance: &str, message: &str) -> Result<()> {
     Ok(())
 }
 
+/// Hot-attach a Java agent JAR into the running game JVM (v26.2-alpha.6).
+/// Resolves the PID from the instance's runtime/pid file, the java runtime
+/// from --java-path / instance config / system detection, and delegates to
+/// game::attach::inject_agent (embedded AttachHelper via jdk.attach).
+async fn cmd_game_inject_agent(
+    instance: &str,
+    jar: &str,
+    params: Option<&str>,
+    java_path: Option<&str>,
+) -> Result<()> {
+    use instance::InstanceManager;
+
+    let manager = InstanceManager::new()?;
+    let inst = manager.get(instance).await?;
+
+    // Resolve target PID from the runtime pid file.
+    let pid: u32 = tokio::fs::read_to_string(inst.path.join("runtime").join("pid"))
+        .await
+        .ok()
+        .and_then(|c| c.trim().parse().ok())
+        .ok_or_else(|| anyhow::anyhow!(
+            "Instance '{}' is not running (no runtime/pid). Launch it first.",
+            instance
+        ))?;
+
+    // Resolve the agent JAR path: absolute/local path wins; otherwise treat
+    // as a registered entry name from `mdl javaagent install`.
+    let jar_path = std::path::PathBuf::from(jar);
+    let jar_path = if jar_path.is_absolute() && jar_path.exists() {
+        jar_path
+    } else {
+        let registered = inst.path.join("javaagents").join(jar);
+        if !registered.exists() {
+            // Also accept a name without .jar suffix.
+            let with_ext = registered.with_extension("jar");
+            if with_ext.exists() {
+                with_ext
+            } else {
+                anyhow::bail!(
+                    "Agent JAR not found: '{}' is neither an existing path nor a \
+                     registered javaagent in this instance (see `mdl javaagent install`)",
+                    jar
+                );
+            }
+        } else {
+            registered
+        }
+    };
+
+    // Resolve the java executable used to run the attach helper.
+    let java = match java_path {
+        Some(p) => std::path::PathBuf::from(p),
+        None => crate::version::java::JavaRuntime::detect()
+            .map(|r| r.path)
+            .unwrap_or_else(|_| std::path::PathBuf::from("java")),
+    };
+
+    game::attach::inject_agent(&java, pid, &jar_path, params).await?;
+    println!(
+        "Agent '{}' attached to instance '{}' (PID {})",
+        jar_path.display(),
+        instance,
+        pid
+    );
+    Ok(())
+}
+
 fn cmd_game_windows(format: &str) -> Result<()> {
     #[cfg(not(windows))]
     {
@@ -3058,6 +3269,41 @@ fn cmd_account_list() {
     for a in accounts {
         println!("  {} ({})", a.username, a.uuid);
     }
+}
+
+/// Refresh access token(s) via stored Microsoft refresh tokens
+/// (v26.2-alpha.6). Targets one account by UUID/username, or all with --all.
+async fn cmd_account_refresh(account: Option<&str>, all: bool) -> Result<()> {
+    let mut targets = Vec::new();
+    if all {
+        targets.extend(util::account::list_accounts());
+        if targets.is_empty() {
+            anyhow::bail!("No cached accounts to refresh. Use `mdl account login` first.");
+        }
+    } else if let Some(name) = account {
+        match util::account::find_account(name) {
+            Some(a) => targets.push(a),
+            None => anyhow::bail!("Account '{}' not found. Use `mdl account list`.", name),
+        }
+    } else {
+        anyhow::bail!("Specify an account (UUID or username) or pass --all");
+    }
+
+    let mut ok = 0usize;
+    for acc in &targets {
+        match util::account::refresh_account(acc).await {
+            Ok(_) => {
+                println!("  Refreshed: {} ({})", acc.username, acc.uuid);
+                ok += 1;
+            }
+            Err(e) => println!("  FAILED: {} - {}", acc.username, e),
+        }
+    }
+    println!("{}/{} account(s) refreshed", ok, targets.len());
+    if ok < targets.len() {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 async fn cmd_account_skin(account: &str, output: Option<&str>) -> Result<()> {

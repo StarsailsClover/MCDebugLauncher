@@ -147,7 +147,7 @@ pub async fn login_interactive() -> Result<MinecraftAccount> {
             .await
             .context("Failed to parse token response")?;
         match resp.error.as_deref() {
-            None => break resp.access_token,
+            None => break (resp.access_token, resp.refresh_token),
             Some("authorization_pending") => continue,
             Some("slow_down") => {
                 interval += 2;
@@ -156,6 +156,9 @@ pub async fn login_interactive() -> Result<MinecraftAccount> {
             Some(other) => anyhow::bail!("Microsoft auth error: {}", other),
         }
     };
+    // v26.2-alpha.6: keep the refresh token so `mdl account refresh` can
+    // mint new access tokens without re-running the device flow.
+    let (ms_token, ms_refresh_token) = ms_token;
 
     // Xbox Live
     let xbl: XboxAuthResponse = client
@@ -226,18 +229,59 @@ pub async fn login_interactive() -> Result<MinecraftAccount> {
         .and_then(|s| s["url"].as_str())
         .map(|s| s.to_string());
 
-    // We did not request offline_access refresh in this simplified flow; keep
-    // refresh empty (re-login on expiry).
+    // v26.2-alpha.6: persist the Microsoft refresh token so accounts can be
+    // renewed via `mdl account refresh` instead of re-running device flow.
     let account = MinecraftAccount {
         uuid: uuid.clone(),
         username,
         access_token: mc.access_token,
-        refresh_token: String::new(),
+        refresh_token: ms_refresh_token,
         saved_at: now_secs(),
         skin_url,
     };
     save_account(&account)?;
     Ok(account)
+}
+
+/// Refresh a Minecraft account's access token using its stored Microsoft
+/// refresh token (v26.2-alpha.6). Updates the saved account on success.
+/// Returns an error when the account has no refresh token (legacy cache
+/// from before v26.2-alpha.6 — re-login required).
+pub async fn refresh_account(acc: &MinecraftAccount) -> Result<MinecraftAccount> {
+    if acc.refresh_token.is_empty() {
+        anyhow::bail!(
+            "Account '{}' has no refresh token (cached before v26.2-alpha.6). Run `mdl account login` again.",
+            acc.username
+        );
+    }
+    let client = crate::util::http::create_http_client()?;
+    let resp: TokenResponse = client
+        .post(TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "grant_type=refresh_token&client_id={}&refresh_token={}",
+            CLIENT_ID, acc.refresh_token
+        ))
+        .send()
+        .await
+        .context("Failed to call Microsoft token endpoint")?
+        .json()
+        .await
+        .context("Failed to parse token refresh response")?;
+    if let Some(err) = &resp.error {
+        anyhow::bail!("Microsoft auth error: {} (re-login may be required)", err);
+    }
+
+    let mut updated = acc.clone();
+    updated.access_token = resp.access_token;
+    // Refresh-token rotation: Microsoft may return a new refresh token;
+    // keep the old one when it does not.
+    if !resp.refresh_token.is_empty() {
+        updated.refresh_token = resp.refresh_token;
+    }
+    updated.saved_at = now_secs();
+    save_account(&updated)?;
+    Ok(updated)
 }
 
 fn save_account(acc: &MinecraftAccount) -> Result<()> {
