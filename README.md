@@ -91,16 +91,27 @@ See [docs/specification.md](docs/specification.md) for complete API documentatio
 
 ## Status
 
-**Current Version**: v26.0 Alpha 8.1
+**Current Version**: v26.2
 
-- ✅ CLI framework, version management, instance management
-- ✅ Forge / NeoForge / Fabric / Quilt / OptiFine loaders
-- ✅ Diagnostics, log analysis, agent HTTP/WebSocket server
-- ✅ Alpha 5: mod/config/backup management, self-update
-- ✅ Alpha 6: agent game control (screenshots, input injection, focus-free play)
-- ✅ Alpha 7: Despotes integration, mirrors + chunked downloads + cache, Modrinth search, Microsoft login, Aprism JE, Bedrock Dedicated Server, dll injector
-- ✅ Alpha 8: game-ready broadcast, pre-launch integrity verification, Fabric API auto-repair, --no-queue, UTF-8 console fixes
-- ✅ Alpha 8.1: Modrinth modpack import (auto-completion), JE dedicated servers, startup update digest, detached-spawn handle-leak fix
+v26.2 mainline theme: **automation resilience & operations** — reliable
+unattended / agent-driven workflows.
+
+Earlier lines:
+- ✅ v26.0: core launcher, instance/mod management, agent game control (Despotes), modpack import, JE/Bedrock dedicated servers, Aprism product matrix, download progress, `mdl doctor`
+- ✅ v26.1: capability manifest, agent error codes & stop command, full BDS lifecycle, instance clone/rename
+
+v26.2 highlights (Alpha 1–9):
+- ✅ Idle watchdog: auto-stop a detached game after N seconds without log output (`--idle-timeout`, `game_idle_timeout` event)
+- ✅ Diagnostics: integrated mclog-analyzer parser, crash stack-trace extraction, structured analysis in `mdl diagnose --analyze`
+- ✅ Performance: streaming downloads + disk-based SHA1 verification (first-launch peak memory ~1.9GB → <100MB)
+- ✅ Agent surface convergence: dead code removed, capability manifest synced with reality
+- ✅ OOM self-protection before spawn (`--oom-protect`, `--oom-aggressive`)
+- ✅ JavaAgent injection: launch-time `--javaagent` (repeatable) + hot-attach to running games (`mdl game inject-agent`), instance-level registry (`mdl javaagent`)
+- ✅ Instance ops: Modrinth `.mrpack` export roundtrip, batch mod listing, disk usage reports (`mdl status --disk`), account token refresh (`mdl account refresh`)
+- ✅ Server automation: RCON integration (auto-configured at create), graceful stop, `--wait-ready`, console commands (`mdl server cmd`)
+- ✅ Test-world entry completed: adaptive navigation with in-game confirmation
+- ✅ Aprism ecosystem: unified offline status view, native `.aje` mod support, Refract/Prismate remove
+- ✅ Observability: per-launch metrics (`mdl metrics`), structured JSON logging (`--log-format json`)
 
 **Tested Configurations:**
 - Vanilla Minecraft 1.21.x ✅

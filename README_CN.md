@@ -91,16 +91,26 @@ async def listen():
 
 ## 状态
 
-**当前版本**: v26.0 Alpha 8.1
+**当前版本**: v26.2
 
-- ✅ CLI 框架、版本管理、实例管理
-- ✅ Forge / NeoForge / Fabric / Quilt / OptiFine 加载器
-- ✅ 诊断、日志分析、agent HTTP/WebSocket 服务器
-- ✅ Alpha 5: mod/配置/备份管理、自更新
-- ✅ Alpha 6: agent 游戏操控（截图、输入注入、免焦点游玩）
-- ✅ Alpha 7: Despotes 集成、镜像+分块下载+缓存、Modrinth 搜索、微软登录、Aprism JE、基岩版专用服、dll 注入器
-- ✅ Alpha 8: 游戏就绪广播、启动前完整性校验、Fabric API 自修复、--no-queue、UTF-8 控制台修复
-- ✅ Alpha 8.1: Modrinth 整合包导入（自动补全）、JE 专用服务器、启动更新纲要、detach 句柄泄漏修复
+v26.2 主线主题：**自动化韧性与运维**——让无人值守 / Agent 驱动的工作流更可靠。
+
+历史主线：
+- ✅ v26.0：核心启动器、实例/模组管理、Agent 游戏控制（Despotes）、整合包导入、JE/基岩专用服、Aprism 产品矩阵、下载进度条、`mdl doctor`
+- ✅ v26.1：能力清单、agent 错误码与 stop 命令、BDS 全生命周期、实例克隆/重命名
+
+v26.2 亮点（Alpha 1–9）：
+- ✅ 空闲看门狗：detach 游戏日志静默 N 秒自动终止（`--idle-timeout`、`game_idle_timeout` 事件）
+- ✅ 诊断系统：集成 mclog-analyzer 解析器、崩溃堆栈提取、`mdl diagnose --analyze` 结构化分析
+- ✅ 性能：流式下载 + 磁盘 SHA1 校验（首次启动峰值内存 ~1.9GB → <100MB）
+- ✅ Agent 命令面收敛：移除死代码，能力清单与实现对齐
+- ✅ 启动前 OOM 自保护（`--oom-protect`、`--oom-aggressive`）
+- ✅ JavaAgent 注入：启动时 `--javaagent`（可重复）+ 运行中热附加（`mdl game inject-agent`）、实例级注册（`mdl javaagent`）
+- ✅ 实例运维：Modrinth `.mrpack` 导出往返、批量模组清单、磁盘占用报告（`mdl status --disk`）、账号 token 刷新（`mdl account refresh`）
+- ✅ 服务端自动化：RCON 集成（create 自动配置）、优雅停止、`--wait-ready`、控制台命令（`mdl server cmd`）
+- ✅ 测试世界进入补全：自适应导航 + 进世界终态确认
+- ✅ Aprism 生态：统一离线状态视图、原生 `.aje` 模组支持、Refract/Prismate 移除
+- ✅ 可观测性：每次启动指标（`mdl metrics`）、结构化 JSON 日志（`--log-format json`）
 
 **已测试配置：**
 - Vanilla Minecraft 1.21.x ✅
