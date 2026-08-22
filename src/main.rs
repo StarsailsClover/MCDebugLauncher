@@ -51,6 +51,11 @@ struct Cli {
     #[arg(long, global = true)]
     log_file: Option<String>,
 
+    /// Log output format: text (default) or json (structured, one JSON
+    /// object per line - for log aggregation pipelines)
+    #[arg(long, global = true, default_value = "text")]
+    log_format: String,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -489,6 +494,16 @@ enum AprismRefractCommands {
         /// Instance name
         instance: String,
     },
+    /// Remove installed .aep extensions (v26.2-alpha.9)
+    Remove {
+        /// Instance name
+        instance: String,
+        /// Filename substring filter; omit with --all to remove everything
+        name: Option<String>,
+        /// Remove all .aep extensions
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -510,6 +525,11 @@ enum AprismPrismateCommands {
     },
     /// Show whether a Prismate bridge is installed in an instance
     Status {
+        /// Instance name
+        instance: String,
+    },
+    /// Remove the installed Prismate bridge (v26.2-alpha.9)
+    Remove {
         /// Instance name
         instance: String,
     },
@@ -771,6 +791,17 @@ enum Commands {
         /// Filter by log level
         #[arg(long)]
         level: Option<String>,
+    },
+
+    /// Show launch metrics for an instance (v26.2-alpha.9): spawn time,
+    /// time-to-ready, download bytes and cache hit rate. Local-only data.
+    Metrics {
+        /// Instance name
+        instance: String,
+
+        /// Print the full recorded history instead of just the last launch
+        #[arg(long)]
+        history: bool,
     },
 
     /// Get instance status
@@ -1047,13 +1078,24 @@ async fn run() -> Result<()> {
     let machine_readable =
         cli.format == "json" || matches!(cli.command, Commands::Capabilities);
 
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(log_level)
-        .with_ansi(!cli.no_color)
-        .with_writer(TeeMakeWriter::new(file_writer, machine_readable))
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber)?;
+    // v26.2-alpha.9: --log-format json emits one structured JSON object per
+    // log line (tracing-subscriber json format) for aggregation pipelines.
+    // Both formats share the same tee writer (stderr + optional file).
+    if cli.log_format == "json" {
+        let subscriber = FmtSubscriber::builder()
+            .json()
+            .with_max_level(log_level)
+            .with_writer(TeeMakeWriter::new(file_writer, machine_readable))
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)?;
+    } else {
+        let subscriber = FmtSubscriber::builder()
+            .with_max_level(log_level)
+            .with_ansi(!cli.no_color)
+            .with_writer(TeeMakeWriter::new(file_writer, machine_readable))
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)?;
+    }
 
     info!("MCDebugLauncher v{}", env!("CARGO_PKG_VERSION"));
 
@@ -1092,6 +1134,9 @@ async fn run() -> Result<()> {
             if disk {
                 cmd_status_disk(&cli.format, name.as_deref()).await?;
             }
+        }
+        Commands::Metrics { instance, history } => {
+            cmd_metrics(&cli.format, &instance, history).await?;
         }
         Commands::Mod(mod_cmd) => {
             match mod_cmd {
@@ -1250,12 +1295,16 @@ async fn run() -> Result<()> {
                     cmd_aprism_refract_install(&instance, loader.as_deref(), mc_version.as_deref(), prerelease).await?;
                 }
                 AprismRefractCommands::List { instance } => { cmd_aprism_refract_list(&instance).await?; }
+                AprismRefractCommands::Remove { instance, name, all } => {
+                    cmd_aprism_refract_remove(&instance, name.as_deref(), all).await?;
+                }
             },
             AprismCommands::Prismate(pc) => match pc {
                 AprismPrismateCommands::Install { instance, loader, mc_version, prerelease } => {
                     cmd_aprism_prismate_install(&instance, loader.as_deref(), mc_version.as_deref(), prerelease).await?;
                 }
                 AprismPrismateCommands::Status { instance } => { cmd_aprism_prismate_status(&instance).await?; }
+                AprismPrismateCommands::Remove { instance } => { cmd_aprism_prismate_remove(&instance).await?; }
             },
         },
         Commands::Import { name, pack, no_download } => {
@@ -1590,7 +1639,28 @@ async fn cmd_launch(
     };
 
     let launcher = InstanceLauncher::new()?;
+    let launch_start = std::time::Instant::now();
     let outcome = launcher.launch(name, &options).await?;
+    let spawn_secs = launch_start.elapsed().as_secs_f64();
+
+    // Record per-launch metrics (local-only; see util::metrics).
+    if let Ok(manager) = instance::InstanceManager::new() {
+        if let Ok(inst) = manager.get(name).await {
+            let (bytes, downloads, hits) = util::metrics::snapshot_counters();
+            let m = util::metrics::LaunchMetrics {
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                instance: name.to_string(),
+                pid: outcome.pid,
+                detached: outcome.detached,
+                spawn_secs,
+                ready_secs: None, // filled below when --wait-ready succeeds
+                download_bytes: bytes,
+                downloads,
+                cache_hits: hits,
+            };
+            let _ = util::metrics::save_launch(&inst.path, &m);
+        }
+    }
 
     if outcome.detached {
         println!("Instance '{}' launched in background (PID {})", name, outcome.pid);
@@ -1600,9 +1670,20 @@ async fn cmd_launch(
         }
         // Wait for the game-ready broadcast if requested (agent mode).
         if agent && wait_ready {
+            let ready_start = std::time::Instant::now();
             let ready = wait_game_ready(&outcome, name).await;
             if ready {
-                println!("  Game is ready.");
+                let ready_secs = ready_start.elapsed().as_secs_f64();
+                println!("  Game is ready (t+{:.1}s).", ready_secs);
+                // Patch the just-written metrics with the ready timing.
+                if let Ok(manager) = instance::InstanceManager::new() {
+                    if let Ok(inst) = manager.get(name).await {
+                        if let Some(mut m) = util::metrics::load_latest(&inst.path) {
+                            m.ready_secs = Some(ready_secs);
+                            let _ = util::metrics::save_launch(&inst.path, &m);
+                        }
+                    }
+                }
                 if enter_test_world {
                     enter_world_after_ready(name).await?;
                 }
@@ -2087,6 +2168,48 @@ fn dir_size(dir: &std::path::Path) -> impl std::future::Future<Output = u64> + S
         .await
         .unwrap_or(0)
     }
+}
+
+/// Show recorded launch metrics for an instance (v26.2-alpha.9).
+async fn cmd_metrics(format: &str, instance: &str, history: bool) -> Result<()> {
+    use instance::InstanceManager;
+    let manager = InstanceManager::new()?;
+    let inst = manager.get(instance).await?;
+
+    let entries = if history {
+        util::metrics::load_history(&inst.path)
+    } else {
+        util::metrics::load_latest(&inst.path).into_iter().collect::<Vec<_>>()
+    };
+
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "status": "success",
+            "data": { "instance": instance, "launches": entries }
+        }))?);
+        return Ok(());
+    }
+
+    if entries.is_empty() {
+        println!("No launch metrics recorded for '{}'. Launch it once to collect data.", instance);
+        return Ok(());
+    }
+
+    println!("Launch metrics for '{}' ({} record(s)):", instance, entries.len());
+    for m in &entries {
+        println!();
+        println!("  {}  PID {}", m.timestamp, m.pid);
+        println!("    spawn:         {:.1}s", m.spawn_secs);
+        match m.ready_secs {
+            Some(r) => println!("    ready:         {:.1}s", r),
+            None => println!("    ready:         n/a (--wait-ready not used)"),
+        }
+        println!("    downloads:     {} file(s), {}", m.downloads, format_bytes(m.download_bytes));
+        let total = m.downloads + m.cache_hits;
+        let rate = if total > 0 { (m.cache_hits as f64 / total as f64) * 100.0 } else { 0.0 };
+        println!("    cache hits:    {} / {} ({:.0}%)", m.cache_hits, total, rate);
+    }
+    Ok(())
 }
 
 async fn cmd_instance_detail(format: &str, instance_name: &str, status_info: &instance::InstanceStatusInfo) -> Result<()> {
@@ -3489,6 +3612,54 @@ async fn cmd_aprism_refract_list(instance: &str) -> Result<()> {
             println!("  {}", e.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
         }
     }
+    Ok(())
+}
+
+/// Remove installed .aep Refract extensions (v26.2-alpha.9). Filters by
+/// filename substring, or removes everything with --all.
+async fn cmd_aprism_refract_remove(instance: &str, name: Option<&str>, all: bool) -> Result<()> {
+    use anyhow::Context as _;
+    if !all && name.is_none() {
+        anyhow::bail!("Specify a filename filter or pass --all");
+    }
+    let manager = instance::InstanceManager::new()?;
+    let inst = manager.get(instance).await?;
+    let exts = loader::refract::installed_extensions(&inst.path);
+    if exts.is_empty() {
+        println!("No AprismRefract extensions installed in '{}'.", instance);
+        return Ok(());
+    }
+
+    let mut removed = 0usize;
+    for e in exts {
+        let fname = e.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if all || name.map(|n| fname.to_lowercase().contains(&n.to_lowercase())).unwrap_or(false) {
+            tokio::fs::remove_file(&e).await.with_context(|| format!("Failed to remove {}", e.display()))?;
+            println!("  removed {}", fname);
+            removed += 1;
+        }
+    }
+    println!("{} extension(s) removed from '{}'", removed, instance);
+    Ok(())
+}
+
+/// Remove the installed Prismate bridge (v26.2-alpha.9). Only one bridge
+/// should ever be present; removes every Prismate jar found.
+async fn cmd_aprism_prismate_remove(instance: &str) -> Result<()> {
+    use anyhow::Context as _;
+    let manager = instance::InstanceManager::new()?;
+    let inst = manager.get(instance).await?;
+    let jars = loader::prismate::installed_prismate(&inst.path);
+    if jars.is_empty() {
+        println!("No AprismPrismate bridge installed in '{}'.", instance);
+        return Ok(());
+    }
+    for p in jars {
+        let fname = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        tokio::fs::remove_file(&p).await.with_context(|| format!("Failed to remove {}", p.display()))?;
+        println!("  removed {}", fname);
+    }
+    println!("Prismate bridge removed from '{}'", instance);
     Ok(())
 }
 

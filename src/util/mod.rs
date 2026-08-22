@@ -15,3 +15,4 @@ pub mod account;
 pub mod changelog;
 pub mod progress;
 pub mod doctor;
+pub mod metrics;

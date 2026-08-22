@@ -41,6 +41,7 @@ pub async fn download_file(
         if cache.lookup(&cache_key).is_some() {
             if cache.install_copy(&cache_key, dest).unwrap_or(false) {
                 info!("Installed from cache (copy): {}", dest.display());
+                crate::util::metrics::record_cache_hit();
                 return Ok(());
             }
         }
@@ -59,6 +60,7 @@ pub async fn download_file(
     for candidate in &candidates {
         match try_single_source(candidate, dest, expected_sha1, Some(&display_name)).await {
             Ok(bytes_written) => {
+                crate::util::metrics::record_download(bytes_written);
                 // Register the downloaded file in the cache by copying it
                 // from the destination into the cache dir. This avoids
                 // buffering the full file in memory — the previous
@@ -392,6 +394,7 @@ where
         if cache.lookup(&cache_key).is_some() {
             if cache.install_copy(&cache_key, dest).unwrap_or(false) {
                 info!("Installed from cache (copy): {}", dest.display());
+                crate::util::metrics::record_cache_hit();
                 return Ok(());
             }
         }
@@ -405,6 +408,7 @@ where
         match result {
             Ok(bytes_len) => {
                 debug!("Downloaded {} ({} bytes) from {}", dest.display(), bytes_len, candidate);
+                crate::util::metrics::record_download(bytes_len);
                 return Ok(());
             }
             Err(e) => {
