@@ -25,7 +25,7 @@ use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::fs;
 use tokio::sync::RwLock;
 

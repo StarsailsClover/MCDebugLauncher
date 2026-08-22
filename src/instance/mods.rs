@@ -13,6 +13,21 @@ pub struct ModInfo {
     pub filename: String,
     pub size_bytes: u64,
     pub enabled: bool,
+    /// File kind: "jar" (Fabric/Forge/NeoForge/Quilt mod), "aje" (Aprism
+    /// native mod, v26.2-alpha.8), or "other" (unknown file in mods/).
+    pub kind: String,
+}
+
+/// Classify a mods/ entry by extension.
+fn classify_mod(filename: &str) -> &'static str {
+    let lower = filename.to_ascii_lowercase();
+    if lower.ends_with(".jar") {
+        "jar"
+    } else if lower.ends_with(".aje") {
+        "aje"
+    } else {
+        "other"
+    }
 }
 
 pub struct ModManager {
@@ -53,11 +68,13 @@ impl ModManager {
                 };
 
                 let metadata = entry.metadata().await?;
+                let kind = classify_mod(&display_name).to_string();
 
                 mods.push(ModInfo {
                     filename: display_name,
                     size_bytes: metadata.len(),
                     enabled,
+                    kind,
                 });
             }
         }
@@ -79,8 +96,10 @@ impl ModManager {
             .context("Invalid mod file path")?
             .to_string_lossy();
 
-        if !filename.ends_with(".jar") {
-            bail!("Mod file must be a JAR file");
+        // v26.2-alpha.8: accept Aprism native mods (.aje) alongside JARs.
+        let filename_lower = filename.to_ascii_lowercase();
+        if !filename_lower.ends_with(".jar") && !filename_lower.ends_with(".aje") {
+            bail!("Mod file must be a .jar (loader mod) or .aje (Aprism native mod) file");
         }
 
         // Copy mod to instance

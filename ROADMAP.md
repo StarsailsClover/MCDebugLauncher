@@ -36,7 +36,7 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha 5 | 实例运维与导出 | `mdl instance export --format mrpack`（modrinth.index.json + overrides，与 import 成往返）；`mdl javaagent` 实例级 agent 管理；启动时 `--javaagent <jar>[=params]` 可重复注入 | ✅ 已完成 |
 | Alpha 6 | 指定 Agent 注入 + 账号会话 | `mdl game inject-agent <instance> <jar>` 运行中 JVM 热附加（内嵌 AttachHelper + jdk.attach/agentmain）；`mdl account refresh [--all]` token 刷新（登录保存 refresh_token）；`mdl status --disk` 磁盘占用报告（单实例含子目录分解） | ✅ 已完成 |
 | Alpha 7 | 测试世界与服务端自动化 | `mdl server launch --wait-ready`（日志 Done 行轮询）；RCON 集成（create 自动启用，密码入 server.json）；`mdl server stop` 优雅停止（RCON stop → 20s 等待 → taskkill 兜底）；`mdl server cmd <name> <cmd>` 控制台命令通道；`--enter-test-world` 自适应补全（创建确认按钮 + 已有世界 Play 路径 + inGame 终态确认） | ✅ 已完成 |
-| Alpha 8 | Aprism BE Native 与跨平台 | Aprism BE Native 适配；Linux/macOS 构建验证；非 Windows 截图替代方案 | 📋 规划中 |
+| Alpha 8 | Aprism 生态联动 + 已有功能优化 | `mdl aprism status <instance>` 统一生态视图（agent 缓存/覆盖、Refract .aep、Prismate、.aje 原生模组、互斥提示，纯离线）；mod 管理支持 `.aje` 原生模组（install 校验 + list kind 字段）；debug 构建 `--help` 栈溢出修复（32MB 主线程栈）；编译 warning 清零 | ✅ 已完成 |
 | Alpha 9 | 可观测性与遥测 | 结构化 JSON 日志；启动指标（time-to-ready、下载字节、缓存命中率）；`mdl metrics` 命令 | 📋 规划中 |
 | Alpha 10 | 稳定性、文档与正式发布 | 零 warning 构建；全量文档刷新；回归测试套件；v26.2 正式版发布 | 📋 规划中 |
 
@@ -44,5 +44,5 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 
 - 正版账号皮肤渲染、多账号会话管理增强。
 - 测试世界 / 测试服务器自动化体验完善。
-- Aprism BE Native 加载器的启动器侧适配。
+- Aprism BE Native 加载器的启动器侧适配（**当前冻结，待 Aprism BE 解冻后启动**）。
 - 更多镜像与下载源的健康度持续监测。

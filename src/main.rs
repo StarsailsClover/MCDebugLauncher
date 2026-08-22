@@ -452,6 +452,13 @@ enum JavaAgentCommands {
 
 #[derive(Subcommand)]
 enum AprismCommands {
+    /// Unified ecosystem status for an instance (v26.2-alpha.8): cached
+    /// agent JARs, installed Refract .aep extensions, Prismate bridge,
+    /// native .aje mods, and compatibility notes.
+    Status {
+        /// Instance name
+        instance: String,
+    },
     /// Manage AprismRefract loader-support extensions (.aep)
     #[command(subcommand)]
     Refract(AprismRefractCommands),
@@ -987,8 +994,22 @@ impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for TeeMakeWriter {
     }
 }
 
+fn main() -> Result<()> {
+    // clap's derive help rendering recurses deeply and overflows the ~1MB
+    // default main-thread stack in debug builds (`mdl --help` crashed with
+    // "thread 'main' has overflowed its stack"). Run the whole program on a
+    // dedicated thread with a generous stack; the tokio runtime is built
+    // inside run() so all async work happens there too.
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(run)
+        .expect("failed to spawn main thread")
+        .join()
+        .unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
     let cli = Cli::parse();
 
     // Language for launcher messages (en default, zh via --lang zh / MDL_LANG)
@@ -1221,6 +1242,9 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Aprism(ac) => match ac {
+            AprismCommands::Status { instance } => {
+                cmd_aprism_status(&cli.format, &instance).await?;
+            }
             AprismCommands::Refract(rc) => match rc {
                 AprismRefractCommands::Install { instance, loader, mc_version, prerelease } => {
                     cmd_aprism_refract_install(&instance, loader.as_deref(), mc_version.as_deref(), prerelease).await?;
@@ -3463,6 +3487,123 @@ async fn cmd_aprism_refract_list(instance: &str) -> Result<()> {
         println!("AprismRefract extensions in '{}':", inst.name);
         for e in exts {
             println!("  {}", e.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
+        }
+    }
+    Ok(())
+}
+
+/// Unified Aprism ecosystem status for an instance (v26.2-alpha.8).
+/// Offline by design: reads the local agent cache, installed Refract
+/// extensions, Prismate bridge and native .aje mods; never hits the network.
+async fn cmd_aprism_status(format: &str, instance: &str) -> Result<()> {
+    use instance::{InstanceManager, ModManager};
+    let manager = InstanceManager::new()?;
+    let inst = manager.get(instance).await?;
+    let loader_type = inst.config.loader.as_ref().map(|l| l.loader_type.clone());
+
+    // 1. Cached JE agent JARs (<data>/aprism/*.jar), parsed for tag + MC.
+    let mut cached_agents: Vec<(String, String)> = Vec::new(); // (tag, mc)
+    if let Ok(dir) = crate::util::paths::get_data_dir() {
+        if let Ok(entries) = std::fs::read_dir(dir.join("aprism")) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if !name.to_ascii_lowercase().ends_with(".jar") {
+                    continue;
+                }
+                match loader::aprism::parse_asset_name(&name) {
+                    Some((tag, edit, mc)) if edit == "JE" => cached_agents.push((tag, mc)),
+                    _ => cached_agents.push((name.clone(), "?".into())),
+                }
+            }
+        }
+    }
+    let covering_agent = cached_agents.iter()
+        .find(|(_, mc)| *mc == inst.config.version);
+
+    // 2. Refract .aep extensions in the instance.
+    let refract_exts = loader::refract::installed_extensions(&inst.path);
+
+    // 3. Prismate bridge.
+    let prismate_jars = loader::prismate::installed_prismate(&inst.path);
+    let prismate_on = loader::prismate::is_installed(&inst.path);
+
+    // 4. Native .aje mods via mod manager.
+    let aje_mods: Vec<String> = match ModManager::new() {
+        Ok(mm) => mm.list_mods(instance).await.unwrap_or_default()
+            .into_iter()
+            .filter(|m| m.kind == "aje" && m.enabled)
+            .map(|m| m.filename)
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+
+    // Compatibility notes (mirrors launch-time rules).
+    let mut notes: Vec<String> = Vec::new();
+    if prismate_on {
+        notes.push("Prismate present: launching with --aprism is refused (agent and Prismate are mutually exclusive)".into());
+    }
+    if covering_agent.is_none() && !cached_agents.is_empty() {
+        notes.push(format!(
+            "No cached agent covers MC {}; launch --aprism will query GitHub Releases",
+            inst.config.version
+        ));
+    }
+
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "instance": inst.name,
+            "mc_version": inst.config.version,
+            "loader": loader_type,
+            "agent": {
+                "cached": cached_agents.iter().map(|(t, mc)| serde_json::json!({"tag": t, "mc": mc})).collect::<Vec<_>>(),
+                "covers_instance": covering_agent.map(|(t, _)| t),
+            },
+            "refract_extensions": refract_exts.iter().map(|p|
+                p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+            ).collect::<Vec<_>>(),
+            "prismate": {
+                "installed": prismate_on,
+                "jars": prismate_jars.iter().map(|p|
+                    p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+                ).collect::<Vec<_>>(),
+            },
+            "native_aje_mods": aje_mods,
+            "notes": notes,
+        }))?);
+        return Ok(());
+    }
+
+    println!("Aprism ecosystem status: '{}' (MC {}, loader {})",
+        inst.name, inst.config.version,
+        loader_type.as_deref().unwrap_or("none"));
+    println!();
+    println!("Agent cache ({}):", cached_agents.len());
+    for (tag, mc) in &cached_agents {
+        let mark = if Some(mc) == covering_agent.as_ref().map(|(_, m)| m) { " [covers this instance]" } else { "" };
+        println!("  {} (MC {}){}", tag, mc, mark);
+    }
+    if cached_agents.is_empty() { println!("  (empty — first --aprism launch downloads it)"); }
+
+    println!("Refract (.aep): {}", if refract_exts.is_empty() { "none".to_string() } else { "".to_string() });
+    for e in &refract_exts {
+        println!("  {}", e.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
+    }
+
+    println!("Prismate: {}", if prismate_on { "installed" } else { "not installed" });
+    for p in &prismate_jars {
+        println!("  {}", p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
+    }
+
+    println!("Native mods (.aje): {}", aje_mods.len());
+    for m in &aje_mods {
+        println!("  {}", m);
+    }
+
+    if !notes.is_empty() {
+        println!();
+        println!("Notes:");
+        for n in &notes {
+            println!("  - {}", n);
         }
     }
     Ok(())

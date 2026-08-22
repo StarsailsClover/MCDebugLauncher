@@ -14,7 +14,6 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tracing::{debug, info};
 
-use crate::util::checksum::verify_sha1;
 
 /// Minimum size (bytes) that triggers chunked parallel download.
 const CHUNK_THRESHOLD: u64 = 4 * 1024 * 1024;
