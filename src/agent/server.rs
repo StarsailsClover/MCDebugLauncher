@@ -840,6 +840,13 @@ async fn execute_command(
             if options.get("no-idle-timeout").map(|v| v == "true").unwrap_or(false) {
                 launch_options.no_idle_timeout = true;
             }
+            // v26.3-alpha.2: OOM second-confirmation options.
+            if let Some(mode) = options.get("oom-confirm") {
+                launch_options.oom_confirm = Some(mode.clone());
+            }
+            if options.get("oom-list-only").map(|v| v == "true").unwrap_or(false) {
+                launch_options.oom_list_only = true;
+            }
             // v26.2-alpha.4: OOM protection options.
             if let Some(val) = options.get("oom-protect") {
                 launch_options.oom_protect = val == "true";

@@ -130,6 +130,26 @@ pub fn list_mdl_windows(known_pids: &[(String, u32)]) -> Vec<GameWindowInfo> {
     results
 }
 
+/// Best-effort visible window title for a PID (first match). Returns None
+/// when the process owns no window or the title is empty.
+/// v26.3-alpha.2: used by the OOM guard's pre-kill confirmation listing.
+pub fn window_title_for_pid(pid: u32) -> Option<String> {
+    let windows = Window::enumerate().ok()?;
+    for window in windows {
+        if !window.is_valid() {
+            continue;
+        }
+        if window.process_id().ok() == Some(pid) {
+            if let Ok(t) = window.title() {
+                if !t.trim().is_empty() {
+                    return Some(t);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Locate the game window for a specific instance.
 ///
 /// Resolution order:

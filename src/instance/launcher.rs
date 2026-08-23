@@ -306,8 +306,15 @@ pub struct LaunchOptions {
     /// (v26.2-alpha.4). Default: true.
     pub oom_protect: bool,
     /// Aggressive OOM protection: also purge system standby list (requires
-    /// admin privileges; silently falls back when not elevated).
+    /// admin privileges; no-op when not elevated).
     pub oom_aggressive: bool,
+    /// Second-confirmation policy for stale-process termination:
+    /// "auto" (prompt only in interactive terminals, default),
+    /// "always", or "never". v26.3-alpha.2.
+    pub oom_confirm: Option<String>,
+    /// Enumerate OOM sweep targets (PID/title/memory) and exit the sweep
+    /// without terminating anything. v26.3-alpha.2.
+    pub oom_list_only: bool,
     /// Ad-hoc JavaAgent JARs to attach at launch (from `--javaagent` CLI
     /// flags). Each entry is either a bare path or `path=params`.
     pub javaagents: Vec<String>,
@@ -560,11 +567,35 @@ impl InstanceLauncher {
         // OOM self-protection (v26.2-alpha.4): before spawning the JVM,
         // kill stale Minecraft processes and trim system working sets so
         // the new instance has enough physical RAM to allocate its heap.
+        // v26.3-alpha.2: candidates are listed (PID / window title / memory)
+        // and gated behind a second-confirmation prompt per --oom-confirm.
         if options.oom_protect {
             tracing::info!("OOM protection: scanning for stale processes and trimming working sets...");
-            match crate::game::oom_guard::pre_launch_protection(false, options.oom_aggressive).await {
+            let mode = match options.oom_confirm.as_deref() {
+                Some(s) => match crate::game::oom_guard::OomConfirmMode::parse(s) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!("{}; falling back to auto", e);
+                        crate::game::oom_guard::OomConfirmMode::Auto
+                    }
+                },
+                None => crate::game::oom_guard::OomConfirmMode::Auto,
+            };
+            match crate::game::oom_guard::pre_launch_protection(
+                mode,
+                options.oom_list_only,
+                options.oom_aggressive,
+            )
+            .await
+            {
                 Ok(report) => {
-                    if report.killed_processes > 0 {
+                    if report.listed_candidates > 0 && report.killed_processes == 0 {
+                        tracing::warn!(
+                            "OOM protection: {} candidate(s) listed, none terminated \
+                             (list-only or confirmation declined)",
+                            report.listed_candidates
+                        );
+                    } else if report.killed_processes > 0 {
                         tracing::warn!(
                             "OOM protection: terminated {} stale process(es)",
                             report.killed_processes

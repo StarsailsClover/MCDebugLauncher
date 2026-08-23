@@ -160,6 +160,8 @@ pub fn manifest() -> Capabilities {
                     OptionSpec { key: "no-idle-timeout", values: "true", description: "Disable the idle watchdog entirely" },
                     OptionSpec { key: "oom-protect", values: "true|false", description: "Enable OOM self-protection: kill stale MC processes, trim working sets (default: true)" },
                     OptionSpec { key: "oom-aggressive", values: "true", description: "Aggressive OOM protection: also purge system standby list (requires admin)" },
+                    OptionSpec { key: "oom-confirm", values: "auto|always|never", description: "Second-confirmation policy before killing stale processes (default auto)" },
+                    OptionSpec { key: "oom-list-only", values: "true", description: "List OOM sweep candidates without terminating" },
                     OptionSpec { key: "javaagent", values: "<jar>[,<jar=params>...]", description: "Ad-hoc JavaAgent JAR(s) to attach at launch (comma-separated)" },
                 ],
             },
@@ -347,6 +349,9 @@ mod tests {
         let launch_opts: Vec<&str> = launch_cmd.options.iter().map(|o| o.key).collect();
         assert!(launch_opts.contains(&"idle-timeout"), "launch missing idle-timeout option");
         assert!(launch_opts.contains(&"no-idle-timeout"), "launch missing no-idle-timeout option");
+        // v26.3-alpha.2 OOM confirmation options.
+        assert!(launch_opts.contains(&"oom-confirm"), "launch missing oom-confirm option");
+        assert!(launch_opts.contains(&"oom-list-only"), "launch missing oom-list-only option");
         assert!(launch_opts.contains(&"oom-protect"), "launch missing oom-protect option");
         assert!(launch_opts.contains(&"oom-aggressive"), "launch missing oom-aggressive option");
         assert!(launch_opts.contains(&"javaagent"), "launch missing javaagent option");

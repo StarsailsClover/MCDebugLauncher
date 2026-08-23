@@ -756,6 +756,17 @@ enum Commands {
         #[arg(long)]
         oom_aggressive: bool,
 
+        /// OOM second-confirmation policy before killing stale processes:
+        /// auto (prompt only in interactive terminals, default), always,
+        /// never. v26.3-alpha.2.
+        #[arg(long, default_value = "auto")]
+        oom_confirm: String,
+
+        /// List OOM sweep candidates (PID / window title / memory) and skip
+        /// termination entirely. v26.3-alpha.2.
+        #[arg(long)]
+        oom_list_only: bool,
+
         /// Attach an ad-hoc JavaAgent JAR at launch. Use `jar` or `jar=params`.
         /// Can be repeated to attach multiple agents.
         #[arg(long = "javaagent")]
@@ -1121,8 +1132,8 @@ async fn run() -> Result<()> {
         Commands::List { version, loader, sort } => {
             cmd_list(&cli.format, version.as_deref(), loader.as_deref(), &sort).await?;
         }
-        Commands::Launch { name, username, server, fullscreen, width, height, detach, no_queue, agent, agent_port, java_path, memory, dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive, javaagents } => {
-            cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach, no_queue, agent, agent_port, java_path.as_deref(), memory.as_deref(), dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive, &javaagents).await?;
+        Commands::Launch { name, username, server, fullscreen, width, height, detach, no_queue, agent, agent_port, java_path, memory, dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive, oom_confirm, oom_list_only, javaagents } => {
+            cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach, no_queue, agent, agent_port, java_path.as_deref(), memory.as_deref(), dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive, &oom_confirm, oom_list_only, &javaagents).await?;
         }
         Commands::Diagnose { name, export, analyze } => {
             cmd_diagnose(&name, export.as_deref(), analyze).await?;
@@ -1612,6 +1623,8 @@ async fn cmd_launch(
     no_idle_timeout: bool,
     oom_protect: bool,
     oom_aggressive: bool,
+    oom_confirm: &str,
+    oom_list_only: bool,
     javaagents: &[String],
 ) -> Result<()> {
     use instance::{InstanceLauncher, launcher::LaunchOptions};
@@ -1636,6 +1649,8 @@ async fn cmd_launch(
         no_idle_timeout,
         oom_protect,
         oom_aggressive,
+        oom_confirm: Some(oom_confirm.to_string()),
+        oom_list_only,
         javaagents: javaagents.to_vec(),
     };
 

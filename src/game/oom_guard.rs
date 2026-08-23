@@ -48,6 +48,10 @@ use std::time::Duration;
 pub struct OomGuardReport {
     /// Number of stale Minecraft/Java processes that were terminated.
     pub killed_processes: u32,
+    /// Candidates found by the sweep (v26.3-alpha.2). Exceeds
+    /// `killed_processes` when the user aborted the confirmation prompt or
+    /// list-only mode was requested.
+    pub listed_candidates: usize,
     /// Working-set pages freed across all processes (best-effort, in bytes).
     /// Zero when the platform does not support working-set trimming.
     pub ws_freed_bytes: u64,
@@ -63,19 +67,25 @@ pub struct OomGuardReport {
 /// `skip_kill` — when true, do not terminate any processes (only trim).
 /// `aggressive` — when true, also purge system standby list (requires
 /// admin privileges; silently falls back to working-set trim only).
-pub async fn pre_launch_protection(skip_kill: bool, aggressive: bool) -> Result<OomGuardReport> {
+pub async fn pre_launch_protection(
+    confirm_mode: OomConfirmMode,
+    list_only: bool,
+    aggressive: bool,
+) -> Result<OomGuardReport> {
     let mut report = OomGuardReport::default();
 
-    // Phase 1: kill stale Minecraft processes.
-    if !skip_kill {
-        report.killed_processes = kill_stale_minecraft_processes().await;
+    // Phase 1: kill stale Minecraft processes (behind the confirmation gate).
+    {
+        let (killed, candidates) =
+            kill_stale_minecraft_processes(confirm_mode, list_only).await;
+        report.killed_processes = killed;
+        report.listed_candidates = candidates;
         if report.killed_processes > 0 {
             // Give the OS a moment to reclaim the freed pages before we
             // proceed to working-set trimming.
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
-
     // Phase 2: trim working sets of all processes.
     let before_avail = available_memory_bytes();
     report.ws_freed_bytes = trim_all_working_sets();
@@ -166,17 +176,21 @@ fn is_excluded_command(cmd_lower: &str, user_excludes: &[String]) -> bool {
 /// tracked by MDL's launch lock (i.e. not the current MDL-managed
 /// instance). Returns the number of processes killed.
 ///
+/// v26.3-alpha.2 adds a second-confirmation gate before any termination:
+/// every candidate is listed with PID, window title and memory footprint,
+/// and (depending on [`OomConfirmMode`]) an explicit y/N prompt is shown.
+///
 /// The current MDL process's own PID is always excluded. When a launch
 /// lock file exists, the PID recorded there is also preserved.
-pub async fn kill_stale_minecraft_processes() -> u32 {
+pub async fn kill_stale_minecraft_processes(mode: OomConfirmMode, list_only: bool) -> (u32, usize) {
     let our_pid = std::process::id();
 
     // Read the launch lock to find the currently-tracked game PID (if any).
     let protected_pid = read_launch_lock_pid().await;
 
-    let mut killed = 0u32;
     let processes = find_minecraft_processes();
-    for proc in &processes {
+    let mut candidates: Vec<ProcInfo> = Vec::new();
+    for proc in processes {
         if proc.pid == our_pid {
             continue;
         }
@@ -189,7 +203,76 @@ pub async fn kill_stale_minecraft_processes() -> u32 {
                 continue;
             }
         }
+        candidates.push(proc);
+    }
 
+    // Enrich with window titles (best-effort, Windows only).
+    for c in &mut candidates {
+        #[cfg(windows)]
+        {
+            c.title = crate::game::window::window_title_for_pid(c.pid);
+        }
+        #[cfg(not(windows))]
+        {
+            c.title = None;
+        }
+    }
+
+    // Always surface what was found — even before any prompting — so logs
+    // record exactly what the sweep considered.
+    for c in &candidates {
+        tracing::info!("{}", format_candidate_row(c));
+    }
+
+    if candidates.is_empty() {
+        return (0, 0);
+    }
+
+    if list_only {
+        tracing::info!(
+            "OOM protection: list-only mode, {} candidate(s) found, nothing terminated",
+            candidates.len()
+        );
+        println!(
+            "OOM protection (list-only): {} candidate(s):",
+            candidates.len()
+        );
+        for c in &candidates {
+            println!("  {}", format_candidate_row(c));
+        }
+        return (0, candidates.len());
+    }
+
+    // Second-confirmation gate.
+    if mode.should_prompt(stdin_is_interactive()) {
+        println!(
+            "OOM protection wants to terminate {} stale process(es) listed above.",
+            candidates.len()
+        );
+        print!("Proceed with termination? [y/N] ");
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        let ok = std::io::stdin().read_line(&mut line)
+            .map(|_| {
+                let a = line.trim().to_ascii_lowercase();
+                a == "y" || a == "yes"
+            })
+            .unwrap_or(false);
+        if !ok {
+            tracing::info!("OOM protection: termination aborted by user");
+            println!("Aborted — stale processes were left running.");
+            return (0, candidates.len());
+        }
+    } else if mode == OomConfirmMode::Auto && !stdin_is_interactive() {
+        tracing::info!(
+            "OOM protection: non-interactive session, terminating {} candidate(s) without prompt",
+            candidates.len()
+        );
+    }
+
+    let mut killed = 0u32;
+    for proc in &candidates {
         tracing::warn!(
             "OOM protection: terminating stale process '{}' (PID {}, RSS={} MB)",
             proc.name,
@@ -208,7 +291,80 @@ pub async fn kill_stale_minecraft_processes() -> u32 {
         tracing::info!("OOM protection: terminated {} stale process(es)", killed);
     }
 
-    killed
+    (killed, candidates.len())
+}
+
+/// One line describing a sweep candidate: PID, name, memory, window title.
+fn format_candidate_row(c: &ProcInfo) -> String {
+    const MAX_TITLE: usize = 48;
+    let title = match &c.title {
+        Some(t) => {
+            let t = t.trim();
+            if t.chars().count() > MAX_TITLE {
+                let cut: String = t.chars().take(MAX_TITLE).collect();
+                format!("{cut}…")
+            } else if t.is_empty() {
+                "-".into()
+            } else {
+                t.to_string()
+            }
+        }
+        None => "-".into(),
+    };
+    format!(
+        "PID {:>7}  {:<22} {:>6} MB  title: {}",
+        c.pid,
+        truncate_str(&c.name, 22),
+        c.rss_bytes / 1024 / 1024,
+        title
+    )
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        s.chars().take(max - 1).collect::<String>() + "…"
+    }
+}
+
+fn stdin_is_interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal()
+}
+
+/// Policy for the second-confirmation prompt before terminations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OomConfirmMode {
+    /// Prompt only when stdin is an interactive terminal; unattended runs
+    /// proceed without prompting (preserves agent automation).
+    #[default]
+    Auto,
+    /// Always prompt, regardless of TTY state (EOF reads count as "No").
+    Always,
+    /// Never prompt — terminate immediately after listing targets.
+    Never,
+}
+
+impl OomConfirmMode {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "always" => Ok(Self::Always),
+            "never" => Ok(Self::Never),
+            other => anyhow::bail!(
+                "Invalid --oom-confirm value '{other}' (expected auto|always|never)"
+            ),
+        }
+    }
+
+    fn should_prompt(self, stdin_tty: bool) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::Auto => stdin_tty,
+        }
+    }
 }
 
 /// Information about a running process found during scanning.
@@ -217,6 +373,8 @@ struct ProcInfo {
     pid: u32,
     name: String,
     rss_bytes: u64,
+    /// Best-effort visible window title (Windows only; filled after scan).
+    title: Option<String>,
 }
 
 /// Scan running processes for Minecraft/Java processes.
@@ -286,6 +444,7 @@ fn find_minecraft_processes() -> Vec<ProcInfo> {
             pid: pid.as_u32(),
             name,
             rss_bytes: proc.memory(),
+            title: None,
         });
     }
 
@@ -553,9 +712,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_confirm_mode_parse() {
+        assert_eq!(OomConfirmMode::parse("auto").unwrap(), OomConfirmMode::Auto);
+        assert_eq!(OomConfirmMode::parse("ALWAYS").unwrap(), OomConfirmMode::Always);
+        assert_eq!(OomConfirmMode::parse("never").unwrap(), OomConfirmMode::Never);
+        assert!(OomConfirmMode::parse("yes").is_err());
+        assert!(OomConfirmMode::parse("").is_err());
+    }
+
+    #[test]
+    fn test_should_prompt_truth_table() {
+        // Auto: only when stdin is a TTY.
+        assert!(OomConfirmMode::Auto.should_prompt(true));
+        assert!(!OomConfirmMode::Auto.should_prompt(false));
+        // Always/Never are unconditional.
+        assert!(OomConfirmMode::Always.should_prompt(false));
+        assert!(!OomConfirmMode::Never.should_prompt(true));
+    }
+
+    #[test]
+    fn test_format_candidate_row_truncates_title() {
+        let c = ProcInfo {
+            pid: 1234,
+            name: "javaw.exe".into(),
+            rss_bytes: 2 * 1024 * 1024 * 1024,
+            title: Some("Minecraft* 1.21.1 - some very long window title that goes on".into()),
+        };
+        let row = format_candidate_row(&c);
+        assert!(row.contains("PID    1234"));
+        assert!(row.contains("2048 MB"));
+        assert!(row.contains('…')); // truncated
+        // No-title fallback.
+        let c2 = ProcInfo { pid: 5, name: "java".into(), rss_bytes: 0, title: None };
+        let row2 = format_candidate_row(&c2);
+        assert!(row2.contains("title: -"));
+    }
+
+    #[test]
     fn test_oom_guard_report_serializes() {
         let report = OomGuardReport {
             killed_processes: 2,
+            listed_candidates: 2,
             ws_freed_bytes: 1_073_741_824, // 1 GB
             standby_purged: true,
             available_after_bytes: 8_589_934_592, // 8 GB
@@ -569,6 +766,7 @@ mod tests {
     fn test_oom_guard_report_defaults() {
         let report = OomGuardReport::default();
         assert_eq!(report.killed_processes, 0);
+        assert_eq!(report.listed_candidates, 0);
         assert_eq!(report.ws_freed_bytes, 0);
         assert!(!report.standby_purged);
         assert_eq!(report.available_after_bytes, 0);
@@ -583,8 +781,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_pre_launch_protection_skip_kill() {
-        // With skip_kill=true, no processes should be terminated.
-        let report = pre_launch_protection(true, false).await.unwrap();
+        // Never-confirm mode keeps the sweep non-interactive in tests; no
+        // processes should be terminated (nothing matches in CI anyway).
+        let report =
+            pre_launch_protection(OomConfirmMode::Never, false, false).await.unwrap();
         assert_eq!(report.killed_processes, 0);
         // available_after_bytes should be non-zero (we have *some* RAM).
         assert!(report.available_after_bytes > 0);
@@ -592,8 +792,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_pre_launch_protection_non_aggressive() {
-        let report = pre_launch_protection(true, false).await.unwrap();
+        let report =
+            pre_launch_protection(OomConfirmMode::Never, false, false).await.unwrap();
         assert!(!report.standby_purged, "Standby should not be purged in non-aggressive mode");
+    }
+
+    #[tokio::test]
+    async fn test_pre_launch_protection_list_only_kills_nothing() {
+        let report =
+            pre_launch_protection(OomConfirmMode::Never, true, false).await.unwrap();
+        assert_eq!(
+            report.killed_processes, 0,
+            "list-only mode must never terminate"
+        );
     }
 
     #[test]
