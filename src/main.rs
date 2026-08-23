@@ -609,6 +609,16 @@ enum ServerCommands {
         #[command(subcommand)]
         action: BanCommands,
     },
+    /// Rotate the RCON password of a managed server (v26.3-alpha.5).
+    /// Updates server.properties + server.json. A running server keeps the
+    /// OLD password until restarted.
+    RotateRcon {
+        /// Server name
+        name: String,
+        /// Print the new password to stdout (default: masked)
+        #[arg(long)]
+        show: bool,
+    },
     /// Show server status (running PID, version)
     Status {
         /// Server name
@@ -1439,6 +1449,7 @@ async fn run() -> Result<()> {
                 BanCommands::Remove { player } => cmd_server_rcon(&name, &format!("pardon {player}")).await?,
                 BanCommands::List => cmd_server_json_names(&name, "banned-players.json", "Banned players")?,
             },
+            ServerCommands::RotateRcon { name, show } => { cmd_server_rotate_rcon(&name, show)?; }
             ServerCommands::Status { name } => { cmd_server_status(&cli.format, &name); }
         },
         Commands::Inject { target, dll } => { cmd_inject(&target, &dll).await?; }
@@ -4252,6 +4263,25 @@ async fn cmd_server_stop(name: &str) -> Result<()> {
     let info = loader::server::load_server(name)?;
     loader::server::stop_server(&info).await?;
     println!("Server '{}' stopped", name);
+    Ok(())
+}
+
+/// Rotate a managed server's RCON password (v26.3-alpha.5).
+fn cmd_server_rotate_rcon(name: &str, show: bool) -> Result<()> {
+    let mut info = loader::server::load_server(name)?;
+    let running = info.dir().ok().and_then(|d| loader::server::running_pid(&d));
+    let new_pw = loader::server::rotate_rcon_password(&mut info)?;
+    println!("RCON password rotated for '{}'.", name);
+    if show {
+        println!("  New password: {new_pw}");
+    } else {
+        println!("  New password: ******** (pass --show to display; also stored in server.json)");
+    }
+    if running.is_some() {
+        println!("Note: the server is RUNNING and still uses the old password — restart it to pick up the new one.");
+    } else {
+        println!("Applies on next start.");
+    }
     Ok(())
 }
 

@@ -425,8 +425,9 @@ pub fn kill_pid(pid: u32) -> Result<()> {
 /// Generate a random-looking RCON password (24 hex chars). Entropy comes
 /// from the current time (nanos), the process id and an atomic counter,
 /// hashed through SHA1 — sufficient for a localhost-only control channel
-/// that never leaves the machine.
-fn generate_rcon_password() -> String {
+/// that never leaves the machine. Public since v26.3-alpha.5 for
+/// `mdl server rotate-rcon`.
+pub fn generate_rcon_password() -> String {
     use sha1::{Digest, Sha1};
     use std::sync::atomic::{AtomicU32, Ordering};
     static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -443,6 +444,36 @@ fn generate_rcon_password() -> String {
     // Hex-encode the first 12 bytes -> 24 hex chars.
     let hex: String = digest[..12].iter().map(|b| format!("{:02x}", b)).collect();
     hex
+}
+
+/// Rotate a managed server's RCON password (v26.3-alpha.5): generates a
+/// fresh password, updates server.properties AND server.json atomically
+/// enough for MDL's purposes (both writes happen back-to-back; the props
+/// file is what the running server reads at boot).
+///
+/// Returns the new password so the CLI can decide whether to display it.
+pub fn rotate_rcon_password(info: &mut ServerInfo) -> Result<String> {
+    let new_pw = generate_rcon_password();
+    let dir = info.dir()?;
+    let props_path = dir.join("server.properties");
+    let mut props = crate::loader::props::PropertiesFile::load(&props_path)
+        .with_context(|| {
+            "server.properties missing — enable RCON manually or re-create the server".to_string()
+        })?;
+    props.set("enable-rcon", "true");
+    if info.rcon_port.is_none() {
+        info.rcon_port = Some(25575);
+        props.set("rcon.port", "25575");
+    }
+    props.set("rcon.password", &new_pw);
+    props.save(&props_path)?;
+
+    info.rcon_port = Some(props.get("rcon.port").and_then(|v| v.parse().ok()).unwrap_or(25575));
+    info.rcon_password = Some(new_pw.clone());
+    let meta = dir.join("server.json");
+    std::fs::write(&meta, serde_json::to_string_pretty(info)?)
+        .with_context(|| format!("Failed to update {}", meta.display()))?;
+    Ok(new_pw)
 }
 
 #[cfg(test)]

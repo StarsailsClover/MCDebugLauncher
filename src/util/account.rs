@@ -87,6 +87,9 @@ pub fn list_accounts() -> Vec<MinecraftAccount> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for e in entries.flatten() {
             if e.path().extension().and_then(|s| s.to_str()) == Some("json") {
+                // v26.3-alpha.5: tighten permissions of files written before
+                // hardening (best-effort, idempotent).
+                restrict_permissions(&e.path());
                 // BOM-tolerant parse (v26.3-alpha.1); unparseable files are
                 // skipped so one bad file cannot hide the other accounts.
                 if let Ok(acc) = crate::util::jsonio::parse_sync::<MinecraftAccount>(&e.path(), "account") {
@@ -288,7 +291,46 @@ fn save_account(acc: &MinecraftAccount) -> Result<()> {
     let dir = accounts_dir()?;
     let path = dir.join(format!("{}.json", acc.uuid));
     std::fs::write(&path, serde_json::to_string_pretty(acc)?)?;
+    restrict_permissions(&path);
     Ok(())
+}
+
+/// v26.3-alpha.5: restrict a credential file to the current user.
+///
+/// These files hold Microsoft refresh tokens + Minecraft access tokens —
+/// on multi-user machines any local account could previously read them via
+/// default ACL inheritance. Best-effort by contract: failures are logged,
+/// never fatal (a locked-down temp FS must not break login).
+///
+/// - Windows: strip inherited ACEs, grant only the current user Full control
+/// - Unix: chmod 600
+fn restrict_permissions(path: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        let user = std::env::var("USERNAME").unwrap_or_else(|_| "%USERNAME%".into());
+        let out = std::process::Command::new("icacls")
+            .arg(path)
+            .args(["/inheritance:r"])
+            .args(["/grant:r", &format!("{user}:F")])
+            .output();
+        if let Ok(o) = out {
+            if !o.status.success() {
+                tracing::debug!(
+                    "icacls hardening failed for {}: {}",
+                    path.display(),
+                    String::from_utf8_lossy(&o.stderr)
+                );
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(mut perm) = std::fs::metadata(path).map(|m| m.permissions()) {
+            perm.set_mode(0o600);
+            let _ = std::fs::set_permissions(path, perm);
+        }
+    }
 }
 
 pub fn find_account(uuid_or_name: &str) -> Option<MinecraftAccount> {

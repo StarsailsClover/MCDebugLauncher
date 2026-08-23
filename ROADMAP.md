@@ -33,7 +33,7 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha 2 | OOM 二次确认 + 跨平台矩阵 | 杀进程前列出候选（PID/进程名/内存/窗口标题）并按 `--oom-confirm auto\|always\|never` 门控（auto 仅交互终端提示）；`--oom-list-only` 干跑枚举；agent execute 透传 `oom-confirm`/`oom-list-only`；docs/PLATFORM_MATRIX.md 平台门控审计（linux/macos 编译验证待 CI，宿主镜像 404 阻断） | ✅ 已完成 |
 | Alpha 3 | 诊断增强 | `DiagnosticReport` 新增 `idle_timeout_event`（runtime/idle_timeout 标记解析）与 `last_launch_metrics`；崩溃存在时输出关联启发式（watchdog 挂死签名 / 从未就绪即崩 / 同日时间链接）；文本与 JSON 导出同步渲染 | ✅ 已完成 |
 | Alpha 4 | 服务端深化 | `server.properties` 结构化编辑器 `mdl server props list/get/set`（注释与顺序保留、重复键折叠）；封装命令：`allowlist add/remove/list/enable/disable`（RCON 运行态 + 停止态文件回退 + 属性开关）、`op add/remove/list`、`ban add/pardon/list`（列表走 JSON 文件，停止态可用） | ✅ 已完成 |
-| Alpha 5 | 安全加固 | accounts token 文件权限收紧；RCON 密码轮换命令 | 📋 规划中 |
+| Alpha 5 | OOM 误杀修复 + 安全加固 | **修复误杀**：正向匹配收紧为强启动标记（net.minecraft./cpw.mods./--gameDir/fabricloader/neoforge- 等 12 项），工作区路径含 "Minecraft" 的 Kotlin 编译守护/JPS 构建/Maven fork/JDT 不再中招；排除表补充 kotlincompiledaemon/org.jetbrains.jps/org.eclipse.jdt/maven/surefirebooter；java/javaw 一律走命令行判定（不再走原生名直通）。**安全加固**：accounts 凭据文件 ACL 收紧（Windows 去继承仅留当前用户 / Unix 600，存量文件幂等回补）；`mdl server rotate-rcon [--show]` 密码轮换同步 props+json | ✅ 已完成 |
 | Alpha 6 | 性能基线 | 启动耗时基准脚本 + 回归阈值门 | 📋 规划中 |
 | Alpha 7 | 文档刷新 | AGENT_API/specification 与 v26.3 面对齐；examples 更新 | 📋 规划中 |
 | Alpha 8 | 解析器模糊测试 | cargo-fuzz 关键解析路径（mrpack/log/manifest） | 📋 规划中 |
