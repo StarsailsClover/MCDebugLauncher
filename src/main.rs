@@ -1915,6 +1915,38 @@ async fn cmd_diagnose(name: &str, export: Option<&str>, analyze: bool) -> Result
         println!("No crash reports found\n");
     }
 
+    // v26.3-alpha.3: runtime events + launch correlation.
+    if let Some(ev) = &report.idle_timeout_event {
+        println!("Runtime Events:");
+        println!(
+            "  Idle watchdog terminated this game at {} (PID {}, silent for {}s)",
+            ev.timestamp, ev.pid, ev.idle_seconds
+        );
+        println!();
+    }
+
+    if let Some(m) = &report.last_launch_metrics {
+        println!("Last Launch ({})", m.timestamp);
+        println!("  spawn: {:.1}s | ready: {}",
+            m.spawn_secs,
+            match m.ready_secs { Some(r) => format!("{:.1}s", r), None => "n/a".into() });
+        println!("  downloads: {} file(s), {} | cache hits: {}",
+            m.downloads,
+            format_bytes(m.download_bytes),
+            m.cache_hits);
+        println!();
+
+        if !report.crash_reports.is_empty() {
+            println!("Correlation Notes:");
+            for note in diagnostic::collector::build_correlation_notes(
+                true, report.idle_timeout_event.as_ref(), Some(m),
+            ) {
+                println!("  - {}", note);
+            }
+            println!();
+        }
+    }
+
     // Export if requested
     if let Some(export_path) = export {
         let export_file = std::path::Path::new(export_path);

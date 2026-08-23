@@ -20,6 +20,80 @@ pub struct DiagnosticReport {
     /// mclog-analyzer parser.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analysis: Option<LogAnalysisSummary>,
+    /// v26.3-alpha.3: last recorded idle-watchdog termination for this
+    /// instance, if any (from runtime/idle_timeout).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_event: Option<IdleTimeoutEvent>,
+    /// v26.3-alpha.3: most recent launch metrics (spawn/ready timings,
+    /// download volume, cache hits) for crash correlation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_launch_metrics: Option<crate::util::metrics::LaunchMetrics>,
+}
+
+/// One recorded idle-watchdog termination (marker file written by
+/// game::watchdog when it kills an unresponsive game).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdleTimeoutEvent {
+    pub instance: String,
+    pub pid: u32,
+    pub idle_seconds: u64,
+    pub timestamp: String,
+}
+
+/// Read and parse the idle-timeout marker from an instance's runtime dir.
+/// Returns None when absent or unparseable.
+pub fn read_idle_timeout_marker(instance_dir: &Path) -> Option<IdleTimeoutEvent> {
+    let path = instance_dir.join("runtime").join("idle_timeout");
+    crate::util::jsonio::parse_sync::<IdleTimeoutEvent>(&path, "idle timeout event").ok()
+}
+
+/// Human-readable correlation notes between observed failures and the last
+/// recorded launch (v26.3-alpha.3). Pure function so heuristics are unit
+/// testable; rendering stays in the CLI layer.
+///
+/// Heuristics (deliberately conservative — each states its evidence):
+/// 1. Idle watchdog fired → the game stopped producing output and was killed
+///    (hang/freeze class, not a JVM crash).
+/// 2. Crash reports exist but the last launch never reached ready → likely
+///    crashed during startup/loading.
+/// 3. Crash on the same calendar day as the last launch → temporal link.
+pub fn build_correlation_notes(
+    has_crashes: bool,
+    idle_event: Option<&IdleTimeoutEvent>,
+    launch: Option<&crate::util::metrics::LaunchMetrics>,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+
+    if let Some(ev) = idle_event {
+        notes.push(format!(
+            "The game was terminated by the idle watchdog after {}s of silence \
+             at {} — this is a hang/freeze signature, not a JVM crash",
+            ev.idle_seconds, ev.timestamp
+        ));
+    }
+
+    if has_crashes {
+        if let Some(m) = launch {
+            if m.ready_secs.is_none() {
+                notes.push(
+                    "The last recorded launch never reached the ready state — \
+                     the crash likely happened during startup or world load"
+                        .to_string(),
+                );
+            }
+            // Same-calendar-day link: crash report timestamps carry only the
+            // date (from the filename), so compare date prefixes.
+            let launch_date = &m.timestamp[..10.min(m.timestamp.len())];
+            if !launch_date.is_empty() {
+                notes.push(format!(
+                    "Crash report(s) dated {} may correspond to the last launch at {}",
+                    launch_date, m.timestamp
+                ));
+            }
+        }
+    }
+
+    notes
 }
 
 /// Structured analysis summary embedded in the diagnostic report.
@@ -126,6 +200,8 @@ impl DiagnosticCollector {
             crash_reports,
             errors,
             analysis,
+            idle_timeout_event: read_idle_timeout_marker(&self.instance_dir),
+            last_launch_metrics: crate::util::metrics::load_latest(&self.instance_dir),
         })
     }
 
@@ -296,5 +372,85 @@ impl DiagnosticCollector {
         let json = serde_json::to_string_pretty(report)?;
         fs::write(output_path, json).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::util::metrics::LaunchMetrics;
+    use tempfile::TempDir;
+
+    fn sample_event() -> IdleTimeoutEvent {
+        IdleTimeoutEvent {
+            instance: "t".into(),
+            pid: 42,
+            idle_seconds: 60,
+            timestamp: "2026-08-23T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn test_read_idle_marker_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let rt = dir.path().join("runtime");
+        std::fs::create_dir_all(&rt).unwrap();
+        std::fs::write(
+            rt.join("idle_timeout"),
+            r#"{"instance":"t","pid":42,"idle_seconds":60,"timestamp":"2026-08-23T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let ev = read_idle_timeout_marker(dir.path()).unwrap();
+        assert_eq!(ev.pid, 42);
+        assert_eq!(ev.idle_seconds, 60);
+    }
+
+    #[test]
+    fn test_read_idle_marker_missing() {
+        let dir = TempDir::new().unwrap();
+        assert!(read_idle_timeout_marker(dir.path()).is_none());
+    }
+
+    #[test]
+    fn test_correlation_idle_only() {
+        let ev = sample_event();
+        let notes = build_correlation_notes(false, Some(&ev), None);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("idle watchdog"));
+    }
+
+    #[test]
+    fn test_correlation_crash_without_ready() {
+        let m = LaunchMetrics {
+            timestamp: "2026-08-23T01:00:00Z".into(),
+            instance: "t".into(),
+            pid: 1,
+            detached: true,
+            spawn_secs: 2.0,
+            ready_secs: None,
+            download_bytes: 0,
+            downloads: 0,
+            cache_hits: 0,
+        };
+        let notes = build_correlation_notes(true, None, Some(&m));
+        assert!(notes.iter().any(|n| n.contains("never reached the ready state")));
+        assert!(notes.iter().any(|n| n.contains("2026-08-23")));
+    }
+
+    #[test]
+    fn test_correlation_healthy_launch_no_notes() {
+        // Ready launch, no crashes -> no speculative notes.
+        let m = LaunchMetrics {
+            timestamp: "2026-08-23T01:00:00Z".into(),
+            instance: "t".into(),
+            pid: 1,
+            detached: true,
+            spawn_secs: 2.0,
+            ready_secs: Some(20.0),
+            download_bytes: 0,
+            downloads: 0,
+            cache_hits: 0,
+        };
+        assert!(build_correlation_notes(false, None, Some(&m)).is_empty());
     }
 }

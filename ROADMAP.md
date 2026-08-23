@@ -31,7 +31,7 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 |---|---|---|---|
 | Alpha 1 | 输入校验 + 配置容错 + Agent API 补全 | 名称白名单校验（create/rename/clone/server create；保留设备名黑名单、路径分隔符、尾点/尾空格）；BOM 容错 JSON 读取助手覆盖 instance/server/account/metrics/javaagent 全部配置点且报错含文件路径；attach 错误归因修正（非 JVM ≠ 模块缺失）；REST `/api/v1/instance/:name/metrics`+`/disk`；execute 新增 `metrics`/`disk`/`inject-agent`/`server-cmd` 映射；capabilities 同步 | ✅ 已完成 |
 | Alpha 2 | OOM 二次确认 + 跨平台矩阵 | 杀进程前列出候选（PID/进程名/内存/窗口标题）并按 `--oom-confirm auto\|always\|never` 门控（auto 仅交互终端提示）；`--oom-list-only` 干跑枚举；agent execute 透传 `oom-confirm`/`oom-list-only`；docs/PLATFORM_MATRIX.md 平台门控审计（linux/macos 编译验证待 CI，宿主镜像 404 阻断） | ✅ 已完成 |
-| Alpha 3 | 诊断增强 | diagnose 集成 watchdog/idle 事件摘要；崩溃报告自动关联最近一次启动指标 | 📋 规划中 |
+| Alpha 3 | 诊断增强 | `DiagnosticReport` 新增 `idle_timeout_event`（runtime/idle_timeout 标记解析）与 `last_launch_metrics`；崩溃存在时输出关联启发式（watchdog 挂死签名 / 从未就绪即崩 / 同日时间链接）；文本与 JSON 导出同步渲染 | ✅ 已完成 |
 | Alpha 4 | 服务端深化 | server.properties 结构化编辑；whitelist/op/ban 封装命令 | 📋 规划中 |
 | Alpha 5 | 安全加固 | accounts token 文件权限收紧；RCON 密码轮换命令 | 📋 规划中 |
 | Alpha 6 | 性能基线 | 启动耗时基准脚本 + 回归阈值门 | 📋 规划中 |
