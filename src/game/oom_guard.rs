@@ -24,6 +24,21 @@
 //
 // On non-Windows platforms the functions are no-ops (or use `kill`/`sync`
 // equivalents where applicable).
+//
+// v26.2 exclusions:
+// The stale-process heuristic targets any `java` process whose command line
+// mentions "minecraft" — which also matches *build toolchain* processes
+// forked inside projects whose paths contain "Minecraft" (Gradle workers,
+// NeoGradle's JST source transformer, decompiler forks, ...). Killing those
+// silently breaks long builds. Two layers of exclusions now apply:
+//
+// 1. **Built-in dev-toolchain exclusions** — command-line substrings that
+//    identify well-known build infrastructure (`gradle`, `jst-cli`, ...).
+// 2. **User exclusions file** — `<data_dir>/oom_excludes.txt`, one
+//    case-insensitive substring per line, `#` comments allowed. Extra
+//    entries are merged with the built-in list.
+//
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
 
 use anyhow::Result;
 use std::time::Duration;
@@ -97,6 +112,56 @@ const MINECRAFT_PROCESS_NAMES: &[&str] = &[
     "MinecraftLauncher.exe",
 ];
 
+/// Command-line substrings that identify build-toolchain processes which
+/// must never be terminated by the stale-process sweep, even when their
+/// command line mentions "minecraft" (e.g. projects living under a
+/// `...\Minecraft\...` directory). Matched case-insensitively.
+///
+/// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+const BUILTIN_EXCLUDE_SUBSTRINGS: &[&str] = &[
+    "gradle",                          // Gradle daemons, workers, wrappers
+    "org.gradle.launcher",             // explicit launcher classes (belt & braces)
+    "jst-cli",                         // NeoGradle JST source transformer
+    "javac",                           // Java compiler forks
+    "forgeflower",                     // NeoForm/ForgeGradle deobfuscator
+    "vineflower",                      // decompiler forks
+    "cfr",                             // decompiler forks
+    "fernflower",                      // decompiler forks
+    "net.neoforged",                   // NeoGradle/NeoForm utility JVMs
+    "net.minecraftforge",              // ForgeGradle utility JVMs
+];
+
+/// Load user-defined exclusion substrings from
+/// `<data_dir>/oom_excludes.txt` (one substring per line, `#` comments).
+/// Missing file yields an empty list; the result is merged with
+/// [`BUILTIN_EXCLUDE_SUBSTRINGS`] by the caller.
+fn load_user_exclusions() -> Vec<String> {
+    let path = match crate::util::paths::get_data_dir() {
+        Ok(d) => d.join("oom_excludes.txt"),
+        Err(_) => return Vec::new(),
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Check whether a lowercased command line matches any exclusion
+/// (built-in or user-provided).
+fn is_excluded_command(cmd_lower: &str, user_excludes: &[String]) -> bool {
+    BUILTIN_EXCLUDE_SUBSTRINGS
+        .iter()
+        .copied()
+        .chain(user_excludes.iter().map(|s| s.as_str()))
+        .any(|ex| cmd_lower.contains(ex))
+}
+
 /// Detect and terminate stale Minecraft / Java processes that are not
 /// tracked by MDL's launch lock (i.e. not the current MDL-managed
 /// instance). Returns the number of processes killed.
@@ -162,6 +227,13 @@ fn find_minecraft_processes() -> Vec<ProcInfo> {
     sys.refresh_processes_specifics(ProcessRefreshKind::everything());
 
     let mut result = Vec::new();
+    let user_excludes = load_user_exclusions();
+    if !user_excludes.is_empty() {
+        tracing::debug!(
+            "OOM protection: {} user exclusion entr(ies) loaded",
+            user_excludes.len()
+        );
+    }
     for (pid, proc) in sys.processes() {
         let name = proc.name().to_string();
         let lower = name.to_lowercase();
@@ -179,7 +251,7 @@ fn find_minecraft_processes() -> Vec<ProcInfo> {
 
         // Heuristic: only target java processes whose command line contains
         // "minecraft" or "net.minecraft" — avoid killing unrelated Java apps
-        // (IDEs, Gradle daemons, other JVM-based tools).
+        // (IDEs, other JVM-based tools).
         if is_java_generic || lower.ends_with(".exe") {
             let cmdline = proc
                 .cmd()
@@ -193,6 +265,19 @@ fn find_minecraft_processes() -> Vec<ProcInfo> {
                 && !cmd_lower.contains("mcp")
                 && !cmd_lower.contains("mdriven")
             {
+                continue;
+            }
+
+            // Exclusion layer: build toolchain processes (Gradle workers,
+            // JST, decompiler forks, ...) frequently reference project paths
+            // that contain "Minecraft". Never terminate those.
+            //
+            // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+            if is_excluded_command(&cmd_lower, &user_excludes) {
+                tracing::debug!(
+                    "OOM protection: skipping excluded process PID {} (build toolchain match)",
+                    pid.as_u32()
+                );
                 continue;
             }
         }
@@ -521,5 +606,44 @@ mod tests {
     fn test_read_launch_lock_pid_returns_none_when_no_file() {
         // The lock file may or may not exist; this just verifies no panic.
         // We can't easily control the lock file state in a unit test.
+    }
+
+    #[test]
+    fn test_builtin_excludes_cover_build_toolchain() {
+        // Gradle daemon / JST command lines as observed in the field.
+        let gradle_daemon = "c:\\java\\jdk-25\\bin\\java.exe --add-opens=java.base/java.lang=all-unnamed \
+            -cp c:\\users\\x\\.gradle\\wrapper\\dists\\gradle-9.2.1\\lib\\gradle-launcher-9.2.1.jar \
+            org.gradle.launcher.daemon.bootstrap.gradledaemon 9.2.1";
+        assert!(is_excluded_command(gradle_daemon, &[]));
+
+        let jst = "java.exe -cp ...jst-cli-bundle-2.0.1.jar... com.intellij.util.containers.unsafe \
+            c:\\users\\x\\.gradle\\caches\\... net.neoforged.jst.cli";
+        assert!(is_excluded_command(jst, &[]));
+    }
+
+    #[test]
+    fn test_exclusions_do_not_shadow_real_game() {
+        // A vanilla-ish game launch must NOT match any exclusion substring.
+        let game = "\"c:\\program files\\java\\bin\\javaw.exe\" -Xmx4G \
+            -cp libraries.jar net.minecraft.client.main.Main --username TestPlayer";
+        assert!(!is_excluded_command(game, &[]));
+    }
+
+    #[test]
+    fn test_user_exclusions_are_merged_and_case_insensitive() {
+        // Contract: user entries arrive lowercased (load_user_exclusions
+        // lowercases them) and cmd_lower is lowercased by the caller.
+        let user = vec!["mycustomtool".to_string()];
+        assert!(is_excluded_command("java -jar mycustomtool.jar", &user));
+        assert!(is_excluded_command(
+            "java -cp something;gradle-worker.jar worker",
+            &user
+        ));
+    }
+
+    #[test]
+    fn test_load_user_exclusions_no_panic() {
+        // File may not exist in test environments; must yield empty list.
+        let _ = load_user_exclusions();
     }
 }
