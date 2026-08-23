@@ -1,6 +1,6 @@
 [package]
 name = "mcdebug-launcher"
-version = "26.3.0-alpha.3"
+version = "26.3.0-alpha.4"
 edition = "2021"
 authors = ["Sails <sails@example.com>"]
 license = "Apache-2.0"

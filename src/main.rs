@@ -579,11 +579,94 @@ enum ServerCommands {
         #[arg(allow_hyphen_values = true)]
         command: Vec<String>,
     },
+    /// Edit server.properties with comment/order preservation (v26.3-alpha.4)
+    Props {
+        /// Server name
+        name: String,
+        #[command(subcommand)]
+        action: PropsCommands,
+    },
+    /// Manage the allowlist (whitelist). add/remove/list need a running
+    /// server (RCON); enable/disable edit server.properties and work when
+    /// stopped (restart required to apply).
+    Allowlist {
+        /// Server name
+        name: String,
+        #[command(subcommand)]
+        action: AllowlistCommands,
+    },
+    /// Grant operator status (RCON, running) or list ops (ops.json)
+    Op {
+        /// Server name
+        name: String,
+        #[command(subcommand)]
+        action: OpCommands,
+    },
+    /// Ban/pardon players (RCON) or list bans (banned-players.json)
+    Ban {
+        /// Server name
+        name: String,
+        #[command(subcommand)]
+        action: BanCommands,
+    },
     /// Show server status (running PID, version)
     Status {
         /// Server name
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum PropsCommands {
+    /// List all key=value pairs
+    List,
+    /// Read one key
+    Get {
+        /// Property key
+        key: String,
+    },
+    /// Write one key (creates or replaces; comments preserved)
+    Set {
+        /// Property key
+        key: String,
+        /// Property value
+        #[arg(allow_hyphen_values = true)]
+        value: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum AllowlistCommands {
+    /// Add a player to the allowlist (RCON)
+    Add { player: String },
+    /// Remove a player from the allowlist (RCON)
+    Remove { player: String },
+    /// List allowlisted players (RCON when running, else whitelist.json)
+    List,
+    /// Enable the allowlist in server.properties (white-list + enforce-whitelist)
+    Enable,
+    /// Disable the allowlist in server.properties
+    Disable,
+}
+
+#[derive(Subcommand)]
+enum OpCommands {
+    /// Grant operator status to a player (RCON)
+    Add { player: String },
+    /// Revoke operator status from a player (RCON)
+    Remove { player: String },
+    /// List operators (from ops.json; works stopped or running)
+    List,
+}
+
+#[derive(Subcommand)]
+enum BanCommands {
+    /// Ban a player (RCON)
+    Add { player: String },
+    /// Pardon a banned player (RCON)
+    Remove { player: String },
+    /// List banned players (from banned-players.json)
+    List,
 }
 
 #[derive(Subcommand)]
@@ -1334,6 +1417,28 @@ async fn run() -> Result<()> {
             ServerCommands::Cmd { name, command } => {
                 cmd_server_cmd(&name, &command.join(" ")).await?;
             }
+            ServerCommands::Props { name, action } => match action {
+                PropsCommands::List => cmd_server_props_list(&name)?,
+                PropsCommands::Get { key } => cmd_server_props_get(&name, &key)?,
+                PropsCommands::Set { key, value } => cmd_server_props_set(&name, &key, &value)?,
+            },
+            ServerCommands::Allowlist { name, action } => match action {
+                AllowlistCommands::Add { player } => cmd_server_rcon(&name, &format!("whitelist add {player}")).await?,
+                AllowlistCommands::Remove { player } => cmd_server_rcon(&name, &format!("whitelist remove {player}")).await?,
+                AllowlistCommands::List => cmd_server_allowlist_list(&name).await?,
+                AllowlistCommands::Enable => cmd_server_toggle_whitelist(&name, true)?,
+                AllowlistCommands::Disable => cmd_server_toggle_whitelist(&name, false)?,
+            },
+            ServerCommands::Op { name, action } => match action {
+                OpCommands::Add { player } => cmd_server_rcon(&name, &format!("op {player}")).await?,
+                OpCommands::Remove { player } => cmd_server_rcon(&name, &format!("deop {player}")).await?,
+                OpCommands::List => cmd_server_json_names(&name, "ops.json", "Operators")?,
+            },
+            ServerCommands::Ban { name, action } => match action {
+                BanCommands::Add { player } => cmd_server_rcon(&name, &format!("ban {player}")).await?,
+                BanCommands::Remove { player } => cmd_server_rcon(&name, &format!("pardon {player}")).await?,
+                BanCommands::List => cmd_server_json_names(&name, "banned-players.json", "Banned players")?,
+            },
             ServerCommands::Status { name } => { cmd_server_status(&cli.format, &name); }
         },
         Commands::Inject { target, dll } => { cmd_inject(&target, &dll).await?; }
@@ -4149,6 +4254,112 @@ async fn cmd_server_stop(name: &str) -> Result<()> {
     println!("Server '{}' stopped", name);
     Ok(())
 }
+
+/// Path to a managed server's directory (helper for the file-backed
+/// management commands below).
+fn server_dir_of(name: &str) -> Result<std::path::PathBuf> {
+    Ok(loader::server::load_server(name)?.dir()?)
+}
+
+// --- v26.3-alpha.4: structured properties editing ---
+
+fn cmd_server_props_list(name: &str) -> Result<()> {
+    let dir = server_dir_of(name)?;
+    let props = loader::props::PropertiesFile::load(&dir.join("server.properties"))?;
+    for pair in props.pairs() {
+        println!("{} = {}", pair.key, pair.value);
+    }
+    Ok(())
+}
+
+fn cmd_server_props_get(name: &str, key: &str) -> Result<()> {
+    let dir = server_dir_of(name)?;
+    let props = loader::props::PropertiesFile::load(&dir.join("server.properties"))?;
+    match props.get(key) {
+        Some(v) => println!("{v}"),
+        None => anyhow::bail!("Key '{}' not found in server.properties", key),
+    }
+    Ok(())
+}
+
+fn cmd_server_props_set(name: &str, key: &str, value: &str) -> Result<()> {
+    let dir = server_dir_of(name)?;
+    let path = dir.join("server.properties");
+    let mut props = loader::props::PropertiesFile::load(&path)?;
+    props.set(key, value);
+    props.save(&path)?;
+    println!("{key} = {value}");
+    if loader::server::running_pid(&dir).is_some() {
+        println!("Note: server is running — most properties need a restart to take effect.");
+    }
+    Ok(())
+}
+
+// --- v26.3-alpha.4: allowlist / op / ban wrappers ---
+
+/// Run one console command via RCON with a consistent error surface.
+async fn cmd_server_rcon(name: &str, command: &str) -> Result<()> {
+    cmd_server_cmd(name, command).await
+}
+
+/// Allowlist listing: prefer RCON when running (authoritative live view),
+/// fall back to whitelist.json when stopped.
+async fn cmd_server_allowlist_list(name: &str) -> Result<()> {
+    let info = loader::server::load_server(name)?;
+    let running = info.dir().ok().and_then(|d| loader::server::running_pid(&d)).is_some();
+    if running {
+        return cmd_server_cmd(name, "whitelist list").await;
+    }
+    let names = loader::props::json_names(&info.dir()?.join("whitelist.json"));
+    if names.is_empty() {
+        println!("Allowlist is empty (or whitelist.json not present yet).");
+    } else {
+        println!("Allowlisted players (from whitelist.json):");
+        for n in names {
+            println!("  {n}");
+        }
+    }
+    Ok(())
+}
+
+/// Toggle white-list + enforce-whitelist in server.properties. Works when
+/// the server is stopped; warns that a restart is needed otherwise.
+fn cmd_server_toggle_whitelist(name: &str, enable: bool) -> Result<()> {
+    let dir = server_dir_of(name)?;
+    let path = dir.join("server.properties");
+    let mut props = loader::props::PropertiesFile::load(&path)?;
+    let flag = if enable { "true" } else { "false" };
+    props.set("white-list", flag);
+    props.set("enforce-whitelist", flag);
+    props.save(&path)?;
+    println!(
+        "Allowlist {} in server.properties.",
+        if enable { "ENABLED (white-list + enforce-whitelist = true)" } else { "disabled" }
+    );
+    if loader::server::running_pid(&dir).is_some() {
+        println!("Note: server is running — restart required for this to take effect.");
+    } else {
+        println!("Applies on next start.");
+    }
+    Ok(())
+}
+
+/// List player names from a vanilla JSON list file (ops.json /
+/// banned-players.json). Works whether the server is running or not.
+fn cmd_server_json_names(name: &str, file: &str, label: &str) -> Result<()> {
+    let dir = server_dir_of(name)?;
+    let names = loader::props::json_names(&dir.join(file));
+    if names.is_empty() {
+        println!("{label}: none ({file} empty or absent)");
+    } else {
+        println!("{label}:");
+        for n in names {
+            println!("  {n}");
+        }
+    }
+    Ok(())
+}
+
 
 fn cmd_server_status(format: &str, name: &str) {
     let info = match loader::server::load_server(name) {
