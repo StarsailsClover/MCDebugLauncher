@@ -909,6 +909,14 @@ enum Commands {
         history: bool,
     },
 
+    /// Benchmark MDL CLI cold latency (v26.3-alpha.6): spawns this binary
+    /// N times per tracked command and reports min/p50/p95/max in ms.
+    Bench {
+        /// Iterations per command
+        #[arg(long, default_value = "20")]
+        iterations: u32,
+    },
+
     /// Get instance status
     Status {
         /// Instance name (optional, shows all if omitted)
@@ -1242,6 +1250,9 @@ async fn run() -> Result<()> {
         }
         Commands::Metrics { instance, history } => {
             cmd_metrics(&cli.format, &instance, history).await?;
+        }
+        Commands::Bench { iterations } => {
+            cmd_bench(&cli.format, iterations)?;
         }
         Commands::Mod(mod_cmd) => {
             match mod_cmd {
@@ -2317,9 +2328,34 @@ async fn cmd_status_disk(format: &str, name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Benchmark MDL CLI cold latency (v26.3-alpha.6).
+fn cmd_bench(format: &str, iterations: u32) -> Result<()> {
+    use anyhow::Context as _;
+    let exe = std::env::current_exe().context("Failed to resolve current executable")?;
+    let rows = util::bench::run_cli_bench(&exe, iterations)?;
+
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "status": "success",
+            "data": { "iterations_per_command": iterations, "commands": rows }
+        }))?);
+        return Ok(());
+    }
+
+    println!("CLI cold latency ({} iteration(s) per command):", iterations);
+    println!("{:<14} {:>9} {:>9} {:>9} {:>9}", "COMMAND", "MIN", "P50", "P95", "MAX");
+    println!("{}", "-".repeat(54));
+    for r in &rows {
+        println!("{:<14} {:>7.1}ms {:>7.1}ms {:>7.1}ms {:>7.1}ms",
+            r.command, r.min, r.p50, r.p95, r.max);
+    }
+    println!();
+    println!("Gate these against scripts/perf-bench.ps1 -Baseline (p95 tracked).");
+    Ok(())
+}
+
 /// Show recorded launch metrics for an instance (v26.2-alpha.9).
-async fn cmd_metrics(format: &str, instance: &str, history: bool) -> Result<()> {
-    use instance::InstanceManager;
+async fn cmd_metrics(format: &str, instance: &str, history: bool) -> Result<()> {    use instance::InstanceManager;
     let manager = InstanceManager::new()?;
     let inst = manager.get(instance).await?;
 

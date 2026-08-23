@@ -19,3 +19,4 @@ pub mod metrics;
 pub mod validate;
 pub mod jsonio;
 pub mod disk;
+pub mod bench;
