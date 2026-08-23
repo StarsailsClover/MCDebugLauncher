@@ -600,144 +600,79 @@ All commands with `--format json` output follow these conventions:
 
 ## Agent Interface
 
-### HTTP/JSON-RPC Server
+> **v26.3 note**: this section summarizes the control plane. The
+> machine-authoritative reference is `mdl capabilities --format json`
+> (schema `mdl.capabilities/v1`); a human-oriented deep dive lives in
+> [AGENT_API.md](AGENT_API.md).
 
-When agent mode is enabled, MDL starts an HTTP server for programmatic control.
-
-#### Starting the Server
+### HTTP/WebSocket Server
 
 ```bash
-mdl agent start [OPTIONS]
-
-Options:
-  --port <PORT>          Server port (default: 25580)
-  --bind <ADDRESS>       Bind address (default: 127.0.0.1)
-  --auth-token <TOKEN>   Authentication token (required for non-localhost)
+mdl agent [--port <PORT>] [--bind <ADDRESS>]
+# defaults: port 8080, bind 127.0.0.1 (loopback-only; no auth-token layer)
 ```
 
-#### API Endpoints
+#### Endpoints (v26.3 surface)
 
-##### POST `/api/v1/execute`
-Execute a command.
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/v1/status` | version (cargo pkg), uptime, running instances |
+| GET | `/api/v1/capabilities` | feature manifest |
+| POST | `/api/v1/execute` | run an execute command |
+| GET | `/api/v1/events` | WebSocket event stream |
+| GET | `/api/v1/game/windows` | visible game windows |
+| GET | `/api/v1/game/:instance/status` | Despotes in-game state |
+| GET | `/api/v1/game/:instance/screenshot` | PNG (`?base64=true`) |
+| GET | `/api/v1/game/:instance/ready` | readiness probe |
+| GET | `/api/v1/game/:instance/idle-status` | idle-watchdog state |
+| POST | `/api/v1/game/:instance/input` | key/look/click/scroll/chat |
+| GET | `/api/v1/instance/:instance/metrics` | launch metrics (`?history=true`) |
+| GET | `/api/v1/instance/:instance/disk` | disk usage breakdown |
 
-Request:
+#### Execute
+
+Request/response shape:
+
 ```json
 {
-  "command": "instance",
-  "args": ["list"],
-  "options": {
-    "format": "json"
-  }
+  "command": "launch",
+  "args": ["my-instance"],
+  "options": {"agent": "true", "oom-confirm": "never"}
 }
 ```
 
-Response:
 ```json
 {
   "status": "success",
   "exit_code": 0,
   "stdout": "...",
-  "data": { ... }
+  "error_code": null,
+  "data": {}
 }
 ```
 
-##### GET `/api/v1/status`
-Get server status.
+Command catalog: `list`, `create`, `info`, `launch`, `stop`, `metrics`,
+`disk`, `inject-agent`, `server-cmd`. Launch options mirror the CLI
+(including `idle-timeout`, `no-idle-timeout`, `oom-protect`,
+`oom-aggressive`, `oom-confirm`, `oom-list-only`, `javaagents`,
+`aprism`, `enter-test-world`, `no-queue`, `username`, `server`,
+`fullscreen`, `width`, `height`, `memory`, `java-path`, `agent-port`).
 
-Response:
-```json
-{
-  "version": "0.1.0",
-  "uptime": 3600,
-  "active_instances": ["modded"],
-  "running_instances": {
-    "modded": {
-      "pid": 12345,
-      "started": "2026-07-22T10:00:00Z"
-    }
-  }
-}
+Failures carry `error_code`; the full code table lives in AGENT_API.md.
+
+#### WebSocket Events
+
+Frame = JSON object with `type` + `timestamp`. Kinds:
+
+```text
+launch_started / launch_progress / launch_completed / launch_failed
+log_line
+instance_stopped
+game_ready          { instance, pid, in_world }
+game_idle_timeout   { instance, pid, idle_seconds }
 ```
 
-##### WebSocket `/api/v1/events`
-Subscribe to real-time events via WebSocket.
-
-**Connection:**
-```
-ws://localhost:8080/api/v1/events
-```
-
-**Event Format:**
-All events are JSON objects with a `type` field and a `timestamp` field.
-
-**Launch Events:**
-```json
-{
-  "type": "launch_started",
-  "instance": "my-instance",
-  "timestamp": "2026-07-22T10:00:00Z"
-}
-
-{
-  "type": "launch_progress",
-  "instance": "my-instance",
-  "stage": "downloading_libraries",
-  "progress": 0.45,
-  "message": "Downloaded 23/51 libraries",
-  "timestamp": "2026-07-22T10:00:15Z"
-}
-
-{
-  "type": "launch_completed",
-  "instance": "my-instance",
-  "pid": 12345,
-  "timestamp": "2026-07-22T10:00:30Z"
-}
-
-{
-  "type": "launch_failed",
-  "instance": "my-instance",
-  "error": "Failed to download library: connection timeout",
-  "timestamp": "2026-07-22T10:00:20Z"
-}
-```
-
-**Log Events:**
-```json
-{
-  "type": "log_line",
-  "instance": "my-instance",
-  "level": "info",
-  "message": "[Render thread/INFO]: Setting user: Player123",
-  "timestamp": "2026-07-22T10:01:00Z"
-}
-```
-
-**Instance Events:**
-```json
-{
-  "type": "instance_stopped",
-  "instance": "my-instance",
-  "exit_code": 0,
-  "timestamp": "2026-07-22T11:00:00Z"
-}
-```
-
-**Client Example (Python):**
-```python
-import asyncio
-import websockets
-import json
-
-async def listen():
-    async with websockets.connect("ws://localhost:8080/api/v1/events") as ws:
-        async for message in ws:
-            event = json.loads(message)
-            print(f"[{event['type']}] {event.get('message', '')}")
-
-asyncio.run(listen())
-```
-
+Deep payload examples: see [AGENT_API.md](AGENT_API.md).
 ## Implementation Requirements
 
 ### Performance
