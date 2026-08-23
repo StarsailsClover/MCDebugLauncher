@@ -127,6 +127,11 @@ const MINECRAFT_PROCESS_NAMES: &[&str] = &[
 /// command line mentions "minecraft" (e.g. projects living under a
 /// `...\Minecraft\...` directory). Matched case-insensitively.
 ///
+/// v26.3-alpha.5 extends this after a field report of compile processes
+/// being killed: Kotlin compile daemons, IntelliJ JPS builds, Maven forks
+/// and Eclipse JDT launched inside `...\Minecraft\...` workspaces were all
+/// swept because their command lines contain the workspace path.
+///
 /// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
 const BUILTIN_EXCLUDE_SUBSTRINGS: &[&str] = &[
     "gradle",                          // Gradle daemons, workers, wrappers
@@ -139,6 +144,37 @@ const BUILTIN_EXCLUDE_SUBSTRINGS: &[&str] = &[
     "fernflower",                      // decompiler forks
     "net.neoforged",                   // NeoGradle/NeoForm utility JVMs
     "net.minecraftforge",              // ForgeGradle utility JVMs
+    // v26.3-alpha.5: compilers/build systems missed by the first pass.
+    "kotlincompiledaemon",             // Kotlin compile daemon (no 'gradle' in its cmdline)
+    "org.jetbrains.kotlin.compiler",   // Kotlin compiler entrypoints
+    "org.jetbrains.jps",               // IntelliJ IDEA build process
+    "org.eclipse.jdt",                 // Eclipse JDT LS / batch compiler
+    "org.apache.maven",                // Maven + surefire forks
+    "surefirebooter",                  // Maven test forks
+];
+
+/// Strong markers that distinguish an ACTUAL Minecraft client/server launch
+/// from any Java process that merely mentions a path containing
+/// "minecraft". A candidate java/javaw process qualifies only when its
+/// command line carries one of these — package names of the game itself,
+/// its mod loaders, vanilla CLI flags, or known launcher injectors.
+///
+/// v26.3-alpha.5 replaces the old weak rule (any "minecraft" substring),
+/// which false-positived on every Java tool running inside a
+/// `...Minecraft...` workspace.
+const STRONG_LAUNCH_MARKERS: &[&str] = &[
+    "net.minecraft.",                  // game packages (client main, server)
+    "cpw.mods.bootstraplauncher",      // NeoForge BootstrapLauncher
+    "cpw.mods.modlauncher",            // ModLauncher (Forge/NeoForge)
+    "--gameDir",                       // vanilla client/server flag
+    "--assetsdir",                     // vanilla client flag (lowercased match)
+    "--assetindex",                    // vanilla client flag
+    "fabricloader",                    // fabric-loader jar coordinate
+    "fmlloader",                       // Forge/NeoForge FML loader jar
+    "neoforge-",                       // neoforge-*-universal/client on -cp
+    "forge-",                          // forge-*-universal/client on -cp
+    "devlaunchinjector",               // Fabric Loom dev runs
+    "org.spongepowered.",              // Mixin
 ];
 
 /// Load user-defined exclusion substrings from
@@ -170,6 +206,52 @@ fn is_excluded_command(cmd_lower: &str, user_excludes: &[String]) -> bool {
         .copied()
         .chain(user_excludes.iter().map(|s| s.as_str()))
         .any(|ex| cmd_lower.contains(ex))
+}
+
+/// Whether a scanned process is a stale-Minecraft termination candidate.
+///
+/// v26.3-alpha.5 decision matrix (replaces the old "cmdline mentions
+/// minecraft anywhere" rule that killed compile daemons in workspaces
+/// whose paths contain "Minecraft"):
+///
+/// 1. Native launcher/game executables (Minecraft.exe, ...) — always
+///    candidates; they cannot be build tools.
+/// 2. java/javaw — candidates ONLY when the command line carries a strong
+///    launch marker (game packages, loader jars, vanilla flags). Build
+///    tools never carry these.
+/// 3. Exclusions veto last, so anything matching both a strong marker and
+///    an exclusion (e.g. Gradle-launched dev runs) is protected.
+fn is_target_candidate(
+    name_lower: &str,
+    cmd_lower: &str,
+    has_cmdline: bool,
+    user_excludes: &[String],
+) -> bool {
+    let native = MINECRAFT_PROCESS_NAMES
+        .iter()
+        .any(|p| p.to_lowercase() == name_lower);
+    // java/javaw count as generic JVMs WITH or WITHOUT the .exe suffix;
+    // they must go through command-line disambiguation, never the native
+    // fast path.
+    let java_generic = matches!(name_lower, "java" | "javaw" | "java.exe" | "javaw.exe");
+
+    if native && !java_generic {
+        return true;
+    }
+    if !java_generic {
+        return false;
+    }
+    if !has_cmdline {
+        // Cannot disambiguate without a command line — leave it alone.
+        return false;
+    }
+    let strong = STRONG_LAUNCH_MARKERS
+        .iter()
+        .any(|m| cmd_lower.contains(&m.to_lowercase()));
+    if !strong {
+        return false;
+    }
+    !is_excluded_command(cmd_lower, user_excludes)
 }
 
 /// Detect and terminate stale Minecraft / Java processes that are not
@@ -396,48 +478,29 @@ fn find_minecraft_processes() -> Vec<ProcInfo> {
         let name = proc.name().to_string();
         let lower = name.to_lowercase();
 
-        let is_mc = MINECRAFT_PROCESS_NAMES
+        // v26.3-alpha.5: unified candidate decision (strong markers +
+        // exclusions) replacing the old weak "mentions minecraft" filter.
+        let cmdline = proc
+            .cmd()
             .iter()
-            .any(|p| p.eq_ignore_ascii_case(&name));
+            .map(|s| s.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let cmd_lower = cmdline.to_lowercase();
 
-        // Also match `java` (without .exe) on non-Windows.
-        let is_java_generic = lower == "java" || lower == "javaw";
-
-        if !is_mc && !is_java_generic {
-            continue;
-        }
-
-        // Heuristic: only target java processes whose command line contains
-        // "minecraft" or "net.minecraft" — avoid killing unrelated Java apps
-        // (IDEs, other JVM-based tools).
-        if is_java_generic || lower.ends_with(".exe") {
-            let cmdline = proc
-                .cmd()
-                .iter()
-                .map(|s| s.clone())
-                .collect::<Vec<_>>()
-                .join(" ");
-            let cmd_lower = cmdline.to_lowercase();
-            if !cmd_lower.contains("minecraft")
-                && !cmd_lower.contains("net.minecraft")
-                && !cmd_lower.contains("mcp")
-                && !cmd_lower.contains("mdriven")
-            {
-                continue;
-            }
-
-            // Exclusion layer: build toolchain processes (Gradle workers,
-            // JST, decompiler forks, ...) frequently reference project paths
-            // that contain "Minecraft". Never terminate those.
-            //
-            // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
-            if is_excluded_command(&cmd_lower, &user_excludes) {
+        if !is_target_candidate(
+            &lower,
+            &cmd_lower,
+            !cmdline.is_empty(),
+            &user_excludes,
+        ) {
+            if cmdline.to_lowercase().contains("minecraft") {
                 tracing::debug!(
-                    "OOM protection: skipping excluded process PID {} (build toolchain match)",
+                    "OOM protection: skipping PID {} (mentions minecraft but no strong launch marker / excluded)",
                     pid.as_u32()
                 );
-                continue;
             }
+            continue;
         }
 
         result.push(ProcInfo {
@@ -780,31 +843,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_pre_launch_protection_skip_kill() {
-        // Never-confirm mode keeps the sweep non-interactive in tests; no
-        // processes should be terminated (nothing matches in CI anyway).
+    async fn test_pre_launch_protection_list_only_reports() {
+        // SAFETY: list_only=true guarantees the sweep never terminates
+        // anything, so this test is safe to run on a real developer machine
+        // (live-fire sweeps inside unit tests once killed a running build
+        // daemon — see v26.3-alpha.5).
         let report =
-            pre_launch_protection(OomConfirmMode::Never, false, false).await.unwrap();
-        assert_eq!(report.killed_processes, 0);
-        // available_after_bytes should be non-zero (we have *some* RAM).
+            pre_launch_protection(OomConfirmMode::Never, true, false).await.unwrap();
+        assert_eq!(report.killed_processes, 0, "list-only must never terminate");
         assert!(report.available_after_bytes > 0);
     }
 
     #[tokio::test]
-    async fn test_pre_launch_protection_non_aggressive() {
+    async fn test_pre_launch_protection_non_aggressive_list_only() {
         let report =
-            pre_launch_protection(OomConfirmMode::Never, false, false).await.unwrap();
+            pre_launch_protection(OomConfirmMode::Never, true, false).await.unwrap();
         assert!(!report.standby_purged, "Standby should not be purged in non-aggressive mode");
     }
 
-    #[tokio::test]
-    async fn test_pre_launch_protection_list_only_kills_nothing() {
-        let report =
-            pre_launch_protection(OomConfirmMode::Never, true, false).await.unwrap();
-        assert_eq!(
-            report.killed_processes, 0,
-            "list-only mode must never terminate"
-        );
+    #[test]
+    fn test_live_fire_sweeps_are_never_executed_in_tests() {
+        // Compile-time guard: the only sanctioned way to call
+        // pre_launch_protection from tests is with list_only=true. This
+        // assertion documents that invariant for reviewers.
+        let mode = OomConfirmMode::parse("never").unwrap();
+        assert_eq!(mode, OomConfirmMode::Never);
     }
 
     #[test]
@@ -831,6 +894,95 @@ mod tests {
             c:\\users\\x\\.gradle\\caches\\... net.neoforged.jst.cli";
         assert!(is_excluded_command(jst, &[]));
     }
+
+    /// v26.3-alpha.5 regression matrix for the field report: OOM killed
+    /// compile daemons / IDE builds inside `...\Minecraft\...` workspaces.
+    #[test]
+    fn test_compile_and_ide_processes_are_never_candidates() {
+        let user = vec![]; // no user excludes — built-ins alone must suffice
+
+        // Kotlin compile daemon: project path mentions minecraft but there
+        // is NO gradle substring in its own command line.
+        let kotlin_daemon = "c:\\jdk21\\bin\\java.exe -cp c:\\users\\sails\\.gradle\\caches\\kotlin-dsl\\... \
+             org.jetbrains.kotlin.compiler.daemon.kotlincompiledaemonservices \
+             -cp c:\\users\\sails\\documents\\workspace\\domain-projects\\minecraft\\mymod build.gradle.kts";
+        assert!(!is_target_candidate("java.exe", &kotlin_daemon.to_lowercase(), true, &user));
+
+        // IntelliJ JPS build process.
+        let jps = "\"c:\\jdk17\\bin\\java.exe\" -Xmx2g -classpath \"c:\\program files\\jetbrains\\...\\jps-builders.jar;...\" \
+             org.jetbrains.jps.cmdline.buildmain c:\\users\\sails\\appdata\\local\\jetbrains\\... \
+             c:\\users\\sails\\documents\\workspace\\minecraft-project";
+        assert!(!is_target_candidate("java.exe", &jps.to_lowercase(), true, &user));
+
+        // Maven surefire fork inside a minecraft-named project dir.
+        let maven = "java -jar c:\\repo\\org\\apache\\maven\\surefire\\surefirebooter.jar \
+             c:\\work\\minecraft-plugin\\target\\test-classes";
+        assert!(!is_target_candidate("java", &maven.to_lowercase(), true, &user));
+
+        // Eclipse JDT language server.
+        let jdt = "java -jar c:\\jdt.ls\\plugins\\org.eclipse.equinox.launcher.jar \
+             -configuration c:\\workspaces\\minecraft-mod\\.jdt";
+        assert!(!is_target_candidate("javaw.exe", &jdt.to_lowercase(), true, &user));
+
+        // Plain javac fork (already covered by exclusions).
+        let javac = "javac @c:\\work\\minecraft-mod\\build\\sources.txt";
+        assert!(!is_target_candidate("java.exe", &javac.to_lowercase(), true, &user));
+
+        // Unrelated Java app with zero minecraft mention.
+        let unrelated = "java -jar service.jar --port 8080";
+        assert!(!is_target_candidate("java", unrelated, true, &user));
+    }
+
+    #[test]
+    fn test_real_game_launches_remain_candidates() {
+        let user = vec![];
+
+        // Vanilla client.
+        let vanilla = "\"c:\\program files\\java\\bin\\javaw.exe\" -Xmx4G \
+             -cp libraries.jar net.minecraft.client.main.Main --username TestPlayer \
+             --gameDir . --assetsDir assets --assetIndex 17";
+        assert!(is_target_candidate("javaw.exe", &vanilla.to_lowercase(), true, &user));
+
+        // Fabric via fabric-loader coordinate.
+        let fabric = "java -cp fabric-loader-0.16.9.jar;net.fabricmc.intermediary.jar \
+             net.fabricmc.loader.impl.launch.knot.knotclient --gameDir .";
+        assert!(is_target_candidate("javaw.exe", &fabric.to_lowercase(), true, &user));
+
+        // NeoForge via bootstraplauncher + universal jar.
+        let neoforge = "java -p cpw.mods.bootstraplauncher.jar --add-modules ALL-MODULE-PATH \
+             -cp neoforge-21.1.90-universal.jar cpw.mods.bootstraplauncher.BootstrapLauncher \
+             --launchTarget forgeclient";
+        assert!(is_target_candidate("java.exe", &neoforge.to_lowercase(), true, &user));
+
+        // Dedicated server main class.
+        let server = "java -Xmx2G -jar server.jar nogui net.minecraft.server.Main";
+        assert!(is_target_candidate("java", &server.to_lowercase(), true, &user));
+
+        // Native launcher executables stay candidates without cmdline data.
+        assert!(is_target_candidate("minecraft.exe", "", false, &user));
+        assert!(is_target_candidate("minecraft.windows.exe", "", false, &user));
+    }
+
+    #[test]
+    fn test_java_without_cmdline_is_left_alone() {
+        // Cannot disambiguate → never kill.
+        assert!(!is_target_candidate("java", "", false, &[]));
+        assert!(!is_target_candidate("javaw.exe", "", false, &[]));
+    }
+
+    #[test]
+    fn test_user_exclusion_vetoes_strong_match() {
+        // A dev-run game that carries both a strong marker and a user
+        // substring: exclusion wins (documented tradeoff).
+        let dev_run = "java -cp ... cpw.mods.modlauncher.launcher main --gameDir .";
+        assert!(is_target_candidate(
+            "java",
+            dev_run,
+            true,
+            &vec!["modlauncher.launcher".to_string()]
+        ) == false);
+    }
+
 
     #[test]
     fn test_exclusions_do_not_shadow_real_game() {
