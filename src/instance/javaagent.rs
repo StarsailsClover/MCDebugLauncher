@@ -1,4 +1,4 @@
-// JavaAgent management (v26.2-alpha.5)
+﻿// JavaAgent management (v26.2-alpha.5)
 //
 // Provides instance-level JavaAgent lifecycle management: install, list,
 // remove, enable/disable. Agents are stored in the instance's `javaagents/`
@@ -50,8 +50,8 @@ pub async fn install(instance_dir: &Path, jar_path: &Path, params: Option<&str>)
 
     // Update instance.json
     let config_path = instance_dir.join("instance.json");
-    let config_data = tokio::fs::read_to_string(&config_path).await?;
-    let mut config: InstanceConfig = serde_json::from_str(&config_data)?;
+    let mut config: InstanceConfig =
+        crate::util::jsonio::parse_async(&config_path, "instance config").await?;
 
     // Check for duplicate name.
     if config.javaagents.iter().any(|a| a.name == entry.name) {
@@ -74,8 +74,8 @@ pub async fn list(instance_dir: &Path) -> Result<Vec<JavaAgentEntry>> {
 /// Remove a registered JavaAgent (deletes the JAR and unregisters).
 pub async fn remove(instance_dir: &Path, name: &str) -> Result<()> {
     let config_path = instance_dir.join("instance.json");
-    let config_data = tokio::fs::read_to_string(&config_path).await?;
-    let mut config: InstanceConfig = serde_json::from_str(&config_data)?;
+    let mut config: InstanceConfig =
+        crate::util::jsonio::parse_async(&config_path, "instance config").await?;
 
     let idx = config
         .javaagents
@@ -107,8 +107,8 @@ pub async fn disable(instance_dir: &Path, name: &str) -> Result<()> {
 
 async fn set_enabled(instance_dir: &Path, name: &str, enabled: bool) -> Result<()> {
     let config_path = instance_dir.join("instance.json");
-    let config_data = tokio::fs::read_to_string(&config_path).await?;
-    let mut config: InstanceConfig = serde_json::from_str(&config_data)?;
+    let mut config: InstanceConfig =
+        crate::util::jsonio::parse_async(&config_path, "instance config").await?;
 
     let entry = config
         .javaagents

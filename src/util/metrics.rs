@@ -81,17 +81,22 @@ pub fn save_launch(instance_dir: &Path, metrics: &LaunchMetrics) -> Result<()> {
 
 /// Load the latest recorded launch for an instance.
 pub fn load_latest(instance_dir: &Path) -> Option<LaunchMetrics> {
-    let raw = std::fs::read_to_string(instance_dir.join("runtime").join("metrics.json")).ok()?;
-    serde_json::from_str(&raw).ok()
+    crate::util::jsonio::parse_sync::<LaunchMetrics>(
+        &instance_dir.join("runtime").join("metrics.json"),
+        "launch metrics",
+    )
+    .ok()
 }
 
 /// Load the full recorded history (oldest first). Capped at the last 100
-/// entries so pathological histories cannot balloon memory.
+/// entries so pathological histories cannot balloon memory. Corrupt lines
+/// are skipped; a leading BOM (editor-added) is tolerated.
 pub fn load_history(instance_dir: &Path) -> Vec<LaunchMetrics> {
     let raw = match std::fs::read_to_string(instance_dir.join("runtime").join("metrics.jsonl")) {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
+    let raw = raw.trim_start_matches('\u{feff}');
     let mut out: Vec<LaunchMetrics> = raw
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())

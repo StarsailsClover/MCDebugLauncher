@@ -49,8 +49,7 @@ pub fn load_server(name: &str) -> Result<ServerInfo> {
     if !path.exists() {
         anyhow::bail!("Server '{}' does not exist (create it with `mdl server create`)", name);
     }
-    let raw = std::fs::read_to_string(&path)?;
-    Ok(serde_json::from_str(&raw).context("Failed to parse server.json")?)
+    crate::util::jsonio::parse_sync(&path, "server metadata")
 }
 
 pub fn list_servers() -> Result<Vec<ServerInfo>> {
@@ -75,6 +74,7 @@ pub fn list_servers() -> Result<Vec<ServerInfo>> {
 
 /// Create a server: download server.jar, write eula.txt + server.properties.
 pub async fn create_server(name: &str, mc_version: &str, memory: Option<&str>) -> Result<PathBuf> {
+    crate::util::validate::validate_name(name)?;
     let dir = servers_dir()?.join(name);
     if dir.exists() {
         anyhow::bail!("Server '{}' already exists", name);

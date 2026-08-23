@@ -107,6 +107,9 @@ pub fn manifest() -> Capabilities {
             Endpoint { method: "GET",  path: "/api/v1/game/:instance/ready",     purpose: "Whether the game broadcast ready (in world)" },
             Endpoint { method: "GET",  path: "/api/v1/game/:instance/idle-status",purpose: "Idle watchdog status (last output age, threshold, remaining)" },
             Endpoint { method: "POST", path: "/api/v1/game/:instance/input",     purpose: "Inject an in-game input (key/click/look/chat/scroll)" },
+            // v26.3-alpha.1: instance-scoped observability
+            Endpoint { method: "GET",  path: "/api/v1/instance/:instance/metrics", purpose: "Launch metrics for an instance (?history=true for full history)" },
+            Endpoint { method: "GET",  path: "/api/v1/instance/:instance/disk",    purpose: "Disk usage with a top-level breakdown" },
         ],
         execute_commands: vec![
             ExecCommand {
@@ -165,6 +168,46 @@ pub fn manifest() -> Capabilities {
                 description: "Stop a running instance (kills its game process tree)",
                 args: vec![
                     ArgSpec { name: "name", required: true, description: "Instance name" },
+                ],
+                options: vec![],
+            },
+            // v26.3-alpha.1: observability + lifecycle mappings.
+            ExecCommand {
+                command: "metrics",
+                description: "Launch metrics for an instance (latest or full history)",
+                args: vec![
+                    ArgSpec { name: "instance", required: true, description: "Instance name" },
+                ],
+                options: vec![
+                    OptionSpec { key: "history", values: "true", description: "Return the recorded history instead of the latest launch" },
+                ],
+            },
+            ExecCommand {
+                command: "disk",
+                description: "Disk usage of an instance with a top-level breakdown",
+                args: vec![
+                    ArgSpec { name: "instance", required: true, description: "Instance name" },
+                ],
+                options: vec![],
+            },
+            ExecCommand {
+                command: "inject-agent",
+                description: "Hot-attach a Java agent JAR into the running game JVM",
+                args: vec![
+                    ArgSpec { name: "instance", required: true, description: "Instance name (must be running)" },
+                    ArgSpec { name: "jar", required: true, description: "Agent JAR path or registered javaagent name" },
+                ],
+                options: vec![
+                    OptionSpec { key: "params", values: "<text>", description: "Agent options string (after '=' in -javaagent syntax)" },
+                    OptionSpec { key: "java-path", values: "<path>", description: "Java executable used to run the attach helper" },
+                ],
+            },
+            ExecCommand {
+                command: "server-cmd",
+                description: "Run a console command on a managed server via RCON",
+                args: vec![
+                    ArgSpec { name: "server", required: true, description: "Server name" },
+                    ArgSpec { name: "command", required: true, description: "Console command text (remaining args joined)" },
                 ],
                 options: vec![],
             },
@@ -260,6 +303,8 @@ mod tests {
             "/api/v1/game/:instance/status",
             "/api/v1/game/:instance/input",
             "/api/v1/game/:instance/idle-status",
+            "/api/v1/instance/:instance/metrics",
+            "/api/v1/instance/:instance/disk",
         ] {
             assert!(
                 caps.endpoints.iter().any(|e| e.path == path),
@@ -267,9 +312,10 @@ mod tests {
                 path
             );
         }
-        // All five execute commands must be declared (v26.1-alpha.2 adds stop).
+        // All execute commands must be declared (v26.1-alpha.2 adds stop;
+        // v26.3-alpha.1 adds metrics/disk/inject-agent/server-cmd).
         let cmds: Vec<&str> = caps.execute_commands.iter().map(|c| c.command).collect();
-        for c in ["list", "create", "info", "launch", "stop"] {
+        for c in ["list", "create", "info", "launch", "stop", "metrics", "disk", "inject-agent", "server-cmd"] {
             assert!(cmds.contains(&c), "missing execute command {}", c);
         }
         // Machine-readable error codes must be declared and non-empty.

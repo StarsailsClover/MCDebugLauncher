@@ -19,6 +19,7 @@ mod diagnostic;
 mod agent;
 mod game;
 mod util;
+use util::disk::{dir_size, format_bytes};
 
 use instance::config::InstanceConfig;
 
@@ -2153,23 +2154,6 @@ async fn cmd_status_disk(format: &str, name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Recursively sum file sizes under `dir` using a blocking walkdir on a
-/// spawn_blocking task (walkdir is synchronous; avoids starving the runtime).
-fn dir_size(dir: &std::path::Path) -> impl std::future::Future<Output = u64> + Send + '_ {
-    let path = dir.to_path_buf();
-    async move {
-        tokio::task::spawn_blocking(move || walkdir::WalkDir::new(path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.metadata().ok())
-            .filter(|m| m.is_file())
-            .map(|m| m.len())
-            .sum::<u64>())
-        .await
-        .unwrap_or(0)
-    }
-}
-
 /// Show recorded launch metrics for an instance (v26.2-alpha.9).
 async fn cmd_metrics(format: &str, instance: &str, history: bool) -> Result<()> {
     use instance::InstanceManager;
@@ -3252,16 +3236,6 @@ fn cmd_game_windows(format: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Despotes offer during instance creation (Alpha 7)
 // ---------------------------------------------------------------------------
-
-fn format_bytes(n: u64) -> String {
-    if n >= 1024 * 1024 {
-        format!("{:.2} MB", n as f64 / (1024.0 * 1024.0))
-    } else if n >= 1024 {
-        format!("{:.1} KB", n as f64 / 1024.0)
-    } else {
-        format!("{n} B")
-    }
-}
 
 fn read_choice_line() -> String {
     let mut input = String::new();

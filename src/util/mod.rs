@@ -16,3 +16,6 @@ pub mod changelog;
 pub mod progress;
 pub mod doctor;
 pub mod metrics;
+pub mod validate;
+pub mod jsonio;
+pub mod disk;

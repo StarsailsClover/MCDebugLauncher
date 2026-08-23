@@ -87,10 +87,10 @@ pub fn list_accounts() -> Vec<MinecraftAccount> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for e in entries.flatten() {
             if e.path().extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Ok(content) = std::fs::read_to_string(e.path()) {
-                    if let Ok(acc) = serde_json::from_str::<MinecraftAccount>(&content) {
-                        out.push(acc);
-                    }
+                // BOM-tolerant parse (v26.3-alpha.1); unparseable files are
+                // skipped so one bad file cannot hide the other accounts.
+                if let Ok(acc) = crate::util::jsonio::parse_sync::<MinecraftAccount>(&e.path(), "account") {
+                    out.push(acc);
                 }
             }
         }

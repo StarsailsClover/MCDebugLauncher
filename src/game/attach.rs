@@ -95,19 +95,53 @@ pub async fn inject_agent(
         }
         detail.push_str(&stderr);
     }
-    // Common actionable failure: jdk.attach module missing from a stripped
-    // custom runtime. Standard Temurin images always have it.
-    if stderr.contains("ModuleNotFoundException") || stderr.contains("com.sun.tools.attach") {
-        anyhow::bail!(
+
+    match classify_attach_failure(&stderr) {
+        FailureKind::NoProcess => anyhow::bail!(
+            "Agent attach failed - process {} is not running",
+            pid
+        ),
+        // v26.3-alpha.1 (robustness finding F4): AttachNotSupportedException
+        // with "jvm.dll not loaded" means the target is not a JVM at all -
+        // do not misattribute it to a stripped runtime.
+        FailureKind::NotJvm => anyhow::bail!(
+            "Agent attach failed - PID {} is not a JVM process (or exited mid-attach). \
+             Target the game's java/javaw PID.",
+            pid
+        ),
+        FailureKind::NoModule => anyhow::bail!(
             "Agent attach failed - the target JVM does not expose the jdk.attach module \
              (custom/stripped runtime?). Detail:\n{}",
             detail
-        );
+        ),
+        FailureKind::Other => anyhow::bail!("Agent attach failed:\n{}", detail),
     }
+}
+
+/// Classify helper stderr into an actionable failure kind. Order matters:
+/// NoSuchProcess is most specific, then not-a-JVM, then missing module.
+fn classify_attach_failure(stderr: &str) -> FailureKind {
     if stderr.contains("NoSuchProcessException") {
-        anyhow::bail!("Agent attach failed - process {} is not running", pid);
+        return FailureKind::NoProcess;
     }
-    anyhow::bail!("Agent attach failed:\n{}", detail)
+    if stderr.contains("AttachNotSupportedException")
+        || stderr.contains("jvm.dll not loaded")
+        || stderr.contains("not a java process")
+    {
+        return FailureKind::NotJvm;
+    }
+    if stderr.contains("ModuleNotFoundException") || stderr.contains("com.sun.tools.attach") {
+        return FailureKind::NoModule;
+    }
+    FailureKind::Other
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureKind {
+    NoProcess,
+    NotJvm,
+    NoModule,
+    Other,
 }
 
 #[cfg(test)]
@@ -127,5 +161,23 @@ mod tests {
         let cp = ensure_helper(&dir).unwrap();
         assert!(cp.join("AttachHelper.class").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_classify_attach_failure_kinds() {
+        // F4: non-JVM target must classify as NotJvm, not NoModule.
+        let not_jvm = "ATTACH_FAILED: com.sun.tools.attach.AttachNotSupportedException: \
+                       jvm.dll not loaded by target process";
+        assert_eq!(classify_attach_failure(not_jvm), FailureKind::NotJvm);
+
+        assert_eq!(
+            classify_attach_failure("... NoSuchProcessException ..."),
+            FailureKind::NoProcess
+        );
+        assert_eq!(
+            classify_attach_failure("java.lang.ModuleNotFoundException: jdk.attach"),
+            FailureKind::NoModule
+        );
+        assert_eq!(classify_attach_failure("something else"), FailureKind::Other);
     }
 }

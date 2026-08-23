@@ -1,4 +1,4 @@
-// Agent server - HTTP/JSON-RPC server for programmatic control
+﻿// Agent server - HTTP/JSON-RPC server for programmatic control
 
 use anyhow::Result;
 use axum::{
@@ -173,6 +173,9 @@ impl AgentServer {
             // v26.2-alpha.1: idle watchdog status
             .route("/api/v1/game/:instance/idle-status", get(handle_idle_status))
             .route("/api/v1/game/:instance/input", post(handle_game_input))
+            // v26.3-alpha.1: instance-scoped observability
+            .route("/api/v1/instance/:instance/metrics", get(handle_instance_metrics))
+            .route("/api/v1/instance/:instance/disk", get(handle_instance_disk))
             .with_state((self.state.clone(), self.event_tx.clone()));
 
         let addr = format!("{}:{}", bind_address, port);
@@ -506,6 +509,85 @@ async fn handle_idle_status(Path(instance): Path<String>) -> impl IntoResponse {
     (
         if alive { StatusCode::OK } else { StatusCode::GONE },
         Json(serde_json::json!({ "status": "success", "data": response })),
+    )
+}
+
+/// v26.3-alpha.1: launch metrics for an instance (latest by default,
+/// ?history=true for the recorded history). Local-only data.
+#[derive(Debug, Deserialize)]
+struct InstanceMetricsQuery {
+    #[serde(default)]
+    history: bool,
+}
+
+async fn handle_instance_metrics(
+    Path(instance): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<InstanceMetricsQuery>,
+) -> impl IntoResponse {
+    let dir = match resolve_instance_dir(&instance).await {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+            );
+        }
+    };
+    let launches = if q.history {
+        crate::util::metrics::load_history(&dir)
+    } else {
+        crate::util::metrics::load_latest(&dir).into_iter().collect::<Vec<_>>()
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "success",
+            "data": { "instance": instance, "launches": launches }
+        })),
+    )
+}
+
+/// v26.3-alpha.1: disk usage of an instance with a top-level breakdown
+/// (identical numbers to `mdl status <name> --disk`).
+async fn handle_instance_disk(Path(instance): Path<String>) -> impl IntoResponse {
+    use crate::util::disk::{dir_size, format_bytes};
+    let dir = match resolve_instance_dir(&instance).await {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+            );
+        }
+    };
+
+    let mut breakdown: Vec<(String, u64)> = Vec::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+        while let Some(entry) = entries.next_entry().await.ok().flatten() {
+            let p = entry.path();
+            let size = if p.is_dir() { dir_size(&p).await } else { entry.metadata().await.map(|m| m.len()).unwrap_or(0) };
+            breakdown.push((
+                p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+                size,
+            ));
+        }
+    }
+    breakdown.sort_by(|a, b| b.1.cmp(&a.1));
+    let total: u64 = breakdown.iter().map(|(_, s)| *s).sum();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "success",
+            "data": {
+                "instance": instance,
+                "bytes_total": total,
+                "human_total": format_bytes(total),
+                "breakdown": breakdown.iter().map(|(n, b)| serde_json::json!({
+                    "path": n, "bytes": b, "human": format_bytes(*b)
+                })).collect::<Vec<_>>()
+            }
+        })),
     )
 }
 
@@ -951,6 +1033,111 @@ async fn execute_command(
                 "status": "stopped"
             });
             Ok((format!("Instance '{}' stopped (PID {})", name, pid), Some(data)))
+        }
+        // v26.3-alpha.1: observability + lifecycle mappings.
+        "metrics" => {
+            if args.is_empty() {
+                anyhow::bail!("Instance name required");
+            }
+            let name = &args[0];
+            let dir = resolve_instance_dir(name).await?;
+            let history = options.get("history").map(|v| v == "true").unwrap_or(false);
+            let launches = if history {
+                crate::util::metrics::load_history(&dir)
+            } else {
+                crate::util::metrics::load_latest(&dir).into_iter().collect::<Vec<_>>()
+            };
+            Ok((
+                format!("{} launch record(s) for '{}'", launches.len(), name),
+                Some(serde_json::json!({ "launches": launches })),
+            ))
+        }
+        "disk" => {
+            use crate::util::disk::{dir_size, format_bytes};
+            if args.is_empty() {
+                anyhow::bail!("Instance name required");
+            }
+            let name = &args[0];
+            let dir = resolve_instance_dir(name).await?;
+            let mut breakdown: Vec<(String, u64)> = Vec::new();
+            if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+                while let Some(entry) = entries.next_entry().await.ok().flatten() {
+                    let p = entry.path();
+                    let size = if p.is_dir() { dir_size(&p).await } else { entry.metadata().await.map(|m| m.len()).unwrap_or(0) };
+                    breakdown.push((p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), size));
+                }
+            }
+            breakdown.sort_by(|a, b| b.1.cmp(&a.1));
+            let total: u64 = breakdown.iter().map(|(_, s)| *s).sum();
+            Ok((
+                format!("Disk usage of '{}': {}", name, format_bytes(total)),
+                Some(serde_json::json!({
+                    "bytes_total": total,
+                    "human_total": format_bytes(total),
+                    "breakdown": breakdown.iter().map(|(n,b)| serde_json::json!({"path":n,"bytes":b,"human":format_bytes(*b)})).collect::<Vec<_>>()
+                })),
+            ))
+        }
+        "inject-agent" => {
+            if args.len() < 2 {
+                anyhow::bail!("Usage: inject-agent <instance> <jar> (options: params, java-path)");
+            }
+            let name = &args[0];
+            let jar_arg = &args[1];
+            let manager = InstanceManager::new()?;
+            let inst = manager.get(name).await?;
+
+            let pid: u32 = tokio::fs::read_to_string(inst.path.join("runtime").join("pid"))
+                .await
+                .ok()
+                .and_then(|c| c.trim().parse().ok())
+                .ok_or_else(|| anyhow::anyhow!("Instance '{}' is not running", name))?;
+
+            let jar_path = std::path::PathBuf::from(jar_arg);
+            let jar_path = if jar_path.is_absolute() && jar_path.exists() {
+                jar_path
+            } else {
+                let registered = inst.path.join("javaagents").join(jar_arg);
+                let with_ext = registered.with_extension("jar");
+                if registered.exists() {
+                    registered
+                } else if with_ext.exists() {
+                    with_ext
+                } else {
+                    anyhow::bail!("Agent JAR not found: '{}' is not an existing path or registered javaagent", jar_arg);
+                }
+            };
+
+            let java = match options.get("java-path") {
+                Some(p) => std::path::PathBuf::from(p),
+                None => crate::version::java::JavaRuntime::detect()
+                    .map(|r| r.path)
+                    .unwrap_or_else(|_| std::path::PathBuf::from("java")),
+            };
+            crate::game::attach::inject_agent(&java, pid, &jar_path, options.get("params").map(String::as_str)).await?;
+            Ok((
+                format!("Agent attached to instance '{}' (PID {})", name, pid),
+                Some(serde_json::json!({"instance": name, "pid": pid, "agent": jar_path.display().to_string()})),
+            ))
+        }
+        "server-cmd" => {
+            if args.len() < 2 {
+                anyhow::bail!("Usage: server-cmd <server> <command...>");
+            }
+            let name = &args[0];
+            let command = args[1..].join(" ");
+            if command.trim().is_empty() {
+                anyhow::bail!("Empty console command");
+            }
+            let info = crate::loader::server::load_server(name)?;
+            if info.dir().ok().and_then(|d| crate::loader::server::running_pid(&d)).is_none() {
+                anyhow::bail!("Server '{}' is not running", name);
+            }
+            let response = crate::loader::server::run_console_command(&info, &command).await?;
+            Ok((
+                response.trim().to_string(),
+                Some(serde_json::json!({"server": name, "command": command, "response": response})),
+            ))
         }
         _ => {
             anyhow::bail!("Unknown command: {}", command)

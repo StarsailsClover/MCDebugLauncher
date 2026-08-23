@@ -23,6 +23,23 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha 4 | 功能追平 | 对齐主流启动器的常见能力差距（以研究结论为准） |
 | Alpha 5 | 稳定性与收敛 | 回归固化、文档、正式版发布 |
 
+## v26.3（当前主线：加固与 Agent 面）
+
+主题：消化 v26.2 鲁棒性评估发现（F1/F3/F4，见 ROBUSTNESS_V262.md），补全 Agent REST/execute 能力面。
+
+| Alpha | 主题 | 内容 | 状态 |
+|---|---|---|---|
+| Alpha 1 | 输入校验 + 配置容错 + Agent API 补全 | 名称白名单校验（create/rename/clone/server create；保留设备名黑名单、路径分隔符、尾点/尾空格）；BOM 容错 JSON 读取助手覆盖 instance/server/account/metrics/javaagent 全部配置点且报错含文件路径；attach 错误归因修正（非 JVM ≠ 模块缺失）；REST `/api/v1/instance/:name/metrics`+`/disk`；execute 新增 `metrics`/`disk`/`inject-agent`/`server-cmd` 映射；capabilities 同步 | 🔄 进行中 |
+| Alpha 2 | 跨平台构建验证 | Linux/macOS 编译矩阵 + 行为差异清单（watchdog 终止、截图降级、injector 门控） | 📋 规划中 |
+| Alpha 3 | 诊断增强 | diagnose 集成 watchdog/idle 事件摘要；崩溃报告自动关联最近一次启动指标 | 📋 规划中 |
+| Alpha 4 | 服务端深化 | server.properties 结构化编辑；whitelist/op/ban 封装命令 | 📋 规划中 |
+| Alpha 5 | 安全加固 | accounts token 文件权限收紧；RCON 密码轮换命令 | 📋 规划中 |
+| Alpha 6 | 性能基线 | 启动耗时基准脚本 + 回归阈值门 | 📋 规划中 |
+| Alpha 7 | 文档刷新 | AGENT_API/specification 与 v26.3 面对齐；examples 更新 | 📋 规划中 |
+| Alpha 8 | 解析器模糊测试 | cargo-fuzz 关键解析路径（mrpack/log/manifest） | 📋 规划中 |
+| Alpha 9 | 可用性打磨 | i18n 补全；交互向导优化 | 📋 规划中 |
+| Alpha 10 | LTS 收敛 | 回归套件固化；v26.3 正式版发布 | 📋 规划中 |
+
 ## v26.2（已完成主线：自动化韧性与运维，收尾于 Alpha 10）
 
 主题：让 MDL 在无人值守的 Agent 驱动场景下更可靠——进程生命周期自管、诊断自愈、网络容灾、可观测性。

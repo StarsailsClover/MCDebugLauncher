@@ -31,6 +31,7 @@ impl InstanceManager {
     }
 
     pub async fn create(&self, config: InstanceConfig, install: bool) -> Result<Instance> {
+        crate::util::validate::validate_name(&config.name)?;
         let instance_path = self.instances_dir.join(&config.name);
 
         if instance_path.exists() {
@@ -241,8 +242,8 @@ impl InstanceManager {
                 continue;
             }
 
-            let config_json = fs::read_to_string(&config_path).await?;
-            let config: InstanceConfig = serde_json::from_str(&config_json)?;
+            let config: InstanceConfig =
+                crate::util::jsonio::parse_async(&config_path, "instance config").await?;
 
             instances.push(Instance {
                 name: config.name.clone(),
@@ -262,8 +263,8 @@ impl InstanceManager {
         }
 
         let config_path = instance_path.join("instance.json");
-        let config_json = fs::read_to_string(&config_path).await?;
-        let config: InstanceConfig = serde_json::from_str(&config_json)?;
+        let config: InstanceConfig =
+            crate::util::jsonio::parse_async(&config_path, "instance config").await?;
 
         Ok(Instance {
             name: config.name.clone(),
@@ -291,6 +292,7 @@ impl InstanceManager {
     /// matches the "duplicate instance" feature every mainstream launcher
     /// offers.
     pub async fn clone_instance(&self, src_name: &str, dst_name: &str) -> Result<Instance> {
+        crate::util::validate::validate_name(dst_name)?;
         let src_path = self.instances_dir.join(src_name);
         let dst_path = self.instances_dir.join(dst_name);
 
@@ -321,6 +323,7 @@ impl InstanceManager {
     /// Rename an instance: move its directory and rewrite `instance.json`.
     /// v26.1-alpha.4: matches mainstream launcher rename support.
     pub async fn rename(&self, old_name: &str, new_name: &str) -> Result<Instance> {
+        crate::util::validate::validate_name(new_name)?;
         let old_path = self.instances_dir.join(old_name);
         let new_path = self.instances_dir.join(new_name);
 
