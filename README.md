@@ -91,27 +91,26 @@ See [docs/specification.md](docs/specification.md) for complete API documentatio
 
 ## Status
 
-**Current Version**: v26.2
+**Current Version**: v26.3
 
-v26.2 mainline theme: **automation resilience & operations** — reliable
-unattended / agent-driven workflows.
+v26.3 mainline theme: **hardening & agent surface completion** — driven by a
+workspace-wide blocker scan and the v26.2 robustness assessment.
 
-Earlier lines:
+Prior lines:
 - ✅ v26.0: core launcher, instance/mod management, agent game control (Despotes), modpack import, JE/Bedrock dedicated servers, Aprism product matrix, download progress, `mdl doctor`
 - ✅ v26.1: capability manifest, agent error codes & stop command, full BDS lifecycle, instance clone/rename
+- ✅ v26.2: idle watchdog, streaming downloads (~1.9GB→<100MB peak), OOM self-protection, JavaAgent launch/hot-attach registry, mrpack export roundtrip, server RCON automation, Aprism ecosystem status, per-launch metrics + JSON logging
 
-v26.2 highlights (Alpha 1–9):
-- ✅ Idle watchdog: auto-stop a detached game after N seconds without log output (`--idle-timeout`, `game_idle_timeout` event)
-- ✅ Diagnostics: integrated mclog-analyzer parser, crash stack-trace extraction, structured analysis in `mdl diagnose --analyze`
-- ✅ Performance: streaming downloads + disk-based SHA1 verification (first-launch peak memory ~1.9GB → <100MB)
-- ✅ Agent surface convergence: dead code removed, capability manifest synced with reality
-- ✅ OOM self-protection before spawn (`--oom-protect`, `--oom-aggressive`)
-- ✅ JavaAgent injection: launch-time `--javaagent` (repeatable) + hot-attach to running games (`mdl game inject-agent`), instance-level registry (`mdl javaagent`)
-- ✅ Instance ops: Modrinth `.mrpack` export roundtrip, batch mod listing, disk usage reports (`mdl status --disk`), account token refresh (`mdl account refresh`)
-- ✅ Server automation: RCON integration (auto-configured at create), graceful stop, `--wait-ready`, console commands (`mdl server cmd`)
-- ✅ Test-world entry completed: adaptive navigation with in-game confirmation
-- ✅ Aprism ecosystem: unified offline status view, native `.aje` mod support, Refract/Prismate remove
-- ✅ Observability: per-launch metrics (`mdl metrics`), structured JSON logging (`--log-format json`)
+v26.3 highlights (Alpha 1–9):
+- ✅ Input hardening: instance-name validation (reserved Windows device stems, separators), BOM-tolerant JSON configs with file-path errors
+- ✅ Agent API phase 2: `instance/:i/metrics` + `/disk` endpoints; execute `metrics`/`disk`/`inject-agent`/`server-cmd`
+- ✅ Attach triage: non-JVM targets report accurately instead of "missing module"
+- ✅ OOM second confirmation: candidates listed with PID/window-title/memory before any kill (`--oom-confirm auto|always|never`, `--oom-list-only`)
+- ✅ OOM false-kill fix: strong launch markers — compile daemons / IDE builds inside `…Minecraft…` workspaces are never swept
+- ✅ Watchdog/wait-ready race fix: deferred arming until readiness (fixes OpenLumin field blocker)
+- ✅ Server deepening: structured properties editor (comments preserved), allowlist/op/ban wrappers, RCON password rotation
+- ✅ Security: account-token files restricted to the current user (ACL/chmod)
+- ✅ Performance baseline: `mdl bench` + gate script; duplicate-install detection in `doctor`; `--mc` alias; docs/examples fully refreshed
 
 **Tested Configurations:**
 - Vanilla Minecraft 1.21.x ✅

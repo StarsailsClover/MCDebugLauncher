@@ -91,26 +91,25 @@ async def listen():
 
 ## 状态
 
-**当前版本**: v26.2
+**当前版本**: v26.3
 
-v26.2 主线主题：**自动化韧性与运维**——让无人值守 / Agent 驱动的工作流更可靠。
+v26.3 主线主题：**加固与 Agent 面完备**——由跨工作区阻塞扫描与 v26.2 鲁棒性评估驱动。
 
 历史主线：
 - ✅ v26.0：核心启动器、实例/模组管理、Agent 游戏控制（Despotes）、整合包导入、JE/基岩专用服、Aprism 产品矩阵、下载进度条、`mdl doctor`
 - ✅ v26.1：能力清单、agent 错误码与 stop 命令、BDS 全生命周期、实例克隆/重命名
+- ✅ v26.2：空闲看门狗、流式下载（峰值 ~1.9GB→<100MB）、OOM 自保护、JavaAgent 启动/热附加注册表、mrpack 导出往返、服务端 RCON 自动化、Aprism 生态视图、启动指标 + JSON 日志
 
-v26.2 亮点（Alpha 1–9）：
-- ✅ 空闲看门狗：detach 游戏日志静默 N 秒自动终止（`--idle-timeout`、`game_idle_timeout` 事件）
-- ✅ 诊断系统：集成 mclog-analyzer 解析器、崩溃堆栈提取、`mdl diagnose --analyze` 结构化分析
-- ✅ 性能：流式下载 + 磁盘 SHA1 校验（首次启动峰值内存 ~1.9GB → <100MB）
-- ✅ Agent 命令面收敛：移除死代码，能力清单与实现对齐
-- ✅ 启动前 OOM 自保护（`--oom-protect`、`--oom-aggressive`）
-- ✅ JavaAgent 注入：启动时 `--javaagent`（可重复）+ 运行中热附加（`mdl game inject-agent`）、实例级注册（`mdl javaagent`）
-- ✅ 实例运维：Modrinth `.mrpack` 导出往返、批量模组清单、磁盘占用报告（`mdl status --disk`）、账号 token 刷新（`mdl account refresh`）
-- ✅ 服务端自动化：RCON 集成（create 自动配置）、优雅停止、`--wait-ready`、控制台命令（`mdl server cmd`）
-- ✅ 测试世界进入补全：自适应导航 + 进世界终态确认
-- ✅ Aprism 生态：统一离线状态视图、原生 `.aje` 模组支持、Refract/Prismate 移除
-- ✅ 可观测性：每次启动指标（`mdl metrics`）、结构化 JSON 日志（`--log-format json`）
+v26.3 亮点（Alpha 1–9）：
+- ✅ 输入加固：实例名校验（Windows 保留设备名/分隔符）、JSON 配置 BOM 容错且报错含文件路径
+- ✅ Agent API 二期：`instance/:i/metrics` + `/disk` 端点；execute 新增 `metrics`/`disk`/`inject-agent`/`server-cmd`
+- ✅ attach 归因修正：非 JVM 目标准确报因，不再误导为模块缺失
+- ✅ OOM 二次确认：终止前列出 PID/窗口标题/内存（`--oom-confirm auto|always|never`、`--oom-list-only`）
+- ✅ OOM 误杀修复：强启动标记——`…Minecraft…` 工作区内编译守护/IDE 构建永不清扫
+- ✅ 看门狗/wait-ready 竞态修复：就绪后再武装（解决 OpenLumin 实测阻塞）
+- ✅ 服务端深化：结构化 properties 编辑（注释保留）、allowlist/op/ban 封装、RCON 密码轮换
+- ✅ 安全：账户凭据文件权限收紧至当前用户（ACL/chmod）
+- ✅ 性能基线：`mdl bench` + 门控脚本；doctor 检出多套并存安装；`--mc` 别名；文档与示例全面刷新
 
 **已测试配置：**
 - Vanilla Minecraft 1.21.x ✅
