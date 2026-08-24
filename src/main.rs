@@ -1825,10 +1825,51 @@ async fn cmd_launch(
                             m.ready_secs = Some(ready_secs);
                             let _ = util::metrics::save_launch(&inst.path, &m);
                         }
+                        // v26.3-alpha.8: arm a watchdog deferred by
+                        // --wait-ready (pending file written at launch).
+                        let pending =
+                            inst.path.join("runtime").join("watchdog_pending.json");
+                        if pending.exists() && !no_idle_timeout {
+                            if let Ok(cfg) =
+                                tokio::fs::read_to_string(&pending).await
+                            {
+                                if let Ok(v) =
+                                    serde_json::from_str::<serde_json::Value>(&cfg)
+                                {
+                                    let pid = v["pid"].as_u64().unwrap_or(0) as u32;
+                                    let timeout =
+                                        v["timeout_secs"].as_u64().unwrap_or(60);
+                                    let log = v["log"].as_str().unwrap_or("");
+                                    let wd = game::watchdog::IdleWatchdog::new(
+                                        pid,
+                                        name.to_string(),
+                                        std::path::Path::new(log),
+                                        timeout,
+                                    );
+                                    wd.start();
+                                    tracing::info!(
+                                        "Idle watchdog armed after ready: {}s",
+                                        timeout
+                                    );
+                                }
+                            }
+                            let _ = tokio::fs::remove_file(&pending).await;
+                        }
                     }
                 }
                 if enter_test_world {
                     enter_world_after_ready(name).await?;
+                }
+            } else {
+                // Launch never became ready: drop any deferred watchdog so a
+                // hung startup is not silently killed mid-diagnosis.
+                if let Ok(manager) = instance::InstanceManager::new() {
+                    if let Ok(inst) = manager.get(name).await {
+                        let _ = tokio::fs::remove_file(
+                            inst.path.join("runtime").join("watchdog_pending.json"),
+                        )
+                        .await;
+                    }
                 }
             }
         }

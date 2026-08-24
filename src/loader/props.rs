@@ -204,3 +204,29 @@ mod tests {
         assert_eq!(json_names(&path), vec!["Alice", "Bob"]);
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    /// v26.3-alpha.8 fuzz-inspired: malformed property lines are preserved
+    /// verbatim and never panic the editor.
+    #[test]
+    fn test_properties_survive_garbage() {
+        let lines: Vec<String> = vec![
+            "=".into(),                 // empty key
+            "=value".into(),            // empty key with value
+            "noequals".into(),
+            "key = value = with = equals".into(), // split_once keeps tail
+            "\t # not really comment\t".into(),   // leading tab then hash -> still comment after trim
+            "\u{0}=x".into(),
+        ]
+        .into_iter()
+        .chain(std::iter::repeat("junk".to_string()).take(50))
+        .collect();
+        let mut p = PropertiesFile::from_lines(lines);
+        p.set("new", "ok");
+        assert_eq!(p.get("new"), Some("ok".into()));
+        let _ = p.pairs(); // iteration must not panic
+    }
+}

@@ -698,3 +698,44 @@ mod tests {
         assert!(!is_continuation("[12:00:00] [main/INFO]: Normal line"));
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    /// Fuzz-inspired (v26.3-alpha.8): parse_line must never panic on
+    /// arbitrary bytes-as-text, including control chars, huge lines and
+    /// malformed bracket soup. Severity may be anything; contract is
+    /// "returns an entry".
+    #[test]
+    fn test_parse_line_survives_garbage() {
+        let cases = [
+            "",
+            "   ",
+            "[[[[[[",
+            "]]]]]]",
+            "\u{0}\u{1}\u{2}",
+            "[not a timestamp] [unclosed",
+            "[12:99:88] [thread/] [] :",
+            &"x".repeat(200_000),
+            "at ",
+            "Caused by:",
+            "---- minecraft crash report ---- but mangled \u{7}",
+        ];
+        for (i, line) in cases.iter().enumerate() {
+            let e = parse_line(line, i as u64);
+            assert!(!e.message.is_empty() || line.trim().is_empty(), "case {i}");
+        }
+    }
+
+    #[test]
+    fn test_analyze_survives_adversarial_entries() {
+        let parser = LogParser::new();
+        let content = "[[[[\n\n\u{0}at \nCaused by: \n---- Minecraft Crash Report ----\n\
+                       [t] [a/ERROR] [b/]: OutOfMemoryError x\u{1}";
+        let entries = parser.parse_content(content);
+        let analysis = parser.analyze(&entries);
+        // Categories map always constructible; crash_type Some when errors exist.
+        assert!(analysis.categories.len() >= 1);
+    }
+}

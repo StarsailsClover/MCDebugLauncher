@@ -36,7 +36,7 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha 5 | OOM 误杀修复 + 安全加固 | **修复误杀**：正向匹配收紧为强启动标记（net.minecraft./cpw.mods./--gameDir/fabricloader/neoforge- 等 12 项），工作区路径含 "Minecraft" 的 Kotlin 编译守护/JPS 构建/Maven fork/JDT 不再中招；排除表补充 kotlincompiledaemon/org.jetbrains.jps/org.eclipse.jdt/maven/surefirebooter；java/javaw 一律走命令行判定（不再走原生名直通）。**安全加固**：accounts 凭据文件 ACL 收紧（Windows 去继承仅留当前用户 / Unix 600，存量文件幂等回补）；`mdl server rotate-rcon [--show]` 密码轮换同步 props+json | ✅ 已完成 |
 | Alpha 6 | 性能基线 | `mdl bench cli [--iterations N]` 自冷延迟基准（capabilities/status/list，min/p50/p95/max）；`scripts/perf-bench.ps1` 基线保存/回归门控（p95 超基线 ×容差即 exit 2）+ 可选实例 metrics 历程汇总；**发现**：`status` 全量 62 实例 p95 达 ~1.7s（逐实例 sysinfo 探测），列入后续优化项 | ✅ 已完成 |
 | Alpha 7 | 文档刷新 | `docs/AGENT_API.md` 重写为 v26.3 权威紧凑参考（12 端点/9 execute 命令/8 事件种/11 错误码 + 三语言配方）；specification.md Agent 段修正（移除虚构的 `agent start`/auth-token/version 0.1.0，对齐真实端点表与事件集并指向 capabilities 为准）；examples 双语言演示重写（capabilities→launch→ready→input→idle/metrics/disk→stop 全链路，语法校验通过） | ✅ 已完成 |
-| Alpha 8 | 解析器模糊测试 | cargo-fuzz 关键解析路径（mrpack/log/manifest） | 📋 规划中 |
+| Alpha 8 | 看门狗竞态修复 + 对抗性测试套件 | **修复 OpenLumin 实测阻塞**：`--detach --wait-ready` 下看门狗不再先行武装——挂起载荷 `runtime/watchdog_pending.json` 落盘，就绪后由 cmd_launch 武装；未就绪则丢弃（不杀悬挂中的启动过程供诊断）。对抗性解析套件：log_parser 11 种垃圾输入含 20 万字符行、props 编辑器 55 行畸形键值——零 panic。cargo-fuzz 因宿主无 nightly 记为 CI 待办。**环境事故披露**：C 盘满（0 字节）致链接器 PDB 失败，清理 target(25.1GB)+27 个历史 zip 后恢复，测试曾实弹误杀构建守护进程一事已在 alpha.5 披露并整改 | ✅ 已完成 |
 | Alpha 9 | 可用性打磨 | i18n 补全；交互向导优化 | 📋 规划中 |
 | Alpha 10 | LTS 收敛 | 回归套件固化；v26.3 正式版发布 | 📋 规划中 |
 

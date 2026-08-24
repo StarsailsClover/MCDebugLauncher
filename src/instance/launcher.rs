@@ -799,7 +799,35 @@ impl InstanceLauncher {
             // game's log output and terminates the process after a configurable
             // idle period (default 60s). This prevents zombie game processes
             // in unattended / agent-driven workflows.
-            if !options.no_idle_timeout {
+            //
+            // v26.3-alpha.8 fix (OpenLumin field report): when --wait-ready
+            // is active, DEFER arming until readiness is observed — during
+            // modded startup/world-gen the log can stay silent past the
+            // default 60s, and the watchdog firing then killed freshly
+            // launched games before they ever became ready.
+            let defer_watchdog = options.wait_ready && !options.no_idle_timeout;
+            if options.no_idle_timeout {
+                tracing::info!("Idle watchdog disabled (--no-idle-timeout)");
+            } else if defer_watchdog {
+                tracing::info!(
+                    "Idle watchdog deferred until game-ready (--wait-ready active)"
+                );
+                let timeout = match options.idle_timeout {
+                    Some(0) | None => crate::game::watchdog::DEFAULT_IDLE_TIMEOUT_SECS,
+                    Some(secs) => secs,
+                };
+                let runtime_dir = instance_dir.join("runtime");
+                let _ = fs::create_dir_all(&runtime_dir).await;
+                let arm = serde_json::json!({
+                    "pid": pid, "timeout_secs": timeout,
+                    "log": log_file.as_deref().map(|p| p.display().to_string()).unwrap_or_default(),
+                });
+                let _ = fs::write(
+                    runtime_dir.join("watchdog_pending.json"),
+                    serde_json::to_string(&arm)?,
+                )
+                .await;
+            } else {
                 let timeout = match options.idle_timeout {
                     Some(0) | None => crate::game::watchdog::DEFAULT_IDLE_TIMEOUT_SECS,
                     Some(secs) => secs,

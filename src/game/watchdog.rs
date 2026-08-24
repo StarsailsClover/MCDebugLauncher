@@ -439,3 +439,25 @@ mod tests {
         assert!(json.contains("\"active\":true"));
     }
 }
+
+#[cfg(test)]
+mod deferred_tests {
+    /// The pending-watchdog payload written by launcher.rs when --wait-ready
+    /// defers arming must round-trip through the exact Value-extraction
+    /// pattern cmd_launch uses to arm after readiness.
+    #[test]
+    fn test_deferred_payload_roundtrip() {
+        let v = serde_json::json!({
+            "pid": 4242u32, "timeout_secs": 90u64,
+            "log": "C:\\i\\logs\\launch_detached.log",
+        });
+        assert_eq!(v["pid"].as_u64().unwrap_or(0) as u32, 4242);
+        assert_eq!(v["timeout_secs"].as_u64().unwrap_or(60), 90);
+        assert!(v["log"].as_str().unwrap().ends_with("launch_detached.log"));
+        // Missing fields fall back safely (never panics on malformed file).
+        let bad = serde_json::json!({"unexpected": true});
+        assert_eq!(bad["pid"].as_u64().unwrap_or(0) as u32, 0);
+        assert_eq!(bad["timeout_secs"].as_u64().unwrap_or(60), 60);
+        assert_eq!(bad["log"].as_str().unwrap_or(""), "");
+    }
+}
