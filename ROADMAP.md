@@ -23,7 +23,7 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha 4 | 功能追平 | 对齐主流启动器的常见能力差距（以研究结论为准） |
 | Alpha 5 | 稳定性与收敛 | 回归固化、文档、正式版发布 |
 
-## v26.3（当前主线：加固与 Agent 面）
+## v26.3（已完成主线：加固与 Agent 面，收尾于 Alpha 10）
 
 主题：消化 v26.2 鲁棒性评估发现（F1/F3/F4，见 ROBUSTNESS_V262.md），补全 Agent REST/execute 能力面。
 
@@ -38,7 +38,16 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha 7 | 文档刷新 | `docs/AGENT_API.md` 重写为 v26.3 权威紧凑参考（12 端点/9 execute 命令/8 事件种/11 错误码 + 三语言配方）；specification.md Agent 段修正（移除虚构的 `agent start`/auth-token/version 0.1.0，对齐真实端点表与事件集并指向 capabilities 为准）；examples 双语言演示重写（capabilities→launch→ready→input→idle/metrics/disk→stop 全链路，语法校验通过） | ✅ 已完成 |
 | Alpha 8 | 看门狗竞态修复 + 对抗性测试套件 | **修复 OpenLumin 实测阻塞**：`--detach --wait-ready` 下看门狗不再先行武装——挂起载荷 `runtime/watchdog_pending.json` 落盘，就绪后由 cmd_launch 武装；未就绪则丢弃（不杀悬挂中的启动过程供诊断）。对抗性解析套件：log_parser 11 种垃圾输入含 20 万字符行、props 编辑器 55 行畸形键值——零 panic。cargo-fuzz 因宿主无 nightly 记为 CI 待办。**环境事故披露**：C 盘满（0 字节）致链接器 PDB 失败，清理 target(25.1GB)+27 个历史 zip 后恢复，测试曾实弹误杀构建守护进程一事已在 alpha.5 披露并整改 | ✅ 已完成 |
 | Alpha 9 | 可用性打磨（扫描驱动） | doctor 新增 `mdl-on-path` 检查：多套 mdl 并存时 WARN 列出全部路径（源自 OpenLumin 手动换 zip 与 Downloads 双拷贝痛点）；`create --mc` 作为 `--mc-version` 别名落地（OpenLumin 文档实际写法） | ✅ 已完成 |
-| Alpha 10 | LTS 收敛 | 回归套件固化；v26.3 正式版发布 | 📋 规划中 |
+| Alpha 10 | LTS 收敛 | README/README_CN 横幅与亮点定稿；本地 CHANGELOG 26.3.0 官方条目；回归验证（159 tests / doctor 9 项 / capabilities） | ✅ 已完成 |
+
+## v26.4（候选方向，未排期）
+
+基于 Alpha 8 竞态修复与 workspace 扫描的后续候选：
+- `status` 性能优化（逐实例 sysinfo 探测致 p95 ~1.7s，见 alpha.6 发现）
+- Linux/macOS CI 编译矩阵落地（PLATFORM_MATRIX.md 待办）
+- cargo-fuzz 解析器模糊测试接入 CI
+- NeoForge 26.2 patched-client MANIFEST 注入自动化（OpenLumin 手工步骤）
+- Despotes v26.9 automation primitives 的 MDL 侧封装
 
 ## v26.2（已完成主线：自动化韧性与运维，收尾于 Alpha 10）
 
