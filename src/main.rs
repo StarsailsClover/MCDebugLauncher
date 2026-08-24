@@ -715,8 +715,8 @@ enum Commands {
         /// Instance name
         name: String,
 
-        /// Minecraft version
-        #[arg(long, default_value = "release")]
+        /// Minecraft version (alias: --mc, as used in sibling project docs)
+        #[arg(long, alias = "mc", default_value = "release")]
         mc_version: String,
 
         /// Mod loader: fabric, forge, neoforge, quilt, optifine, none

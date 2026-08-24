@@ -71,7 +71,52 @@ pub async fn run_all() -> DoctorReport {
     checks.push(check_mojang().await);
     checks.push(check_modrinth().await);
     checks.push(check_github().await);
+    checks.push(check_mdl_duplicates());
     DoctorReport { checks }
+}
+
+/// v26.3-alpha.9: detect multiple mdl.exe copies resolvable on PATH.
+/// Field context: stale copies (e.g. an old zip extracted into a Downloads
+/// folder) silently shadow newer installs and caused "update didn't work"
+/// confusion. WARN lists every hit so the user can prune; a single hit is
+/// an informational PASS.
+fn check_mdl_duplicates() -> CheckResult {
+    let out = std::process::Command::new("where.exe")
+        .arg("mdl")
+        .output();
+    let paths: Vec<String> = match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    match paths.len() {
+        0 => CheckResult {
+            name: "mdl-on-path",
+            ok: true,
+            warn: true,
+            detail: "No mdl.exe found on PATH (running from a direct path?)".into(),
+        },
+        1 => CheckResult {
+            name: "mdl-on-path",
+            ok: true,
+            warn: false,
+            detail: format!("Single install on PATH: {}", paths[0]),
+        },
+        n => CheckResult {
+            name: "mdl-on-path",
+            ok: true,
+            warn: true,
+            detail: format!(
+                "{n} mdl copies on PATH — stale copies may shadow updates:\n    {}",
+                paths.join("\n    ")
+            ),
+        },
+    }
 }
 
 fn check_java() -> CheckResult {
