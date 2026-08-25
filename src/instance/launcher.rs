@@ -897,8 +897,14 @@ impl InstanceLauncher {
                     main_class = cls;
                 }
 
-                // Check if this is NeoForge (needs module path instead of classpath)
-                let is_neoforge = main_class.contains("bootstraplauncher") || main_class.contains("neoforge");
+                // v26.4-alpha.3 fix: use the config-declared loader_type
+                // instead of the main_class heuristic. Forge's
+                // BootstrapLauncher main class also contains
+                // "bootstraplauncher", which caused Forge instances to
+                // enter the NeoForge branch and trip the version-mismatch
+                // bail (Forge version.json id is "1.20.1-forge-47.3.0",
+                // not "neoforge-X").
+                let is_neoforge = is_neoforge_loader;
 
                 // NeoForge: add the installer-produced game JARs. These come from
                 // the installer's processor pipeline, not from version.json's
@@ -1515,7 +1521,7 @@ impl InstanceLauncher {
         metadata: &VersionMetadata,
         game_dir: &Path,
         assets_dir: &Path,
-        main_class: &str,
+        _main_class: &str,
         version_dir: &Path,
         loader_game_args: &[String],
         window_title: &str,
@@ -1573,8 +1579,12 @@ impl InstanceLauncher {
             cmd.arg(port.to_string());
         }
 
-        let is_neoforge = main_class.contains("bootstraplauncher") || main_class.contains("neoforge");
-        let is_modded = main_class.contains("forge") || is_neoforge;
+        // v26.4-alpha.3 fix: use config-declared loader_type instead of the
+        // main_class heuristic (Forge BootstrapLauncher also contains
+        // "bootstraplauncher", causing Forge to enter the NeoForge branch).
+        let loader_type_str = config.loader.as_ref().map(|l| l.loader_type.as_str()).unwrap_or("");
+        let is_neoforge = loader_type_str == "neoforge";
+        let is_modded = loader_type_str == "forge" || is_neoforge;
 
         // Set the Minecraft window title to the instance name + loaded mods so
         // the operator can identify the test session at a glance. Supported
