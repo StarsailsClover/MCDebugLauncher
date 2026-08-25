@@ -4205,8 +4205,28 @@ async fn cmd_inject(target: &str, dll: &str) -> Result<()> {
             std::process::exit(1);
         })
     });
-    util::injector::inject_dll(pid, std::path::Path::new(dll))?;
-    println!("Injected {} into PID {}", dll, pid);
+
+    // v26.4-alpha.2 bug fix: JVM targets (java/javaw) now go through the
+    // JavaAgent + System.load() path instead of CreateRemoteThread. JDK 25+
+    // CFG/CET mitigations crash the remote-thread path before DllMain runs.
+    // Non-JVM targets (e.g. bedrock_server.exe) keep the legacy path.
+    if util::injector::is_jvm_process(pid) {
+        let java = crate::version::java::JavaRuntime::detect()
+            .map(|r| r.path)
+            .unwrap_or_else(|_| std::path::PathBuf::from("java"));
+        let base = crate::util::paths::get_data_dir()
+            .map(|d| d.to_path_buf())
+            .unwrap_or_else(|_| std::env::temp_dir());
+        let agent_jar = game::native_loader::ensure_agent_jar(&base)?;
+        game::attach::inject_agent(&java, pid, &agent_jar, Some(dll)).await?;
+        println!(
+            "Loaded {} into JVM PID {} via JavaAgent (System.load)",
+            dll, pid
+        );
+    } else {
+        util::injector::inject_dll(pid, std::path::Path::new(dll))?;
+        println!("Injected {} into PID {}", dll, pid);
+    }
     Ok(())
 }
 

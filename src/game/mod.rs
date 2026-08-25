@@ -29,6 +29,11 @@ pub mod window;
 // wherever a JDK-family runtime with the jdk.attach module exists.
 pub mod attach;
 
+// Native library loading via JavaAgent (v26.4-alpha.2): replaces
+// CreateRemoteThread for JVM targets (JDK 25 CFG/CET crashes the
+// remote-thread path before DllMain).
+pub mod native_loader;
+
 /// Default HTTP port of the Despotes in-game control server. The launcher
 /// passes the port to the game via the `despotes.port` system property and
 /// records it in `runtime/despotes.port` for post-launch discovery.

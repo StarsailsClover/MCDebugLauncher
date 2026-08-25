@@ -29,7 +29,8 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 
 | Alpha | 主题 | 内容 | 状态 |
 |---|---|---|---|
-| Alpha 1 | status 性能 + 评估修复 | `status` 全量路径单快照共享探测（p95 ~1.7-3.5s → **~0.2s**）；COM¹ 上标保留名绕过修复；execute usage 错误归类 BAD_REQUEST（F1/F2，见 ROBUSTNESS_V263.md） | 🔄 进行中 |
+| Alpha 1 | status 性能 + 评估修复 | `status` 全量路径单快照共享探测（p95 ~1.7-3.5s → **~0.2s**）；COM¹ 上标保留名绕过修复；execute usage 错误归类 BAD_REQUEST（F1/F2，见 ROBUSTNESS_V263.md） | ✅ 已完成 |
+| Alpha 2 | mdl inject JVM 路由修复 | **Bug 修复**（用户实测）：`mdl inject --dll` 对 JVM 目标改走 JavaAgent + `System.load()` 路径——JDK 25 CFG/CET 缓解使 CreateRemoteThread 在 DllMain 前崩溃；嵌入 NativeLoaderAgent（premain+agentmain），运行时打包为最小 JAR 经 Attach API 加载；非 JVM 目标（bedrock_server.exe 等）保留旧路径 | ✅ 已完成 |
 | Alpha 2 | Linux CI 编译矩阵 | GitHub Actions：linux/macos check+test（PLATFORM_MATRIX.md 待办落地） | 📋 规划中 |
 | Alpha 3 | cargo-fuzz 接入 CI | log_parser/props/jsonio 模糊目标 nightly job | 📋 规划中 |
 | Alpha 4 | NeoForge MANIFEST 自动化 | 26.x patched-client 自动注入 `Minecraft-Dists: client`（OpenLumin 手工步骤消除） | 📋 规划中 |

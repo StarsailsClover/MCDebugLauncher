@@ -68,8 +68,24 @@ mod windows_impl {
         OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
     }
 
-    /// Inject `dll_path` into the process identified by `pid`.
-    pub fn inject_dll(pid: u32, dll_path: &std::path::Path) -> Result<()> {
+/// Check whether the process at `pid` is a JVM (java/javaw). Used by
+/// `mdl inject` to route JVM targets through the JavaAgent + System.load()
+/// path (v26.4-alpha.2) instead of CreateRemoteThread, which crashes on
+/// JDK 25+ with CFG/CET mitigations before DllMain runs.
+pub fn is_jvm_process(pid: u32) -> bool {
+    use sysinfo::{ProcessRefreshKind, System};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessRefreshKind::everything());
+    sys.process(sysinfo::Pid::from_u32(pid))
+        .map(|p| {
+            let name = p.name().to_lowercase();
+            name == "java" || name == "javaw" || name == "java.exe" || name == "javaw.exe"
+        })
+        .unwrap_or(false)
+}
+
+/// Inject `dll_path` into the process identified by `pid`.
+pub fn inject_dll(pid: u32, dll_path: &std::path::Path) -> Result<()> {
         let abs = std::fs::canonicalize(dll_path)
             .with_context(|| format!("DLL not found: {}", dll_path.display()))?;
         let wide = to_wide(&abs.to_string_lossy());
