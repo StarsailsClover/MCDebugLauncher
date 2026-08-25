@@ -53,6 +53,13 @@ pub fn validate_name(name: &str) -> Result<()> {
         bail!("Name must not end with a space (Windows strips it silently)");
     }
     let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    // v26.4-alpha.1 (robustness finding F1): Windows also reserves the
+    // superscript-digit forms COM¹²³ — normalize superscripts before the
+    // stem check so "COM¹" cannot slip through.
+    let stem = stem
+        .replace('¹', "1")
+        .replace('²', "2")
+        .replace('³', "3");
     if RESERVED_STEMS.contains(&stem.as_str()) {
         bail!("'{stem}' is a reserved Windows device name and cannot be used");
     }
@@ -80,6 +87,10 @@ mod tests {
     #[test]
     fn test_reserved_device_stems() {
         for n in ["CON", "con", "Con.txt", "nul.jar", "COM1", "lpt3.save"] {
+            assert!(validate_name(n).is_err(), "{n} should be rejected");
+        }
+        // v26.4-alpha.1: superscript-digit variants (F1).
+        for n in ["COM¹", "com².txt", "COM³"] {
             assert!(validate_name(n).is_err(), "{n} should be rejected");
         }
         // Non-reserved stems containing reserved substrings are fine.

@@ -313,6 +313,11 @@ fn classify_error(msg: &str) -> (&'static str, StatusCode) {
     let m = msg.to_ascii_lowercase();
     if m.contains("unknown command") {
         ("UNKNOWN_COMMAND", StatusCode::BAD_REQUEST)
+    } else if m.starts_with("usage:") {
+        // v26.4-alpha.1 (finding F2): argument-count/shape errors on
+        // commands like inject-agent/server-cmd are client mistakes and
+        // must map to BAD_REQUEST, not INTERNAL.
+        ("BAD_REQUEST", StatusCode::BAD_REQUEST)
     } else if m.contains("not found") || m.contains("no instance named") || m.contains("does not exist") {
         ("NOT_FOUND", StatusCode::NOT_FOUND)
     } else if m.contains("already exists") {

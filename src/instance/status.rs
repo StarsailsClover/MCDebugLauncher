@@ -1,9 +1,16 @@
 // Instance status tracking
 // Provides real-time status information for running instances
+//
+// v26.4-alpha.1 performance fix (alpha.6 bench finding): the all-instances
+// path previously constructed a fresh `System::new_all()` + `refresh_all()`
+// PER instance with a PID file — on large installs this dominated `mdl
+// status` latency (p95 up to ~2s). A single shared process snapshot now
+// serves every probe; `new_all` (disks/networks/users enumeration) is
+// replaced by the much cheaper processes-only refresh.
 
 use anyhow::{Result, Context};
-use serde::{Serialize, Deserialize};
-use sysinfo::{System, Pid};
+use serde::{Deserialize, Serialize};
+use sysinfo::{System, Pid, ProcessRefreshKind};
 
 use super::{InstanceManager, Instance};
 
@@ -23,35 +30,42 @@ pub struct InstanceStatusInfo {
 
 pub struct InstanceStatus {
     manager: InstanceManager,
-    system: System,
 }
 
 impl InstanceStatus {
     pub fn new() -> Result<Self> {
         Ok(Self {
             manager: InstanceManager::new()?,
-            system: System::new_all(),
         })
     }
 
     pub async fn get_instance_status(&self, name: &str) -> Result<InstanceStatusInfo> {
         let instance = self.manager.get(name).await?;
-        self.get_status_for_instance(&instance).await
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(ProcessRefreshKind::everything());
+        Self::probe(&instance, &sys).await
     }
 
     pub async fn get_all_status(&self) -> Result<Vec<InstanceStatusInfo>> {
         let instances = self.manager.list().await?;
-        let mut results = Vec::new();
 
-        for instance in instances {
-            let status = self.get_status_for_instance(&instance).await?;
-            results.push(status);
+        // One process snapshot shared by every probe.
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(ProcessRefreshKind::everything());
+
+        let mut results = Vec::with_capacity(instances.len());
+        for instance in &instances {
+            results.push(Self::probe(instance, &sys).await?);
         }
-
         Ok(results)
     }
 
-    async fn get_status_for_instance(&self, instance: &Instance) -> Result<InstanceStatusInfo> {
+    /// Probe one instance against an existing process snapshot. Cleans up a
+    /// stale PID file when the recorded process is gone.
+    async fn probe(
+        instance: &Instance,
+        sys: &System,
+    ) -> Result<InstanceStatusInfo> {
         let pid_file = instance.path.join("runtime").join("pid");
 
         let mut info = InstanceStatusInfo {
@@ -63,12 +77,10 @@ impl InstanceStatus {
             cpu_percent: None,
         };
 
-        // Check if PID file exists
         if !pid_file.exists() {
             return Ok(info);
         }
 
-        // Read PID
         let pid_content = tokio::fs::read_to_string(&pid_file)
             .await
             .context("Failed to read PID file")?;
@@ -76,26 +88,16 @@ impl InstanceStatus {
         let pid: u32 = pid_content.trim().parse()
             .context("Invalid PID format")?;
 
-        // Check if process is actually running
-        let mut sys = System::new_all();
-        sys.refresh_all();
-
         if let Some(process) = sys.process(Pid::from_u32(pid)) {
             info.state = "running".to_string();
             info.pid = Some(pid);
 
-            // Get uptime
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
-            let start_time = process.start_time();
-            info.uptime_seconds = Some(now - start_time);
-
-            // Get memory usage (in MB)
+            info.uptime_seconds = Some(now.saturating_sub(process.start_time()));
             info.memory_mb = Some(process.memory() / 1024 / 1024);
-
-            // Get CPU usage
             info.cpu_percent = Some(process.cpu_usage());
         } else {
             // PID file exists but process is dead - clean up

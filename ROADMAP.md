@@ -23,6 +23,19 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha 4 | 功能追平 | 对齐主流启动器的常见能力差距（以研究结论为准） |
 | Alpha 5 | 稳定性与收敛 | 回归固化、文档、正式版发布 |
 
+## v26.4（当前主线：性能与鲁棒性跟进）
+
+主题：消化 v26.3 鲁棒性评估（ROBUSTNESS_V263.md）与 alpha.6 性能发现，补齐跨平台与生态跟进。
+
+| Alpha | 主题 | 内容 | 状态 |
+|---|---|---|---|
+| Alpha 1 | status 性能 + 评估修复 | `status` 全量路径单快照共享探测（p95 ~1.7-3.5s → **~0.2s**）；COM¹ 上标保留名绕过修复；execute usage 错误归类 BAD_REQUEST（F1/F2，见 ROBUSTNESS_V263.md） | 🔄 进行中 |
+| Alpha 2 | Linux CI 编译矩阵 | GitHub Actions：linux/macos check+test（PLATFORM_MATRIX.md 待办落地） | 📋 规划中 |
+| Alpha 3 | cargo-fuzz 接入 CI | log_parser/props/jsonio 模糊目标 nightly job | 📋 规划中 |
+| Alpha 4 | NeoForge MANIFEST 自动化 | 26.x patched-client 自动注入 `Minecraft-Dists: client`（OpenLumin 手工步骤消除） | 📋 规划中 |
+| Alpha 5 | Despotes v26.9 封装 | schedule/macro/condition/redstone 的 mdl game 子命令映射 | 📋 规划中 |
+| Alpha 6–10 | 待定（按使用反馈） | — | 📋 规划中 |
+
 ## v26.3（已完成主线：加固与 Agent 面，收尾于 Alpha 10）
 
 主题：消化 v26.2 鲁棒性评估发现（F1/F3/F4，见 ROBUSTNESS_V262.md），补全 Agent REST/execute 能力面。
