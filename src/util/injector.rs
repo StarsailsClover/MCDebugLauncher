@@ -12,6 +12,26 @@
 #[cfg(windows)]
 pub use windows_impl::*;
 
+/// Check whether the process at `pid` is a JVM (java/javaw). Used by
+/// `mdl inject` to route JVM targets through the JavaAgent + System.load()
+/// path (v26.4-alpha.2) instead of CreateRemoteThread, which crashes on
+/// JDK 25+ with CFG/CET mitigations before DllMain runs.
+///
+/// Portable (sysinfo only): compiled on all platforms so callers can route
+/// JVM vs native targets uniformly. v26.4-alpha.4 CI fix — this used to live
+/// inside the Windows-only module, breaking non-Windows builds.
+pub fn is_jvm_process(pid: u32) -> bool {
+    use sysinfo::{ProcessRefreshKind, System};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessRefreshKind::everything());
+    sys.process(sysinfo::Pid::from_u32(pid))
+        .map(|p| {
+            let name = p.name().to_lowercase();
+            name == "java" || name == "javaw" || name == "java.exe" || name == "javaw.exe"
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(windows)]
 mod windows_impl {
     use anyhow::{bail, Context, Result};
@@ -67,22 +87,6 @@ mod windows_impl {
     fn to_wide(s: &str) -> Vec<u16> {
         OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
     }
-
-/// Check whether the process at `pid` is a JVM (java/javaw). Used by
-/// `mdl inject` to route JVM targets through the JavaAgent + System.load()
-/// path (v26.4-alpha.2) instead of CreateRemoteThread, which crashes on
-/// JDK 25+ with CFG/CET mitigations before DllMain runs.
-pub fn is_jvm_process(pid: u32) -> bool {
-    use sysinfo::{ProcessRefreshKind, System};
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(ProcessRefreshKind::everything());
-    sys.process(sysinfo::Pid::from_u32(pid))
-        .map(|p| {
-            let name = p.name().to_lowercase();
-            name == "java" || name == "javaw" || name == "java.exe" || name == "javaw.exe"
-        })
-        .unwrap_or(false)
-}
 
 /// Inject `dll_path` into the process identified by `pid`.
 pub fn inject_dll(pid: u32, dll_path: &std::path::Path) -> Result<()> {

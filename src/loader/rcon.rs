@@ -115,7 +115,7 @@ pub async fn run_command(addr: &str, password: &str, command: &str) -> Result<St
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
 
     #[test]
     fn test_packet_length_math() {
