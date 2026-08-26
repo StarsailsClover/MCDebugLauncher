@@ -32,7 +32,7 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha 1 | status 性能 + 评估修复 | `status` 全量路径单快照共享探测（p95 ~1.7-3.5s → **~0.2s**）；COM¹ 上标保留名绕过修复；execute usage 错误归类 BAD_REQUEST（F1/F2，见 ROBUSTNESS_V263.md） | ✅ 已完成 |
 | Alpha 2 | mdl inject JVM 路由修复 | **Bug 修复**（用户实测）：`mdl inject --dll` 对 JVM 目标改走 JavaAgent + `System.load()` 路径——JDK 25 CFG/CET 缓解使 CreateRemoteThread 在 DllMain 前崩溃；嵌入 NativeLoaderAgent（premain+agentmain），运行时打包为最小 JAR 经 Attach API 加载；非 JVM 目标（bedrock_server.exe 等）保留旧路径 | ✅ 已完成 |
 | Alpha 3 | Forge/NeoForge 判定修复 | **Bug 修复**（用户实测）：`build_classpath` 与 `add_game_arguments` 中 `is_neoforge` 改用 config `loader_type` 精确判定——旧 main_class 启发式（`bootstraplauncher` 子串）使 Forge 也命中 NeoForge 分支，触发假 version-mismatch bail（Forge version.json id 为 `1.20.1-forge-47.3.0` 无 `neoforge-` 前缀可剥）；附带清理 unused `main_class` 参数 warning | ✅ 已完成 |
-| Alpha 4 | Linux/macOS CI 编译矩阵 | GitHub Actions：linux/macos check+test（PLATFORM_MATRIX.md 待办落地） | 📋 规划中 |
+| Alpha 4 | Linux/macOS CI 编译矩阵 | GitHub Actions `.github/workflows/ci.yml`：linux-x64 / aarch64-darwin / windows-msvc 三目标 check+test（`--locked` + rust-cache + `debuginfo=0`）。**首次非 Windows 编译验证落地**，途中修复两处平台泄漏：`is_jvm_process` 提升为可移植顶层函数（原困在 Windows 模块内，main.rs 无条件调用致 linux/darwin E0425）；`CHANGELOG.md` 从 .gitignore 移出并入库（`include_str!` 构建输入，干净检出缺文件全平台编译失败）。Cargo.lock 开始跟踪（二进制 crate 可复现构建）。macos-13 Intel 腿移除（镜像弃用、30 分钟无 runner）；附带清理 3 处测试 unused-import | ✅ 已完成 |
 | Alpha 5 | cargo-fuzz 接入 CI | log_parser/props/jsonio 模糊目标 nightly job | 📋 规划中 |
 | Alpha 6 | NeoForge MANIFEST 自动化 | 26.x patched-client 自动注入 `Minecraft-Dists: client`（OpenLumin 手工步骤消除） | 📋 规划中 |
 | Alpha 7 | Despotes v26.9 封装 | schedule/macro/condition/redstone 的 mdl game 子命令映射 | 📋 规划中 |

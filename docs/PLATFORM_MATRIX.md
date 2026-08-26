@@ -1,4 +1,4 @@
-# MDL Platform Matrix (v26.3-alpha.2)
+# MDL Platform Matrix (v26.4-alpha.4)
 
 Code-level audit of every platform gate in the source tree, plus the
 verification status per platform. Use this as the checklist for real
@@ -8,19 +8,17 @@ Linux/macOS bring-up.
 
 | Platform | Build | Unit tests | E2E launch | Notes |
 |---|---|---|---|---|
-| windows-x64 (MSVC) | ✅ primary | ✅ 136 passed | ✅ continuous dogfooding | Reference platform |
-| linux-x64 | ⏳ blocked | ⏳ | ⏳ | Target std unavailable on this host (rustup mirror 404); run `cargo check --target x86_64-unknown-linux-gnu` in CI/WSL |
-| macos (aarch64/x64) | ⏳ blocked | ⏳ | ⏳ | Same; no Darwin host |
+| windows-x64 (MSVC) | ✅ primary | ✅ 162 passed | ✅ continuous dogfooding | Reference platform |
+| linux-x64 | ✅ CI green | ✅ CI green | ⏳ pending | `.github/workflows/ci.yml` since v26.4-alpha.4 (`cargo check` + `cargo test` on ubuntu-latest) |
+| macos aarch64 | ✅ CI green | ✅ CI green | ⏳ pending | Same workflow, macos-latest (Apple Silicon) |
+| macos x64 | ❌ dropped | — | — | macos-13 image deprecated by GitHub; Intel hosted runners unavailable (30+ min queue). Revisit via macos-15-intel large runner or self-hosted if needed |
 | windows-x64 (GNU) | ⏳ blocked | — | — | dlltool.exe missing; needs mingw-w64 binutils on PATH |
 
-Blocked items carry the exact blocker so a CI pipeline (or WSL session) can
-pick them up without re-diagnosis:
+CI runs `cargo check --locked` and `cargo test` per target on every push
+to main / PR / tag. Local cross-compilation remains blocked on this dev
+host (rustup mirror 404), so CI is the authoritative non-Windows gate.
 
 ```bash
-# Linux check (CI or WSL):
-cargo check --bin mdl
-cargo test --bin mdl
-
 # GNU backend (after installing mingw-w64):
 cargo +stable-x86_64-pc-windows-gnu check --bin mdl
 ```
@@ -62,5 +60,6 @@ cargo +stable-x86_64-pc-windows-gnu check --bin mdl
 6. **BDS support** targets Windows builds of the server; treat Linux BDS as
    unsupported until the download matrix learns the linux artifact.
 
-*Audit scope: static code inspection at v26.3-alpha.2; runtime rows marked ⏳
-are pending first non-Windows CI run.*
+*Audit scope: static code inspection at v26.3-alpha.2; compile/test rows
+updated from CI results at v26.4-alpha.4. E2E launch on non-Windows hosts
+remains pending until a real Linux/macOS session is available.*
