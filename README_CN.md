@@ -91,30 +91,29 @@ async def listen():
 
 ## 状态
 
-**当前版本**: v26.3
+**当前版本**: v26.4（Alpha 1–8 已发布）
 
-v26.3 主线主题：**加固与 Agent 面完备**——由跨工作区阻塞扫描与 v26.2 鲁棒性评估驱动。
+v26.4 主线主题：**实测驱动修复 + Aprism 生态深化**——每个 Alpha 均由真实使用反馈或 CI 首验落地。
 
 历史主线：
 - ✅ v26.0：核心启动器、实例/模组管理、Agent 游戏控制（Despotes）、整合包导入、JE/基岩专用服、Aprism 产品矩阵、下载进度条、`mdl doctor`
 - ✅ v26.1：能力清单、agent 错误码与 stop 命令、BDS 全生命周期、实例克隆/重命名
 - ✅ v26.2：空闲看门狗、流式下载（峰值 ~1.9GB→<100MB）、OOM 自保护、JavaAgent 启动/热附加注册表、mrpack 导出往返、服务端 RCON 自动化、Aprism 生态视图、启动指标 + JSON 日志
+- ✅ v26.3：输入加固与 BOM 容错、OOM 二次确认 + 误杀修复、看门狗竞态修复、结构化 properties 编辑、凭据 ACL 收紧、性能基线 `mdl bench`、对抗性解析套件
 
-v26.3 亮点（Alpha 1–9）：
-- ✅ 输入加固：实例名校验（Windows 保留设备名/分隔符）、JSON 配置 BOM 容错且报错含文件路径
-- ✅ Agent API 二期：`instance/:i/metrics` + `/disk` 端点；execute 新增 `metrics`/`disk`/`inject-agent`/`server-cmd`
-- ✅ attach 归因修正：非 JVM 目标准确报因，不再误导为模块缺失
-- ✅ OOM 二次确认：终止前列出 PID/窗口标题/内存（`--oom-confirm auto|always|never`、`--oom-list-only`）
-- ✅ OOM 误杀修复：强启动标记——`…Minecraft…` 工作区内编译守护/IDE 构建永不清扫
-- ✅ 看门狗/wait-ready 竞态修复：就绪后再武装（解决 OpenLumin 实测阻塞）
-- ✅ 服务端深化：结构化 properties 编辑（注释保留）、allowlist/op/ban 封装、RCON 密码轮换
-- ✅ 安全：账户凭据文件权限收紧至当前用户（ACL/chmod）
-- ✅ 性能基线：`mdl bench` + 门控脚本；doctor 检出多套并存安装；`--mc` 别名；文档与示例全面刷新
+v26.4 亮点（Alpha 1–8）：
+- ✅ status 单快照性能优化（p95 ~1.7s → ~0.2s）
+- ✅ `mdl inject` JVM 目标改走 JavaAgent 路径（JDK 25 CFG/CET 兼容）
+- ✅ Forge/NeoForge 判定修复（loader_type 精确判定，消除假 version-mismatch）
+- ✅ Linux/macOS/Windows 三平台 CI 编译矩阵全绿；nightly cargo-fuzz 模糊测试（首跑即修复双 BOM 崩溃）
+- ✅ NeoForge 26.x patched-client MANIFEST 自动注入（`Minecraft-Dists: client`，OpenLumin 手工步骤消除）
+- ✅ **AprismJDK (AJR)**：`mdl jdk install/list/remove`，launch `--jdk aprism[@ver]`，SHA256 校验，不可用时自动回退 Eclipse Adoptium
+- ✅ Despotes v26.9 四原语封装：schedule/macro/condition/redstone（CLI + Agent API 双面）
 
 **已测试配置：**
-- Vanilla Minecraft 1.21.x ✅
+- Vanilla Minecraft 1.21.x / 1.20.1 ✅
 - Fabric Loader + Fabric API ✅
-- Forge 52.x / NeoForge 21.x ✅
+- Forge 47.x / NeoForge 21.x–26.x ✅
 - 基岩版专用服 1.26.x ✅
 - JE 专用服 1.21.4 ✅
 

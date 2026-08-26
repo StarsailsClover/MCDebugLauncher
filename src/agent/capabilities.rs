@@ -153,6 +153,7 @@ pub fn manifest() -> Capabilities {
                     OptionSpec { key: "agent", values: "true", description: "Enable in-game Despotes control" },
                     OptionSpec { key: "agent-port", values: "<port>", description: "Despotes control port (default 25585)" },
                     OptionSpec { key: "java-path", values: "<path>", description: "Custom java executable" },
+                    OptionSpec { key: "jdk", values: "aprism[@<tag|version>]", description: "Use an installed AprismJDK runtime; falls back to Adoptium when unavailable (v26.4-alpha.9)" },
                     OptionSpec { key: "memory", values: "4G|2048M", description: "Memory allocation" },
                     OptionSpec { key: "aprism", values: "true", description: "Attach the Aprism JE javaagent" },
                     OptionSpec { key: "enter-test-world", values: "true", description: "Auto-enter test world when ready" },

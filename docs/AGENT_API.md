@@ -77,7 +77,7 @@ Response: `{"status","exit_code","stdout","error_code?","data?"}`.
 | `list` | – | – |
 | `create` | `<name> [version]` | – |
 | `info` | `<name>` | – |
-| `launch` | `<name>` | username, server, fullscreen, width, height, agent, agent-port, java-path, memory, aprism, enter-test-world, no-queue, idle-timeout, no-idle-timeout, **oom-confirm auto\|always\|never**, **oom-list-only**, javaagents |
+| `launch` | `<name>` | username, server, fullscreen, width, height, agent, agent-port, java-path, **jdk aprism[@ver]**, memory, aprism, enter-test-world, no-queue, idle-timeout, no-idle-timeout, **oom-confirm auto\|always\|never**, **oom-list-only**, javaagents |
 | `stop` | `<name>` | – |
 | `metrics` | `<name>` | history=true |
 | `disk` | `<name>` | – |

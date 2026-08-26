@@ -960,6 +960,30 @@ async fn execute_command(
             if let Some(java_path) = options.get("java-path") {
                 launch_options.java_path = Some(java_path.clone());
             }
+            // v26.4-alpha.9: AprismJDK selection. Same contract as the CLI
+            // (--jdk aprism[@<tag|version>]); on resolution failure the
+            // standard detection chain (Adoptium provisioning) applies, and
+            // the reason is logged for the agent's event stream.
+            if let Some(jdk) = options.get("jdk") {
+                if options.contains_key("java-path") {
+                    return Err(anyhow::anyhow!("jdk and java-path options are mutually exclusive"));
+                }
+                let hint = jdk
+                    .strip_prefix("aprism")
+                    .map(|rest| rest.trim_start_matches('@'))
+                    .unwrap_or(jdk.as_str());
+                match crate::loader::aprism_jdk::resolve(Some(hint)) {
+                    Ok((tag, java)) => {
+                        tracing::info!("launch via agent API uses AprismJDK {tag}: {}", java.display());
+                        launch_options.java_path = Some(java.display().to_string());
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "AprismJDK unavailable ({e:#}); falling back to system Java / Eclipse Adoptium"
+                        );
+                    }
+                }
+            }
             if let Some(memory) = options.get("memory") {
                 launch_options.memory = Some(memory.clone());
             }

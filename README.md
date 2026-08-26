@@ -8,14 +8,16 @@ A command-line Minecraft launcher designed for rapid testing, mod development, a
 
 - **One-Command Launch**: Install and launch any Minecraft version with any mod loader in a single command
 - **Multi-Loader Support**: Vanilla, Forge, NeoForge, Fabric, Quilt, LegacyFabric, OptiFine, Aprism JE Native
-- **Agent Game Control (Despotes)**: Observe and operate a running game without stealing focus — GPU screenshots (Windows.Graphics.Capture + in-game framebuffer), input injection (keys/mouse/look/chat), status queries; the game keeps running while you focus other apps (`pauseOnLostFocus` handled automatically)
+- **Aprism Ecosystem**: one-stop management of AprismRefract (.aep loader extensions), AprismPrismate (loader bridge) and **AprismJDK** (AJR runtime: `mdl jdk install`, launch `--jdk aprism@26.2` with automatic Eclipse Adoptium fallback)
+- **Agent Game Control (Despotes)**: Observe and operate a running game without stealing focus — GPU screenshots (Windows.Graphics.Capture + in-game framebuffer), input injection (keys/mouse/look/chat), status queries; plus v26.9 automation primitives — periodic schedules, macro record/replay, conditional branches and redstone perception (`mdl game` + Agent API)
 - **Modrinth Modpack Import**: `mdl import` creates the instance with the pack's exact version/loader, copies overrides and auto-completes every missing file (sha1-verified, idempotent)
 - **Java Edition Dedicated Servers**: `mdl server create/launch/stop` downloads the official server.jar, manages eula/properties and runs servers in the background
 - **Mirrors & Resilient Downloads**: built-in official + Chinese mirror sources with live latency probing, chunked (HTTP Range) parallel downloads, automatic source switching, sha1-verified 7-day copy-install cache
 - **Content Search & Install**: search and install mods / resource packs / shaders from Modrinth with one command
 - **Microsoft Accounts**: device-code login (headless-friendly), account list, skin download
-- **Integrity & Self-Repair**: pre-launch verification of client JAR, libraries and assets with automatic re-download of corrupted files; Fabric API auto-install at launch
+- **Integrity & Self-Repair**: pre-launch verification of client JAR, libraries and assets with automatic re-download of corrupted files; Fabric API auto-install at launch; NeoForge 26.x patched-client MANIFEST auto-fix (`Minecraft-Dists`)
 - **Intelligent Diagnostics**: automatic crash report collection, log analysis, and error detection
+- **Cross-Platform CI**: every push compiles and tests on Linux, macOS (aarch64) and Windows; nightly bounded fuzzing guards the config/log parsers
 - **Agent-Friendly**: JSON-structured output, HTTP/WebSocket agent server with launch progress and game-ready events
 - **Instance Management**: mod management, configuration import/export, world backup/restore, optional launch queue (`--no-queue`)
 - **Chinese Localization**: `--lang zh` messages and UTF-8 console output on Windows
