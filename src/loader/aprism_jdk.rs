@@ -441,6 +441,12 @@ mod tests {
 
     #[test]
     fn test_select_release_prefers_stable_and_platform() {
+        // Platform-agnostic: build asset names for whatever host the test
+        // runs on (CI covers linux/macos/windows).
+        let (os, arch) = current_platform();
+        let native_ext = if cfg!(target_os = "windows") { "zip" } else { "tar.gz" };
+        let fallback_ext = if cfg!(target_os = "windows") { "tar.gz" } else { "zip" };
+
         let mk = |tag: &str, pre: bool, names: &[&str]| AprismJdkRelease {
             tag: tag.to_string(),
             prerelease: pre,
@@ -463,8 +469,8 @@ mod tests {
                 &[
                     "aprismate-26.2.jar",
                     "SHA256SUMS.txt",
-                    "AprismJDK-26.2-windows-x64-jdk.tar.gz",
-                    "AprismJDK-26.2-windows-x64-jdk.zip",
+                    &format!("AprismJDK-26.2-{os}-{arch}-jdk.{fallback_ext}"),
+                    &format!("AprismJDK-26.2-{os}-{arch}-jdk.{native_ext}"),
                 ],
             ),
         ];
@@ -472,10 +478,10 @@ mod tests {
         let (rel, (_, parsed)) = select_release(&releases, None, false).unwrap();
         assert_eq!(rel.tag, "v26.2");
         assert_eq!(parsed.version, "26.2");
-        assert_eq!(parsed.os, "windows");
-        assert_eq!(parsed.arch, "x64");
-        // Platform-native format preferred over the fallback tar.gz.
-        assert_eq!(parsed.ext, "zip");
+        assert_eq!(parsed.os, os);
+        assert_eq!(parsed.arch, arch);
+        // Platform-native format preferred over the fallback archive.
+        assert_eq!(parsed.ext, native_ext);
 
         // Version hint hits across tags.
         let (rel2, _) = select_release(&releases, Some("26.2"), false).unwrap();
@@ -483,7 +489,11 @@ mod tests {
         assert!(select_release(&releases, Some("99.9"), false).is_none());
 
         // Stable-first: prereleases skipped unless requested.
-        let pre_only = vec![mk("v27.0-beta", true, &["AprismJDK-27.0-windows-x64-jdk.zip"])];
+        let pre_only = vec![mk(
+            "v27.0-beta",
+            true,
+            &[format!("AprismJDK-27.0-{os}-{arch}-jdk.{native_ext}").as_str()],
+        )];
         assert!(select_release(&pre_only, None, false).is_none());
         assert!(select_release(&pre_only, None, true).is_some());
     }
