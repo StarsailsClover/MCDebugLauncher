@@ -51,9 +51,9 @@ launch.log
 mdl-v26*-windows-x64.zip
 mdl-v26*-windows-x64/
 
-# Documentation files (release notes, changelogs)
+# Documentation files (release notes; CHANGELOG.md is NOT ignored - it is
+# include_str!'d into the binary at src/util/changelog.rs and must be tracked)
 RELEASE_NOTES*.md
-CHANGELOG.md
 
 # Installer logs (NeoForge/Forge)
 neoforge-*-installer.jar.log
