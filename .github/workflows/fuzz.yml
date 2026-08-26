@@ -1,0 +1,65 @@
+name: Fuzz
+
+# Nightly bounded fuzzing for the self-contained parser surfaces
+# (v26.4-alpha.5). Runs are time-boxed so they stay cheap; crashes upload
+# the corpus artifact for reproduction. The main ci.yml stays fast by not
+# building libFuzzer targets.
+
+on:
+  schedule:
+    # Mondays 03:00 UTC
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      seconds_per_target:
+        description: 'Fuzzing budget per target (seconds)'
+        required: false
+        default: '180'
+  pull_request:
+    paths:
+      - 'fuzz/**'
+      - 'src/diagnostic/log_parser.rs'
+      - 'src/loader/props.rs'
+      - 'src/util/jsonio.rs'
+      - '.github/workflows/fuzz.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Build targets
+        working-directory: fuzz
+        run: cargo fuzz build
+
+      - name: Fuzz parse_log_content
+        working-directory: fuzz
+        run: cargo fuzz run parse_log_content -- -max_total_time=${{ github.event.inputs.seconds_per_target || '180' }} -rss_limit_mb=4096 -print_final_stats=1
+
+      - name: Fuzz props_editor
+        working-directory: fuzz
+        run: cargo fuzz run props_editor -- -max_total_time=${{ github.event.inputs.seconds_per_target || '180' }} -rss_limit_mb=4096 -print_final_stats=1
+
+      - name: Fuzz jsonio_bom_parse
+        working-directory: fuzz
+        run: cargo fuzz run jsonio_bom_parse -- -max_total_time=${{ github.event.inputs.seconds_per_target || '180' }} -rss_limit_mb=4096 -print_final_stats=1
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: |
+            fuzz/crash-*
+            fuzz/artifacts/*
+          if-no-files-found: ignore

@@ -62,3 +62,11 @@ neoforge-*-installer.jar.log
 release_build.log
 build_output.txt
 
+# Fuzzing (cargo-fuzz workspace under fuzz/)
+fuzz/target
+fuzz/corpus
+fuzz/artifacts
+fuzz/coverage
+fuzz/crash-*
+fuzz/fuzz_targets/*.rs.orig
+

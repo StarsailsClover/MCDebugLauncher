@@ -13,6 +13,13 @@ categories = ["command-line-utilities", "development-tools"]
 name = "mdl"
 path = "src/main.rs"
 
+# Minimal parser-only library (see src/lib.rs): consumed by the cargo-fuzz
+# targets in fuzz/. The binary is unaffected - main.rs keeps its own module
+# tree, so these three files are compiled twice (bin + lib), which is fine
+# for pure parsers.
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
 # CLI framework
 clap = { version = "4.5", features = ["derive", "cargo", "env"] }
