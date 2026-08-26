@@ -150,6 +150,61 @@ pub async fn game_status(instance_dir: &Path) -> Result<Value> {
     send_query(instance_dir, json!({"type": "status"})).await
 }
 
+// ---------------------------------------------------------------------------
+// v26.9 automation primitives (schedule / macro / condition / redstone)
+// ---------------------------------------------------------------------------
+
+/// Query redstone signal at a block position (Despotes v26.9). When no
+/// coordinates are given the agent falls back to the crosshair target block.
+pub async fn redstone_query(
+    instance_dir: &Path,
+    x: Option<i32>,
+    y: Option<i32>,
+    z: Option<i32>,
+) -> Result<Value> {
+    let mut query = json!({"type": "redstone"});
+    match (x, y, z) {
+        (Some(x), Some(y), Some(z)) => {
+            query["x"] = json!(x);
+            query["y"] = json!(y);
+            query["z"] = json!(z);
+        }
+        _ => {}
+    }
+    send_query(instance_dir, query).await
+}
+
+/// Send a raw automation action. This is the shared channel for the
+/// schedule/macro/condition families; op-specific validation lives on the
+/// Despotes side, and MDL stays forward-compatible with future ops.
+pub async fn automation_action(instance_dir: &Path, command: Value) -> Result<Value> {
+    send_action(instance_dir, command).await
+}
+
+/// Build a `{"type":"schedule", ...}` action payload.
+pub fn schedule_payload(op: &str, name: Option<&str>, period_ticks: Option<u64>, commands: Option<Value>) -> Value {
+    let mut cmd = json!({"type": "schedule", "op": op});
+    if let Some(n) = name { cmd["name"] = json!(n); }
+    if let Some(t) = period_ticks { cmd["periodTicks"] = json!(t); }
+    if let Some(c) = commands { cmd["commands"] = c; }
+    cmd
+}
+
+/// Build a `{"type":"macro", ...}` action payload.
+pub fn macro_payload(op: &str, name: Option<&str>, step: Option<Value>) -> Value {
+    let mut cmd = json!({"type": "macro", "op": op});
+    if let Some(n) = name { cmd["name"] = json!(n); }
+    if let Some(s) = step { cmd["command"] = s; }
+    cmd
+}
+
+/// Build a `{"type":"condition", ...}` action payload.
+pub fn condition_payload(if_query: Value, then_cmds: Value, else_cmds: Option<Value>) -> Value {
+    let mut cmd = json!({"type": "condition", "if": if_query, "then": then_cmds});
+    if let Some(e) = else_cmds { cmd["else"] = e; }
+    cmd
+}
+
 /// Press, release, or tap a keyboard key inside the game.
 ///
 /// `key` uses friendly names ("w", "a", "space", "escape", "e", ...) or raw

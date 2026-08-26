@@ -7,6 +7,7 @@
 // MCDebugLauncher - Main entry point
 
 use anyhow::Result;
+use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use tracing::{info, Level};
@@ -283,6 +284,100 @@ enum GameCommands {
 
         /// Message or command (leading "/" is treated as a command)
         message: String,
+    },
+
+    /// Query redstone signal at a block position (Despotes v26.9). Omit
+    /// coordinates to probe the crosshair target block instead.
+    Redstone {
+        /// Instance name
+        instance: String,
+
+        /// Block X (requires y and z)
+        #[arg(long)]
+        x: Option<i32>,
+
+        /// Block Y
+        #[arg(long)]
+        y: Option<i32>,
+
+        /// Block Z
+        #[arg(long)]
+        z: Option<i32>,
+    },
+
+    /// Periodic command execution on the client thread (v26.9). Ops:
+    /// add / status / remove. `add` needs --name, --period-ticks and at
+    /// least one --command (each a JSON action, e.g.
+    /// '{"type":"chat","text":"hi"}').
+    Schedule {
+        /// Instance name
+        instance: String,
+
+        /// Operation: add, status, remove
+        op: String,
+
+        /// Schedule name (add/remove)
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Repetition period in game ticks (20 = 1s)
+        #[arg(long)]
+        period_ticks: Option<u64>,
+
+        /// JSON action to run each period; repeatable for sequences
+        #[arg(long = "command")]
+        commands: Vec<String>,
+    },
+
+    /// Record & replay action sequences (v26.9). Ops: start-recording,
+    /// record-step (--step JSON), stop-recording, play, stop, delete,
+    /// status — most take --name.
+    Macro {
+        /// Instance name
+        instance: String,
+
+        /// Macro operation
+        op: String,
+
+        /// Macro name
+        #[arg(long)]
+        name: Option<String>,
+
+        /// One recorded step as a JSON action (record-step)
+        #[arg(long)]
+        step: Option<String>,
+    },
+
+    /// Conditional branch execution (v26.9): run --if query, extract a field
+    /// via dot-path, compare, then execute the matching branch inline.
+    /// Example:
+    ///   mdl game condition inst --if '{"type":"status","field":"result.inGame","op":"exists"}' \
+    ///     --then '[{"type":"ping"}]' --else '[{"type":"chat","text":"not in game"}]'
+    Condition {
+        /// Instance name
+        instance: String,
+
+        /// Condition query as JSON: {"type":..., "field":"dot.path", "op":...}
+        #[arg(long = "if")]
+        if_: String,
+
+        /// Then-branch actions as a JSON array (default [{"type":"ping"}])
+        #[arg(long = "then")]
+        then_: Option<String>,
+
+        /// Else-branch actions as a JSON array
+        #[arg(long = "else")]
+        else_: Option<String>,
+    },
+
+    /// Send a raw Despotes protocol action as JSON (escape hatch for
+    /// primitives without dedicated MDL subcommands)
+    RawAction {
+        /// Instance name
+        instance: String,
+
+        /// Full action payload, e.g. '{"type":"ping"}'
+        json: String,
     },
 
     /// Hot-attach a Java agent JAR into the RUNNING game JVM (v26.2-alpha.6).
@@ -1292,9 +1387,24 @@ async fn run() -> Result<()> {
                         .strip_prefix("aprism")
                         .map(|rest| rest.trim_start_matches('@'))
                         .unwrap_or(spec);
-                    let (tag, java) = loader::aprism_jdk::resolve(Some(hint))?;
-                    println!("Using AprismJDK runtime {tag}: {}", java.display());
-                    Some(java.display().to_string())
+                    match loader::aprism_jdk::resolve(Some(hint)) {
+                        Ok((tag, java)) => {
+                            println!("Using AprismJDK runtime {tag}: {}", java.display());
+                            Some(java.display().to_string())
+                        }
+                        Err(e) => {
+                            // v26.4-alpha.7: graceful degradation. An absent or
+                            // mismatched AprismJDK must not block launching -
+                            // fall back to the standard detection chain, which
+                            // provisions Eclipse Adoptium (Temurin) when no
+                            // local runtime satisfies the MC version.
+                            println!(
+                                "AprismJDK unavailable ({e:#}); \
+                                 falling back to system Java / Eclipse Adoptium provisioning"
+                            );
+                            None
+                        }
+                    }
                 }
             };
             cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach, no_queue, agent, agent_port, resolved_java.as_deref(), memory.as_deref(), dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive, &oom_confirm, oom_list_only, &javaagents).await?;
@@ -1394,6 +1504,21 @@ async fn run() -> Result<()> {
                 }
                 GameCommands::Chat { instance, message } => {
                     cmd_game_chat(&instance, &message).await?;
+                }
+                GameCommands::Redstone { instance, x, y, z } => {
+                    cmd_game_redstone(&instance, x, y, z).await?;
+                }
+                GameCommands::Schedule { instance, op, name, period_ticks, commands } => {
+                    cmd_game_schedule(&instance, &op, name.as_deref(), period_ticks, &commands).await?;
+                }
+                GameCommands::Macro { instance, op, name, step } => {
+                    cmd_game_macro(&instance, &op, name.as_deref(), step.as_deref()).await?;
+                }
+                GameCommands::Condition { instance, if_, then_, else_ } => {
+                    cmd_game_condition(&instance, &if_, then_.as_deref(), else_.as_deref()).await?;
+                }
+                GameCommands::RawAction { instance, json } => {
+                    cmd_game_raw_action(&instance, &json).await?;
                 }
                 GameCommands::InjectAgent { instance, jar, params, java_path } => {
                     cmd_game_inject_agent(&instance, &jar, params.as_deref(), java_path.as_deref()).await?;
@@ -3440,6 +3565,131 @@ async fn cmd_game_chat(instance: &str, message: &str) -> Result<()> {
     let dir = resolve_instance_dir(instance).await?;
     let response = game::client::chat(&dir, message).await?;
     print_game_response(&response);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Despotes v26.9 automation primitives
+// ---------------------------------------------------------------------------
+
+async fn cmd_game_redstone(instance: &str, x: Option<i32>, y: Option<i32>, z: Option<i32>) -> Result<()> {
+    if x.is_some() != y.is_some() || x.is_some() != z.is_some() {
+        anyhow::bail!("--x, --y and --z must be given together (or all omitted for crosshair probe)");
+    }
+    let dir = resolve_instance_dir(instance).await?;
+    let response = game::client::redstone_query(&dir, x, y, z).await?;
+    print_game_response(&response);
+    Ok(())
+}
+
+async fn cmd_game_schedule(
+    instance: &str,
+    op: &str,
+    name: Option<&str>,
+    period_ticks: Option<u64>,
+    commands: &[String],
+) -> Result<()> {
+    let op = op.to_ascii_lowercase();
+    match op.as_str() {
+        "add" => {
+            let name = name.ok_or_else(|| anyhow::anyhow!("schedule add requires --name"))?;
+            let ticks = period_ticks
+                .ok_or_else(|| anyhow::anyhow!("schedule add requires --period-ticks"))?;
+            if commands.is_empty() {
+                anyhow::bail!("schedule add requires at least one --command (JSON action)");
+            }
+            let mut parsed_cmds = Vec::new();
+            for c in commands {
+                parsed_cmds.push(serde_json::from_str::<serde_json::Value>(c)
+                    .with_context(|| format!("Invalid --command JSON: {c}"))?);
+            }
+            let payload = game::client::schedule_payload(
+                "add", Some(name), Some(ticks), Some(serde_json::Value::Array(parsed_cmds)),
+            );
+            let dir = resolve_instance_dir(instance).await?;
+            print_game_response(&game::client::automation_action(&dir, payload).await?);
+        }
+        "status" | "remove" => {
+            if op == "remove" && name.is_none() {
+                anyhow::bail!("schedule remove requires --name");
+            }
+            let payload = game::client::schedule_payload(&op, name, None, None);
+            let dir = resolve_instance_dir(instance).await?;
+            print_game_response(&game::client::automation_action(&dir, payload).await?);
+        }
+        other => anyhow::bail!(
+            "Unknown schedule op '{other}'. Supported: add / status / remove \
+             (or use 'mdl game raw-action' for forward compatibility)"
+        ),
+    }
+    Ok(())
+}
+
+async fn cmd_game_macro(
+    instance: &str,
+    op: &str,
+    name: Option<&str>,
+    step: Option<&str>,
+) -> Result<()> {
+    const OPS: &[&str] = &[
+        "start-recording", "record-step", "stop-recording",
+        "play", "stop", "delete", "status",
+    ];
+    if !OPS.contains(&op) {
+        anyhow::bail!(
+            "Unknown macro op '{op}'. Supported: {}",
+            OPS.join(", ")
+        );
+    }
+    let step_value = match step {
+        Some(s) => Some(serde_json::from_str::<serde_json::Value>(s)
+            .with_context(|| format!("Invalid --step JSON: {s}"))?),
+        None => None,
+    };
+    let needs_name = !matches!(op, "stop-recording" | "status" | "stop");
+    if needs_name && name.is_none() {
+        anyhow::bail!("macro {op} requires --name");
+    }
+    if op == "record-step" && step_value.is_none() {
+        anyhow::bail!("macro record-step requires --step '<json action>'");
+    }
+    let payload = game::client::macro_payload(op, name, step_value);
+    let dir = resolve_instance_dir(instance).await?;
+    print_game_response(&game::client::automation_action(&dir, payload).await?);
+    Ok(())
+}
+
+async fn cmd_game_condition(
+    instance: &str,
+    if_json: &str,
+    then_json: Option<&str>,
+    else_json: Option<&str>,
+) -> Result<()> {
+    let parse_array = |label: &str, raw: Option<&str>| -> Result<Option<serde_json::Value>> {
+        match raw {
+            None => Ok(None),
+            Some(s) => serde_json::from_str::<serde_json::Value>(s)
+                .with_context(|| format!("Invalid --{label} JSON (expected an array of actions): {s}"))
+                .map(Some),
+        }
+    };
+    let if_query: serde_json::Value = serde_json::from_str(if_json)
+        .with_context(|| format!("Invalid --if JSON: {if_json}"))?;
+    let then_cmds = parse_array("then", then_json)?
+        .unwrap_or_else(|| serde_json::json!([{"type": "ping"}]));
+    let else_cmds = parse_array("else", else_json)?;
+
+    let payload = game::client::condition_payload(if_query, then_cmds, else_cmds);
+    let dir = resolve_instance_dir(instance).await?;
+    print_game_response(&game::client::automation_action(&dir, payload).await?);
+    Ok(())
+}
+
+async fn cmd_game_raw_action(instance: &str, json_payload: &str) -> Result<()> {
+    let command: serde_json::Value = serde_json::from_str(json_payload)
+        .with_context(|| format!("Invalid action JSON: {json_payload}"))?;
+    let dir = resolve_instance_dir(instance).await?;
+    print_game_response(&game::client::automation_action(&dir, command).await?);
     Ok(())
 }
 
