@@ -106,7 +106,8 @@ pub fn manifest() -> Capabilities {
             Endpoint { method: "GET",  path: "/api/v1/game/:instance/screenshot",purpose: "PNG screenshot (Despotes framebuffer, WGC fallback)" },
             Endpoint { method: "GET",  path: "/api/v1/game/:instance/ready",     purpose: "Whether the game broadcast ready (in world)" },
             Endpoint { method: "GET",  path: "/api/v1/game/:instance/idle-status",purpose: "Idle watchdog status (last output age, threshold, remaining)" },
-            Endpoint { method: "POST", path: "/api/v1/game/:instance/input",     purpose: "Inject an in-game input (key/click/look/chat/scroll)" },
+            Endpoint { method: "POST", path: "/api/v1/game/:instance/input",     purpose: "Inject an in-game input (key/click/look/chat/scroll/schedule/macro/condition/raw-action)" },
+            Endpoint { method: "POST", path: "/api/v1/game/:instance/redstone",  purpose: "Redstone signal query at a block position (crosshair when no coords)" },
             // v26.3-alpha.1: instance-scoped observability
             Endpoint { method: "GET",  path: "/api/v1/instance/:instance/metrics", purpose: "Launch metrics for an instance (?history=true for full history)" },
             Endpoint { method: "GET",  path: "/api/v1/instance/:instance/disk",    purpose: "Disk usage with a top-level breakdown" },
@@ -258,6 +259,42 @@ pub fn manifest() -> Capabilities {
                     ArgSpec { name: "message", required: true, description: "Message or command text" },
                 ],
             },
+            // Despotes v26.9 automation primitives (v26.4-alpha.8)
+            GameInput {
+                input_type: "schedule",
+                description: "Periodic action sequence on the client thread (op = add|status|remove)",
+                fields: vec![
+                    ArgSpec { name: "op", required: true, description: "add | status | remove" },
+                    ArgSpec { name: "name", required: false, description: "Schedule name (add/remove)" },
+                    ArgSpec { name: "periodTicks", required: false, description: "Repetition period in game ticks, 20 = 1s (add)" },
+                    ArgSpec { name: "commands", required: false, description: "Array of JSON actions to run each period (add)" },
+                ],
+            },
+            GameInput {
+                input_type: "macro",
+                description: "Record & replay action sequences (one tick apart on replay)",
+                fields: vec![
+                    ArgSpec { name: "op", required: true, description: "start-recording | record-step | stop-recording | play | stop | delete | status" },
+                    ArgSpec { name: "name", required: false, description: "Macro name (required for most ops)" },
+                    ArgSpec { name: "step", required: false, description: "One JSON action to append (record-step)" },
+                ],
+            },
+            GameInput {
+                input_type: "condition",
+                description: "Conditional branch execution with dot-path comparison (exists/eq/ne/gt/lt/contains)",
+                fields: vec![
+                    ArgSpec { name: "if", required: true, description: "Condition query JSON: {type, field, op, value}" },
+                    ArgSpec { name: "then", required: true, description: "Array of JSON actions for the then branch" },
+                    ArgSpec { name: "else", required: false, description: "Array of JSON actions for the else branch" },
+                ],
+            },
+            GameInput {
+                input_type: "raw-action",
+                description: "Raw Despotes protocol passthrough (forward compatibility)",
+                fields: vec![
+                    ArgSpec { name: "command", required: true, description: "Full protocol action as a JSON object" },
+                ],
+            },
         ],
         events: EventsSpec {
             websocket_path: "/api/v1/events",
@@ -328,9 +365,9 @@ mod tests {
         }
         // All five game input types must be declared.
         let types: Vec<&str> = caps.game_inputs.iter().map(|g| g.input_type).collect();
-        for t in ["key", "look", "click", "scroll", "chat"] {
-            assert!(types.contains(&t), "missing game input {}", t);
-        }
+            for t in ["key", "look", "click", "scroll", "chat", "schedule", "macro", "condition", "raw-action"] {
+                assert!(types.contains(&t), "missing game input {}", t);
+            }
         // Event stream contract must include all actual ServerEvent kinds.
         for k in [
             "launch_started",

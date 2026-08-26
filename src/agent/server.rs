@@ -114,6 +114,39 @@ enum GameInputRequest {
     Chat {
         message: String,
     },
+    // Despotes v26.9 automation primitives (v26.4-alpha.8)
+    /// Periodic action sequence: op = add | status | remove
+    Schedule {
+        op: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default, rename = "periodTicks")]
+        period_ticks: Option<u64>,
+        #[serde(default)]
+        commands: Vec<serde_json::Value>,
+    },
+    /// Macro lifecycle: start-recording | record-step | stop-recording |
+    /// play | stop | delete | status
+    Macro {
+        op: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        step: Option<serde_json::Value>,
+    },
+    /// Conditional branch: run the if-query, compare via dot-path field,
+    /// execute then/else inline
+    Condition {
+        #[serde(rename = "if")]
+        if_query: serde_json::Value,
+        then_branch: Vec<serde_json::Value>,
+        #[serde(default, rename = "else")]
+        else_branch: Option<Vec<serde_json::Value>>,
+    },
+    /// Raw protocol passthrough for forward compatibility
+    RawAction {
+        command: serde_json::Value,
+    },
 }
 
 fn default_action() -> String {
@@ -173,6 +206,7 @@ impl AgentServer {
             // v26.2-alpha.1: idle watchdog status
             .route("/api/v1/game/:instance/idle-status", get(handle_idle_status))
             .route("/api/v1/game/:instance/input", post(handle_game_input))
+.route("/api/v1/game/:instance/redstone", post(handle_game_redstone))
             // v26.3-alpha.1: instance-scoped observability
             .route("/api/v1/instance/:instance/metrics", get(handle_instance_metrics))
             .route("/api/v1/instance/:instance/disk", get(handle_instance_disk))
@@ -697,6 +731,69 @@ async fn handle_game_input(
         }
         GameInputRequest::Scroll { amount } => crate::game::client::scroll(&dir, amount).await,
         GameInputRequest::Chat { message } => crate::game::client::chat(&dir, &message).await,
+        GameInputRequest::Schedule { op, name, period_ticks, commands } => {
+            let op = op.to_ascii_lowercase();
+            let payload = match op.as_str() {
+                "add" => {
+                    if name.is_none() || period_ticks.is_none() || commands.is_empty() {
+                        Err(anyhow::anyhow!(
+                            "schedule add requires name, periodTicks and at least one command"
+                        ))
+                    } else {
+                        Ok(crate::game::client::schedule_payload(
+                            "add",
+                            name.as_deref(),
+                            period_ticks,
+                            Some(serde_json::Value::Array(commands)),
+                        ))
+                    }
+                }
+                "status" => Ok(crate::game::client::schedule_payload("status", None, None, None)),
+                "remove" => match name {
+                    Some(n) => Ok(crate::game::client::schedule_payload("remove", Some(n.as_str()), None, None)),
+                    None => Err(anyhow::anyhow!("schedule remove requires a name")),
+                },
+                other => Err(anyhow::anyhow!(
+                    "Unknown schedule op '{other}'. Supported: add / status / remove"
+                )),
+            };
+            match payload {
+                Ok(p) => crate::game::client::automation_action(&dir, p).await,
+                Err(e) => Err(e),
+            }
+        }
+        GameInputRequest::Macro { op, name, step } => {
+            const OPS: &[&str] = &[
+                "start-recording", "record-step", "stop-recording",
+                "play", "stop", "delete", "status",
+            ];
+            let validated = if !OPS.contains(&op.as_str()) {
+                Err(anyhow::anyhow!("Unknown macro op '{}'. Supported: {}", op, OPS.join(", ")))
+            } else {
+                let needs_name = !matches!(op.as_str(), "stop-recording" | "status" | "stop");
+                if needs_name && name.is_none() {
+                    Err(anyhow::anyhow!("macro {} requires a name", op))
+                } else if op == "record-step" && step.is_none() {
+                    Err(anyhow::anyhow!("macro record-step requires a step action"))
+                } else {
+                    Ok(crate::game::client::macro_payload(&op, name.as_deref(), step))
+                }
+            };
+            match validated {
+                Ok(p) => crate::game::client::automation_action(&dir, p).await,
+                Err(e) => Err(e),
+            }
+        }
+        GameInputRequest::Condition { if_query, then_branch, else_branch } => {
+            crate::game::client::automation_action(
+                &dir,
+                crate::game::client::condition_payload(if_query, serde_json::Value::Array(then_branch), else_branch.map(serde_json::Value::Array)),
+            )
+            .await
+        }
+        GameInputRequest::RawAction { command } => {
+            crate::game::client::automation_action(&dir, command).await
+        }
     };
 
     match result {
@@ -711,6 +808,43 @@ async fn handle_game_input(
 // ---------------------------------------------------------------------------
 // Command execution
 // ---------------------------------------------------------------------------
+
+/// Redstone signal query (Despotes v26.9). Body is optional; when it omits
+/// coordinates the agent probes the crosshair target block.
+#[derive(Debug, Deserialize, Default)]
+struct GameRedstoneRequest {
+    #[serde(default)]
+    x: Option<i32>,
+    #[serde(default)]
+    y: Option<i32>,
+    #[serde(default)]
+    z: Option<i32>,
+}
+
+async fn handle_game_redstone(
+    Path(instance): Path<String>,
+    payload: Option<Json<GameRedstoneRequest>>,
+) -> impl IntoResponse {
+    let dir = match resolve_instance_dir(&instance).await {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+            );
+        }
+    };
+    let (x, y, z) = payload
+        .map(|Json(p)| (p.x, p.y, p.z))
+        .unwrap_or((None, None, None));
+    match crate::game::client::redstone_query(&dir, x, y, z).await {
+        Ok(response) => (StatusCode::OK, Json(response)),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+        ),
+    }
+}
 
 async fn execute_command(
     command: &str,

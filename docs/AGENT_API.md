@@ -29,9 +29,43 @@ token mechanism exists — do not expose the port beyond localhost.
 | GET | `/api/v1/game/:instance/screenshot` | PNG (framebuffer, WGC fallback; `?base64=true` for JSON-wrapped) |
 | GET | `/api/v1/game/:instance/ready` | 200 when in-world/menu-ready, else 503 |
 | GET | `/api/v1/game/:instance/idle-status` | Idle watchdog: last-output age, threshold, fired? |
-| POST | `/api/v1/game/:instance/input` | Inject key/look/click/scroll/chat |
+| POST | `/api/v1/game/:instance/input` | Inject key/look/click/scroll/chat + v26.9 automation (schedule/macro/condition/raw-action) |
+| POST | `/api/v1/game/:instance/redstone` | Redstone signal query at a block position (no body = crosshair probe) |
 | GET | `/api/v1/instance/:instance/metrics` | Launch metrics; `?history=true` for all records |
 | GET | `/api/v1/instance/:instance/disk` | Disk usage + top-level breakdown |
+
+### v26.9 Automation Inputs (`POST /api/v1/game/:instance/input`)
+
+Beyond key/look/click/scroll/chat, the input endpoint accepts the Despotes
+v26.9 automation primitives:
+
+```jsonc
+// schedule: named repeating action sequence (client-thread ticked)
+{"type":"schedule","op":"add","name":"heartbeat","periodTicks":100,
+ "commands":[{"type":"chat","text":"hi"}]}
+{"type":"schedule","op":"status"}
+{"type":"schedule","op":"remove","name":"heartbeat"}
+
+// macro: record & replay, one tick between steps on replay
+{"type":"macro","op":"start-recording","name":"demo"}
+{"type":"macro","op":"record-step","name":"demo",
+ "step":{"type":"look","yaw":90,"pitch":0}}
+{"type":"macro","op":"stop-recording"}
+{"type":"macro","op":"play","name":"demo"}
+
+// condition: dot-path field extraction + exists/eq/ne/gt/lt/contains
+{"type":"condition",
+ "if":{"type":"status","field":"result.inGame","op":"exists"},
+ "then":[{"type":"ping"}],
+ "else":[{"type":"chat","text":"not in game"}]}
+
+// raw-action: forward-compatible protocol passthrough
+{"type":"raw-action","command":{"type":"ping"}}
+```
+
+Redstone query (`POST /api/v1/game/:instance/redstone`): body optional —
+`{"x":..,"y":..,"z":..}` probes a block; an empty body probes the crosshair
+target block. Returns the block, max incoming signal and adjacent components.
 
 ### Execute Commands (`POST /api/v1/execute`)
 

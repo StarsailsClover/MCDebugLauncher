@@ -36,7 +36,8 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha 5 | cargo-fuzz 接入 CI + 首战告捷 | `fuzz/` 独立 workspace 三目标（`parse_log_content` 全链路解析 / `props_editor` 变异往返+不变量断言 / `jsonio_bom_parse` BOM+serde 镜像）；最小 parser-only `[lib]`（三文件零 crate 依赖原路径复用，main.rs 模块树不动）；`.github/workflows/fuzz.yml` 周期调度+手动触发+解析器 PR 门控，限时+RSS 上限+崩溃工件上传。**首次运行即挖出真 bug**：双 BOM（`EF BB BF ×2`）使 `strip_bom` 单层剥除后残留 U+FEFF 致 `parse_sync` 报晦涩错误——改为循环剥除并加回归测试；修复后三目标跑满预算零崩溃 | ✅ 已完成 |
 | Alpha 6 | NeoForge MANIFEST 自动化 + AprismJDK 支持 | **NeoForge 26.x**：官方安装器产出的 patched-client 缺 `Minecraft-Dists: client` MANIFEST 属性（OpenLumin 手工步骤）——`install_loader` 后置钩子自动注入（26.x 门控、幂等、best-effort 不阻塞安装），manifest 合并器保留命名节、zip 原位重写经临时文件+rename。**AprismJDK（AJR）**：新模块 `loader/aprism_jdk.rs`（AprismLab/AprismJDK）——资产名解析（平台感知，拒收 agent jar）、stable-first 选择、流式下载 + SHA256SUMS.txt 校验、解压入 java cache；CLI `mdl jdk available/install/list/remove`；launch `--jdk aprism[@ver]`（与 `--java-path` 互斥）；`aprism status` 增 JDK 行。**实测闭环**：真实下载 265MB v26.2（Java 25.2.1），SHA256 通过，launch 解析与生态视图验证 | ✅ 已完成 |
 | Alpha 7 | Despotes v26.9 封装 + JDK 回退 | **v26.9 四原语映射**：`mdl game redstone`（坐标可选，缺省十字准星探测）、`schedule add/status/remove`（--period-ticks + 可重复 --command JSON）、`macro` 七操作（start/record-step/stop-recording/play/stop/delete/status）、`condition`（--if/--then/--else，点路径字段 + 六比较符）；另设 `raw-action` 透传通道保证向前兼容；client.rs 新增 payload 构造器与 automation_action 通道。**JDK 回退**：`launch --jdk aprism[@ver]` 解析失败不再硬错——打印原因后回退系统 Java / Eclipse Adoptium 自动供给链。离线验证全部参数校验路径 + 回退路径实测 | ✅ 已完成 |
-| Alpha 8–10 | 待定（按使用反馈） | — | 📋 规划中 |
+| Alpha 8 | Agent API 暴露 v26.9 原语 | `POST /game/:instance/input` 新增 schedule/macro/condition/raw-action 四输入类型（服务端侧校验与 CLI 对齐：op 白名单、name/step 必填规则）；新增 `POST /game/:instance/redstone`（body 可选，缺省十字准星探测）；capabilities 清单同步（endpoints + game_inputs + 测试断言扩展）；docs/AGENT_API.md 补 JSONC 配方。AI agent 现在可经 HTTP 直接编排周期任务/宏/条件分支/红石感知 | ✅ 已完成 |
+| Alpha 9–10 | 待定（按使用反馈）→ 收敛 | — | 📋 规划中 |
 
 ## v26.3（已完成主线：加固与 Agent 面，收尾于 Alpha 10）
 
