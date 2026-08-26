@@ -23,9 +23,9 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha 4 | 功能追平 | 对齐主流启动器的常见能力差距（以研究结论为准） |
 | Alpha 5 | 稳定性与收敛 | 回归固化、文档、正式版发布 |
 
-## v26.4（当前主线：性能与鲁棒性跟进）
+## v26.4（已完成主线：实测驱动修复 + Aprism 生态深化，收尾于 Alpha 10）
 
-主题：消化 v26.3 鲁棒性评估（ROBUSTNESS_V263.md）与 alpha.6 性能发现，补齐跨平台与生态跟进。
+主题：由用户实测反馈、CI 首验与 fuzzer 发现驱动——每个 Alpha 都是真实问题的闭环。
 
 | Alpha | 主题 | 内容 | 状态 |
 |---|---|---|---|
@@ -38,7 +38,7 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha 7 | Despotes v26.9 封装 + JDK 回退 | **v26.9 四原语映射**：`mdl game redstone`（坐标可选，缺省十字准星探测）、`schedule add/status/remove`（--period-ticks + 可重复 --command JSON）、`macro` 七操作（start/record-step/stop-recording/play/stop/delete/status）、`condition`（--if/--then/--else，点路径字段 + 六比较符）；另设 `raw-action` 透传通道保证向前兼容；client.rs 新增 payload 构造器与 automation_action 通道。**JDK 回退**：`launch --jdk aprism[@ver]` 解析失败不再硬错——打印原因后回退系统 Java / Eclipse Adoptium 自动供给链。离线验证全部参数校验路径 + 回退路径实测 | ✅ 已完成 |
 | Alpha 8 | Agent API 暴露 v26.9 原语 | `POST /game/:instance/input` 新增 schedule/macro/condition/raw-action 四输入类型（服务端侧校验与 CLI 对齐：op 白名单、name/step 必填规则）；新增 `POST /game/:instance/redstone`（body 可选，缺省十字准星探测）；capabilities 清单同步（endpoints + game_inputs + 测试断言扩展）；docs/AGENT_API.md 补 JSONC 配方。AI agent 现在可经 HTTP 直接编排周期任务/宏/条件分支/红石感知 | ✅ 已完成 |
 | Alpha 9 | Agent launch 支持 jdk + 文档刷新 | execute `launch` 新增 `jdk aprism[@ver]` 选项（与 java-path 互斥校验、解析失败回退 Adoptium 并记入事件流）；capabilities 清单与 AGENT_API.md 同步；README/README_CN 状态区与亮点刷新至 v26.4（新增 Aprism 生态条目、跨平台 CI/fuzz、MANIFEST 自动注入） | ✅ 已完成 |
-| Alpha 10 | LTS 收敛 | — | 📋 规划中 |
+| Alpha 10 | LTS 收敛 | 版本转正 26.4.0；CHANGELOG 官方条目（Alpha 1–9 全记录）；回归验证：28 lib + 174 bin 测试、三平台 CI 绿、fuzz 三目标预算内零崩溃、capabilities 完整性断言通过 | ✅ 已完成 |
 
 ## v26.3（已完成主线：加固与 Agent 面，收尾于 Alpha 10）
 
@@ -56,15 +56,6 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha 8 | 看门狗竞态修复 + 对抗性测试套件 | **修复 OpenLumin 实测阻塞**：`--detach --wait-ready` 下看门狗不再先行武装——挂起载荷 `runtime/watchdog_pending.json` 落盘，就绪后由 cmd_launch 武装；未就绪则丢弃（不杀悬挂中的启动过程供诊断）。对抗性解析套件：log_parser 11 种垃圾输入含 20 万字符行、props 编辑器 55 行畸形键值——零 panic。cargo-fuzz 因宿主无 nightly 记为 CI 待办。**环境事故披露**：C 盘满（0 字节）致链接器 PDB 失败，清理 target(25.1GB)+27 个历史 zip 后恢复，测试曾实弹误杀构建守护进程一事已在 alpha.5 披露并整改 | ✅ 已完成 |
 | Alpha 9 | 可用性打磨（扫描驱动） | doctor 新增 `mdl-on-path` 检查：多套 mdl 并存时 WARN 列出全部路径（源自 OpenLumin 手动换 zip 与 Downloads 双拷贝痛点）；`create --mc` 作为 `--mc-version` 别名落地（OpenLumin 文档实际写法） | ✅ 已完成 |
 | Alpha 10 | LTS 收敛 | README/README_CN 横幅与亮点定稿；本地 CHANGELOG 26.3.0 官方条目；回归验证（159 tests / doctor 9 项 / capabilities） | ✅ 已完成 |
-
-## v26.4（候选方向，未排期）
-
-基于 Alpha 8 竞态修复与 workspace 扫描的后续候选：
-- `status` 性能优化（逐实例 sysinfo 探测致 p95 ~1.7s，见 alpha.6 发现）
-- Linux/macOS CI 编译矩阵落地（PLATFORM_MATRIX.md 待办）
-- cargo-fuzz 解析器模糊测试接入 CI
-- NeoForge 26.2 patched-client MANIFEST 注入自动化（OpenLumin 手工步骤）
-- Despotes v26.9 automation primitives 的 MDL 侧封装
 
 ## v26.2（已完成主线：自动化韧性与运维，收尾于 Alpha 10）
 

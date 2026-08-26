@@ -5,6 +5,45 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.4.0] - 2026-08-26
+
+### v26.4 Official Release
+
+Fifth official release. Collapses the v26.4 mainline (Alpha 1 through
+Alpha 10). Theme: field-driven fixes + Aprism ecosystem deepening +
+cross-platform engineering discipline - every alpha shipped as a
+GitHub pre-release and was driven by real usage reports, first CI
+findings, or fuzzer discoveries.
+
+Highlights across the line:
+- **Alpha 1 - status performance**: single-snapshot shared probing
+  (p95 ~1.7-3.5s -> ~0.2s on 62-instance workspaces); COM-superscript
+  stem fix; execute usage errors classified BAD_REQUEST.
+- **Alpha 2 - mdl inject JVM routing**: JVM targets go through
+  JavaAgent + System.load() (JDK 25 CFG/CET made CreateRemoteThread
+  crash before DllMain); non-JVM targets keep the classic path.
+- **Alpha 3 - Forge/NeoForge detection**: loader_type from config
+  replaces the main_class heuristic that sent Forge into the NeoForge
+  branch and bailed with a false version mismatch.
+- **Alpha 4 - cross-platform CI**: linux-x64 / aarch64-darwin /
+  windows-msvc check+test matrix green; platform-gate leaks fixed
+  (portable is_jvm_process, tracked CHANGELOG.md, Cargo.lock).
+- **Alpha 5 - cargo-fuzz**: three fuzz targets behind a minimal
+  parser-only lib; nightly workflow; first run found and fixed the
+  stacked-BOM crash in strip_bom.
+- **Alpha 6 - NeoForge MANIFEST + AprismJDK**: automatic
+  'Minecraft-Dists: client' injection into 26.x patched clients;
+  AprismJDK (AJR) install/list/remove with SHA256SUMS verification,
+  streamed downloads and launch-time --jdk selection.
+- **Alpha 7 - Despotes v26.9 mapping**: redstone / schedule / macro /
+  condition subcommands plus raw-action passthrough; --jdk falls back
+  to Eclipse Adoptium when AprismJDK is unavailable.
+- **Alpha 8 - Agent API exposure**: the v26.9 primitives became input
+  types over POST /game/:instance/input; new /game/:instance/redstone
+  endpoint; capabilities manifest and AGENT_API.md updated.
+- **Alpha 9 - agent launch jdk**: execute launch accepts jdk=
+  aprism[@ver] with Adoptium fallback; README/README_CN refreshed.
+
 ## [26.3.0] - 2026-08-24
 
 ### v26.3 Official Release
