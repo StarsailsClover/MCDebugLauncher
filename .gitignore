@@ -1,6 +1,7 @@
 # Rust build artifacts
 /target
-Cargo.lock
+# NOTE: Cargo.lock IS tracked on purpose. mdl is a binary crate; the lock
+# file gives reproducible release builds and CI runs with --locked.
 
 # Packaged release artifacts
 /release
