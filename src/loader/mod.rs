@@ -9,6 +9,7 @@ pub mod optifine;
 pub mod content;
 pub mod bedrock;
 pub mod aprism;
+pub mod aprism_jdk;
 pub mod refract;
 pub mod prismate;
 pub mod modpack;

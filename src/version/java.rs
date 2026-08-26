@@ -209,7 +209,7 @@ impl JavaRuntime {
     /// Recursively locate the `bin/java` (or `bin/java.exe`) executable within a
     /// freshly extracted JDK/JRE archive. Adoptium archives contain a single
     /// top-level version directory, so the binary sits one or two levels down.
-    fn find_java_binary(root: &std::path::Path) -> Result<PathBuf> {
+    pub(crate) fn find_java_binary(root: &std::path::Path) -> Result<PathBuf> {
         #[cfg(target_os = "windows")]
         let rel = std::path::Path::new("bin").join("java.exe");
         #[cfg(not(target_os = "windows"))]
@@ -352,7 +352,7 @@ impl JavaRuntime {
         Ok((os, arch, ext))
     }
 
-    fn extract_zip(bytes: &[u8], target_dir: &std::path::Path) -> Result<()> {
+    pub(crate) fn extract_zip(bytes: &[u8], target_dir: &std::path::Path) -> Result<()> {
         let reader = std::io::Cursor::new(bytes);
         let mut archive = zip::ZipArchive::new(reader).context("Failed to read Java zip archive")?;
         archive
@@ -361,7 +361,7 @@ impl JavaRuntime {
         Ok(())
     }
 
-    fn extract_tar_gz(bytes: &[u8], target_dir: &std::path::Path) -> Result<()> {
+    pub(crate) fn extract_tar_gz(bytes: &[u8], target_dir: &std::path::Path) -> Result<()> {
         let gz = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes));
         let mut archive = tar::Archive::new(gz);
         archive

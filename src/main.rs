@@ -474,6 +474,39 @@ enum AprismCommands {
 }
 
 #[derive(Subcommand)]
+enum JdkCommands {
+    /// Show remote AprismJDK releases and which applies to this host
+    Available {
+        /// Also consider pre-release tags
+        #[arg(long)]
+        prerelease: bool,
+        /// Output format: text, json, yaml
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+    /// Download, verify (SHA-256) and install a runtime into the MDL cache
+    Install {
+        /// Tag or version hint (e.g. v26.2 or 26.2); defaults to newest stable
+        #[arg(long)]
+        version: Option<String>,
+        /// Also consider pre-release tags when no stable matches
+        #[arg(long)]
+        prerelease: bool,
+    },
+    /// List AprismJDK runtimes installed in the MDL cache
+    List {
+        /// Output format: text, json, yaml
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+    /// Remove an installed runtime by tag
+    Remove {
+        /// Release tag, e.g. v26.2
+        tag: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum AprismRefractCommands {
     /// Install the best-matching loader-support .aep into an instance
     Install {
@@ -810,6 +843,12 @@ enum Commands {
         #[arg(long)]
         java_path: Option<String>,
 
+        /// Java runtime selection: "aprism" (latest installed AprismJDK) or
+        /// "aprism@<tag|version>" (e.g. aprism@26.2). Conflicts with
+        /// --java-path. v26.4-alpha.6.
+        #[arg(long)]
+        jdk: Option<String>,
+
         /// Memory allocation, e.g. 4G / 2048M (default: dynamic)
         #[arg(short, long)]
         memory: Option<String>,
@@ -967,10 +1006,15 @@ enum Commands {
     #[command(subcommand)]
     Cache(CacheCommands),
 
-    /// Aprism ecosystem: loader-support extensions (AprismRefract) and the
-    /// loader-side bridge (AprismPrismate)
+    /// Aprism ecosystem: loader-support extensions (AprismRefract), the
+    /// loader-side bridge (AprismPrismate) and the AprismJDK runtime
     #[command(subcommand)]
     Aprism(AprismCommands),
+
+    /// Manage the AprismJDK (AJR - Aprism Java Runtime): install, list,
+    /// remove, and use at launch via `--jdk aprism[@<version>]`
+    #[command(subcommand)]
+    Jdk(JdkCommands),
 
     /// Import a Modrinth modpack (.mrpack): create the instance, copy
     /// overrides and auto-download every missing file (pack auto-completion)
@@ -1233,8 +1277,27 @@ async fn run() -> Result<()> {
         Commands::List { version, loader, sort } => {
             cmd_list(&cli.format, version.as_deref(), loader.as_deref(), &sort).await?;
         }
-        Commands::Launch { name, username, server, fullscreen, width, height, detach, no_queue, agent, agent_port, java_path, memory, dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive, oom_confirm, oom_list_only, javaagents } => {
-            cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach, no_queue, agent, agent_port, java_path.as_deref(), memory.as_deref(), dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive, &oom_confirm, oom_list_only, &javaagents).await?;
+        Commands::Launch { name, username, server, fullscreen, width, height, detach, no_queue, agent, agent_port, java_path, jdk, memory, dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive, oom_confirm, oom_list_only, javaagents } => {
+            if java_path.is_some() && jdk.is_some() {
+                anyhow::bail!("--jdk and --java-path are mutually exclusive");
+            }
+            // Resolve the AprismJDK selection to a concrete java executable
+            // up front so errors surface before the launch pipeline starts.
+            let resolved_java: Option<String> = match jdk.as_deref() {
+                None => java_path.map(|p| p.to_string()),
+                Some(spec) => {
+                    // Contract: "aprism" | "aprism@<tag|version>". Tolerate a
+                    // bare tag/version too by passing it straight through.
+                    let hint = spec
+                        .strip_prefix("aprism")
+                        .map(|rest| rest.trim_start_matches('@'))
+                        .unwrap_or(spec);
+                    let (tag, java) = loader::aprism_jdk::resolve(Some(hint))?;
+                    println!("Using AprismJDK runtime {tag}: {}", java.display());
+                    Some(java.display().to_string())
+                }
+            };
+            cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach, no_queue, agent, agent_port, resolved_java.as_deref(), memory.as_deref(), dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive, &oom_confirm, oom_list_only, &javaagents).await?;
         }
         Commands::Diagnose { name, export, analyze } => {
             cmd_diagnose(&name, export.as_deref(), analyze).await?;
@@ -1422,6 +1485,16 @@ async fn run() -> Result<()> {
                 AprismPrismateCommands::Status { instance } => { cmd_aprism_prismate_status(&instance).await?; }
                 AprismPrismateCommands::Remove { instance } => { cmd_aprism_prismate_remove(&instance).await?; }
             },
+        },
+        Commands::Jdk(jc) => match jc {
+            JdkCommands::Available { prerelease, format } => {
+                cmd_jdk_available(prerelease, &format).await?;
+            }
+            JdkCommands::Install { version, prerelease } => {
+                cmd_jdk_install(version.as_deref(), prerelease).await?;
+            }
+            JdkCommands::List { format } => { cmd_jdk_list(&format)?; }
+            JdkCommands::Remove { tag } => { cmd_jdk_remove(&tag)?; }
         },
         Commands::Import { name, pack, no_download } => {
             cmd_import(&name, &pack, no_download).await?;
@@ -3880,8 +3953,97 @@ async fn cmd_aprism_prismate_remove(instance: &str) -> Result<()> {
 /// Unified Aprism ecosystem status for an instance (v26.2-alpha.8).
 /// Offline by design: reads the local agent cache, installed Refract
 /// extensions, Prismate bridge and native .aje mods; never hits the network.
-async fn cmd_aprism_status(format: &str, instance: &str) -> Result<()> {
-    use instance::{InstanceManager, ModManager};
+// ---------------------------------------------------------------------------
+// AprismJDK (AJR) commands (v26.4-alpha.6)
+// ---------------------------------------------------------------------------
+
+async fn cmd_jdk_available(prerelease: bool, format: &str) -> Result<()> {
+    let releases = loader::aprism_jdk::fetch_releases().await?;
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "releases": releases.iter().map(|r| {
+                let picked = loader::aprism_jdk::select_release(&[r.clone()], None, prerelease)
+                    .map(|(_, (a, p))| serde_json::json!({
+                        "asset": a.name,
+                        "size_mb": a.size / (1024 * 1024),
+                        "version": p.version,
+                    }));
+                serde_json::json!({"tag": r.tag, "prerelease": r.prerelease, "for_this_host": picked})
+            }).collect::<Vec<_>>()
+        }))?);
+        return Ok(());
+    }
+    let (os, arch) = loader::aprism_jdk::current_platform();
+    println!("AprismJDK releases ({os}/{arch}):");
+    for r in &releases {
+        let mark = if r.prerelease { " [pre-release]" } else { "" };
+        println!("  {}{}", r.tag, mark);
+        match loader::aprism_jdk::select_release(std::slice::from_ref(r), None, prerelease) {
+            Some((_, (a, p))) => println!(
+                "    -> {} ({} MB, {})",
+                a.name,
+                a.size / (1024 * 1024),
+                p.ext
+            ),
+            None => println!("    -> no runtime asset for this host"),
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_jdk_install(version: Option<&str>, prerelease: bool) -> Result<()> {
+    let releases = loader::aprism_jdk::fetch_releases().await?;
+    let (rel, (asset, parsed)) = loader::aprism_jdk::select_release(&releases, version, prerelease)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No AprismJDK release matches version={:?} prerelease={prerelease} for this host",
+                version.unwrap_or("<latest stable>")
+            )
+        })?;
+    println!("Installing AprismJDK {} ({} MB)...", rel.tag, asset.size / (1024 * 1024));
+    let java = loader::aprism_jdk::download_and_install(rel, asset).await?;
+    let runtime = crate::version::java::JavaRuntime::from_path(&java)?;
+    println!(
+        "Installed AprismJDK {} (Java {}) -> {}",
+        rel.tag,
+        runtime.version,
+        java.display()
+    );
+    println!("Use it with: mdl launch <instance> --jdk aprism@{}", parsed.version);
+    Ok(())
+}
+
+fn cmd_jdk_list(format: &str) -> Result<()> {
+    let installed = loader::aprism_jdk::installed();
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "installed": installed.iter().map(|(tag, java)|
+                serde_json::json!({"tag": tag, "java": java.display().to_string()})
+            ).collect::<Vec<_>>()
+        }))?);
+        return Ok(());
+    }
+    if installed.is_empty() {
+        println!("No AprismJDK runtimes installed. Try 'mdl jdk install'.");
+        return Ok(());
+    }
+    println!("Installed AprismJDK runtimes:");
+    for (tag, java) in &installed {
+        println!("  {tag} -> {}", java.display());
+    }
+    Ok(())
+}
+
+fn cmd_jdk_remove(tag: &str) -> Result<()> {
+    if loader::aprism_jdk::remove(tag)? {
+        println!("Removed AprismJDK {tag}");
+    } else {
+        anyhow::bail!("No installed AprismJDK tagged '{tag}'. See 'mdl jdk list'.");
+    }
+    Ok(())
+}
+
+async fn cmd_aprism_status(format: &str, instance: &str) -> Result<()> {    use instance::{InstanceManager, ModManager};
     let manager = InstanceManager::new()?;
     let inst = manager.get(instance).await?;
     let loader_type = inst.config.loader.as_ref().map(|l| l.loader_type.clone());
@@ -3922,6 +4084,9 @@ async fn cmd_aprism_status(format: &str, instance: &str) -> Result<()> {
         Err(_) => Vec::new(),
     };
 
+    // 5. AprismJDK runtimes in the MDL java cache (v26.4-alpha.6).
+    let aprism_jdks = loader::aprism_jdk::installed();
+
     // Compatibility notes (mirrors launch-time rules).
     let mut notes: Vec<String> = Vec::new();
     if prismate_on {
@@ -3953,6 +4118,9 @@ async fn cmd_aprism_status(format: &str, instance: &str) -> Result<()> {
                 ).collect::<Vec<_>>(),
             },
             "native_aje_mods": aje_mods,
+            "aprism_jdk": aprism_jdks.iter().map(|(tag, java)|
+                serde_json::json!({"tag": tag, "java": java.display().to_string()})
+            ).collect::<Vec<_>>(),
             "notes": notes,
         }))?);
         return Ok(());
@@ -3982,6 +4150,15 @@ async fn cmd_aprism_status(format: &str, instance: &str) -> Result<()> {
     println!("Native mods (.aje): {}", aje_mods.len());
     for m in &aje_mods {
         println!("  {}", m);
+    }
+
+    println!("AprismJDK: {}", if aprism_jdks.is_empty() {
+        "not installed ('mdl jdk install' to provision)".to_string()
+    } else {
+        format!("{} runtime(s)", aprism_jdks.len())
+    });
+    for (tag, java) in &aprism_jdks {
+        println!("  {tag} -> {}", java.display());
     }
 
     if !notes.is_empty() {
