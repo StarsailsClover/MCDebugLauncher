@@ -24,10 +24,13 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+        # NOTE: x86_64-apple-darwin (macos-13) was removed after its job sat
+        # queued 30+ minutes: the macos-13 Intel image is deprecated by GitHub
+        # and Intel hosted runners are effectively unavailable. aarch64 covers
+        # the Darwin code paths; revisit if Intel-mac builds are ever needed
+        # (e.g. macos-15-intel large runner or self-hosted).
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
