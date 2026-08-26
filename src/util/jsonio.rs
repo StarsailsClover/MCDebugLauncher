@@ -17,9 +17,21 @@ use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use std::path::Path;
 
-/// Strip a leading UTF-8 BOM if present. Returns the rest of the buffer.
+/// Strip ALL leading UTF-8 BOMs. Returns the rest of the buffer.
+///
+/// v26.4-alpha.5: originally stripped at most one BOM. The cargo-fuzz
+/// `jsonio_bom_parse` target found the gap within seconds (crash input
+/// `EF BB BF EF BB BF`): stacked BOMs appear when buggy tooling prepends a
+/// BOM to an already-BOM'd file, and MDL's tolerance promise should cover
+/// them - top-level JSON values can never legitimately begin with those
+/// bytes, so loop-stripping is unambiguous and strictly more forgiving.
 pub fn strip_bom(bytes: &[u8]) -> &[u8] {
-    bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes)
+    const BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
+    let mut rest = bytes;
+    while let Some(stripped) = rest.strip_prefix(BOM) {
+        rest = stripped;
+    }
+    rest
 }
 
 /// Parse a JSON file synchronously with BOM tolerance and path context.
@@ -59,6 +71,25 @@ mod tests {
         // Non-BOM content must pass through untouched.
         assert_eq!(strip_bom(b"{"), b"{");
         assert_eq!(strip_bom(&[0xEE, 0xBB, 0xBF]), &[0xEE, 0xBB, 0xBF]);
+    }
+
+    #[test]
+    fn test_strip_bom_handles_stacked_boms() {
+        // Regression (v26.4-alpha.5): found by the cargo-fuzz
+        // `jsonio_bom_parse` target within seconds of its first run.
+        // Crash input: EF BB BF EF BB BF - a double BOM left parse_sync
+        // with a leading U+FEFF and a cryptic serde error.
+        let stacked = [BOM, BOM, br#"{"name":"x"}"#.as_slice()].concat();
+        assert_eq!(strip_bom(&stacked), br#"{"name":"x"}"#.as_slice());
+    }
+
+    #[test]
+    fn test_parse_sync_tolerates_stacked_boms() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().join("stacked.json");
+        std::fs::write(&p, [BOM, BOM, br#"{"name":"y"}"#.as_slice()].concat()).unwrap();
+        let cfg: Cfg = parse_sync(&p, "test config").unwrap();
+        assert_eq!(cfg.name, "y");
     }
 
     #[test]
