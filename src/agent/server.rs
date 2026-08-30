@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use axum::{
-    extract::{Path, State, WebSocketUpgrade},
+    extract::{FromRequest, Path, Request, State, WebSocketUpgrade},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -14,6 +14,35 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 use std::collections::HashMap;
 use futures_util::{SinkExt, StreamExt};
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// JSON extractor that rejects with the agent API error envelope instead of
+/// axum's plain-text body (v26.5-alpha.2, ROBUSTNESS_V264 F3): every client
+/// error on this API now parses as `{"status":"error","error":…}`.
+struct ApiJson<T>(T);
+
+#[axum::async_trait]
+impl<S, T> FromRequest<S> for ApiJson<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(value)) => Ok(ApiJson(value)),
+            Err(rej) => Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": format!("invalid JSON body: {rej}")
+                })),
+            )),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AgentServer {
@@ -307,7 +336,7 @@ async fn handle_websocket_connection(
 
 async fn handle_execute(
     State((state, event_tx)): State<(Arc<RwLock<ServerState>>, broadcast::Sender<ServerEvent>)>,
-    Json(payload): Json<ExecuteRequest>,
+    ApiJson(payload): ApiJson<ExecuteRequest>,
 ) -> impl IntoResponse {
     tracing::info!("Executing command: {} {:?}", payload.command, payload.args);
 
@@ -707,7 +736,7 @@ async fn handle_game_screenshot(
 
 async fn handle_game_input(
     Path(instance): Path<String>,
-    Json(payload): Json<GameInputRequest>,
+    ApiJson(payload): ApiJson<GameInputRequest>,
 ) -> impl IntoResponse {
     let dir = match resolve_instance_dir(&instance).await {
         Ok(d) => d,
@@ -718,6 +747,35 @@ async fn handle_game_input(
             );
         }
     };
+
+    // v26.5-alpha.2 (ROBUSTNESS_V264 F4): automation-input validation
+    // failures are CLIENT errors and must surface as 400, not 502. All
+    // automation variants build their protocol payload here - a single
+    // validation site, so the CLI rules and API rules cannot drift.
+    let automation_payload: Option<Result<serde_json::Value, String>> = match &payload {
+        GameInputRequest::Schedule { op, name, period_ticks, commands } => {
+            Some(build_schedule_payload(op, name.as_deref(), *period_ticks, commands))
+        }
+        GameInputRequest::Macro { op, name, step } => {
+            Some(build_macro_payload(op, name.as_deref(), step.as_ref()))
+        }
+        GameInputRequest::Condition { if_query, then_branch, else_branch } => {
+            Some(Ok(crate::game::client::condition_payload(
+                if_query.clone(),
+                serde_json::Value::Array(then_branch.clone()),
+                else_branch.clone().map(serde_json::Value::Array),
+            )))
+        }
+        GameInputRequest::RawAction { command } => Some(Ok(command.clone())),
+        _ => None,
+    };
+
+    if let Some(Err(msg)) = &automation_payload {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"status": "error", "error": msg})),
+        );
+    }
 
     let result = match payload {
         GameInputRequest::Key { key, action, hold_ms } => {
@@ -731,68 +789,13 @@ async fn handle_game_input(
         }
         GameInputRequest::Scroll { amount } => crate::game::client::scroll(&dir, amount).await,
         GameInputRequest::Chat { message } => crate::game::client::chat(&dir, &message).await,
-        GameInputRequest::Schedule { op, name, period_ticks, commands } => {
-            let op = op.to_ascii_lowercase();
-            let payload = match op.as_str() {
-                "add" => {
-                    if name.is_none() || period_ticks.is_none() || commands.is_empty() {
-                        Err(anyhow::anyhow!(
-                            "schedule add requires name, periodTicks and at least one command"
-                        ))
-                    } else {
-                        Ok(crate::game::client::schedule_payload(
-                            "add",
-                            name.as_deref(),
-                            period_ticks,
-                            Some(serde_json::Value::Array(commands)),
-                        ))
-                    }
-                }
-                "status" => Ok(crate::game::client::schedule_payload("status", None, None, None)),
-                "remove" => match name {
-                    Some(n) => Ok(crate::game::client::schedule_payload("remove", Some(n.as_str()), None, None)),
-                    None => Err(anyhow::anyhow!("schedule remove requires a name")),
-                },
-                other => Err(anyhow::anyhow!(
-                    "Unknown schedule op '{other}'. Supported: add / status / remove"
-                )),
-            };
-            match payload {
-                Ok(p) => crate::game::client::automation_action(&dir, p).await,
-                Err(e) => Err(e),
-            }
-        }
-        GameInputRequest::Macro { op, name, step } => {
-            const OPS: &[&str] = &[
-                "start-recording", "record-step", "stop-recording",
-                "play", "stop", "delete", "status",
-            ];
-            let validated = if !OPS.contains(&op.as_str()) {
-                Err(anyhow::anyhow!("Unknown macro op '{}'. Supported: {}", op, OPS.join(", ")))
-            } else {
-                let needs_name = !matches!(op.as_str(), "stop-recording" | "status" | "stop");
-                if needs_name && name.is_none() {
-                    Err(anyhow::anyhow!("macro {} requires a name", op))
-                } else if op == "record-step" && step.is_none() {
-                    Err(anyhow::anyhow!("macro record-step requires a step action"))
-                } else {
-                    Ok(crate::game::client::macro_payload(&op, name.as_deref(), step))
-                }
-            };
-            match validated {
-                Ok(p) => crate::game::client::automation_action(&dir, p).await,
-                Err(e) => Err(e),
-            }
-        }
-        GameInputRequest::Condition { if_query, then_branch, else_branch } => {
-            crate::game::client::automation_action(
-                &dir,
-                crate::game::client::condition_payload(if_query, serde_json::Value::Array(then_branch), else_branch.map(serde_json::Value::Array)),
-            )
-            .await
-        }
-        GameInputRequest::RawAction { command } => {
-            crate::game::client::automation_action(&dir, command).await
+        GameInputRequest::Schedule { .. }
+        | GameInputRequest::Macro { .. }
+        | GameInputRequest::Condition { .. }
+        | GameInputRequest::RawAction { .. } => {
+            // Validation passed above; the payload is guaranteed present.
+            let p = automation_payload.unwrap().expect("validated payload");
+            crate::game::client::automation_action(&dir, p).await
         }
     };
 
@@ -803,6 +806,69 @@ async fn handle_game_input(
             Json(serde_json::json!({"status": "error", "error": e.to_string()})),
         ),
     }
+}
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// Validate and build a schedule action payload (API-side twin of the CLI
+/// `mdl game schedule` rules). `Err` carries the client-facing message.
+fn build_schedule_payload(
+    op: &str,
+    name: Option<&str>,
+    period_ticks: Option<u64>,
+    commands: &[serde_json::Value],
+) -> Result<serde_json::Value, String> {
+    let op = op.to_ascii_lowercase();
+    match op.as_str() {
+        "add" => {
+            if name.is_none() || period_ticks.is_none() || commands.is_empty() {
+                Err("schedule add requires name, periodTicks and at least one command".into())
+            } else {
+                Ok(crate::game::client::schedule_payload(
+                    "add",
+                    name,
+                    period_ticks,
+                    Some(serde_json::Value::Array(commands.to_vec())),
+                ))
+            }
+        }
+        "status" => Ok(crate::game::client::schedule_payload("status", None, None, None)),
+        "remove" => match name {
+            Some(n) => Ok(crate::game::client::schedule_payload("remove", Some(n), None, None)),
+            None => Err("schedule remove requires a name".into()),
+        },
+        other => Err(format!(
+            "Unknown schedule op '{other}'. Supported: add / status / remove"
+        )),
+    }
+}
+
+/// Validate and build a macro action payload (API-side twin of the CLI
+/// `mdl game macro` rules).
+fn build_macro_payload(
+    op: &str,
+    name: Option<&str>,
+    step: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    const OPS: &[&str] = &[
+        "start-recording", "record-step", "stop-recording",
+        "play", "stop", "delete", "status",
+    ];
+    if !OPS.contains(&op) {
+        return Err(format!(
+            "Unknown macro op '{}'. Supported: {}",
+            op,
+            OPS.join(", ")
+        ));
+    }
+    let needs_name = !matches!(op, "stop-recording" | "status" | "stop");
+    if needs_name && name.is_none() {
+        return Err(format!("macro {op} requires a name"));
+    }
+    if op == "record-step" && step.is_none() {
+        return Err("macro record-step requires a step action".into());
+    }
+    Ok(crate::game::client::macro_payload(op, name, step.cloned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -821,9 +887,31 @@ struct GameRedstoneRequest {
     z: Option<i32>,
 }
 
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// Parse the redstone request body (v26.5-alpha.2, ROBUSTNESS_V264 F5).
+///
+/// The body is genuinely optional (empty = crosshair probe), but a body that
+/// EXISTS and is malformed must surface as a client error - the previous
+/// `Option<Json<…>>` extractor swallowed rejections and turned typos into a
+/// misleading crosshair probe (which then failed with "Cannot reach
+/// Despotes"). Pure function for testability.
+fn parse_redstone_body(bytes: &[u8]) -> Result<Option<(i32, i32, i32)>, String> {
+    if bytes.iter().all(|b| b.is_ascii_whitespace()) {
+        return Ok(None);
+    }
+    let req: GameRedstoneRequest = serde_json::from_slice(bytes)
+        .map_err(|e| format!("invalid redstone body: {e}"))?;
+    match (req.x, req.y, req.z) {
+        (None, None, None) => Ok(None),
+        (Some(x), Some(y), Some(z)) => Ok(Some((x, y, z))),
+        _ => Err("x, y and z must be given together (or all omitted for crosshair probe)".into()),
+    }
+}
+
 async fn handle_game_redstone(
     Path(instance): Path<String>,
-    payload: Option<Json<GameRedstoneRequest>>,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let dir = match resolve_instance_dir(&instance).await {
         Ok(d) => d,
@@ -834,9 +922,19 @@ async fn handle_game_redstone(
             );
         }
     };
-    let (x, y, z) = payload
-        .map(|Json(p)| (p.x, p.y, p.z))
-        .unwrap_or((None, None, None));
+    let coords = match parse_redstone_body(&body) {
+        Ok(c) => c,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"status": "error", "error": msg})),
+            );
+        }
+    };
+    let (x, y, z) = match coords {
+        Some((x, y, z)) => (Some(x), Some(y), Some(z)),
+        None => (None, None, None),
+    };
     match crate::game::client::redstone_query(&dir, x, y, z).await {
         Ok(response) => (StatusCode::OK, Json(response)),
         Err(e) => (
@@ -1312,5 +1410,82 @@ async fn execute_command(
         _ => {
             anyhow::bail!("Unknown command: {}", command)
         }
+    }
+}
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // v26.5-alpha.2 (ROBUSTNESS_V264 F5): malformed redstone bodies must be
+    // client errors, never silent crosshair probes.
+    #[test]
+    fn test_parse_redstone_body() {
+        // Empty / whitespace-only body = crosshair probe.
+        assert_eq!(parse_redstone_body(b""), Ok(None));
+        assert_eq!(parse_redstone_body(b"  \r\n\t"), Ok(None));
+
+        // Full coordinates parse.
+        assert_eq!(
+            parse_redstone_body(br#"{"x":-517,"y":72,"z":-87}"#),
+            Ok(Some((-517, 72, -87)))
+        );
+
+        // Partial coordinates are a client error, not a probe.
+        assert!(parse_redstone_body(br#"{"x":1}"#).is_err());
+        assert!(parse_redstone_body(br#"{"x":1,"y":2}"#).is_err());
+
+        // Malformed JSON / wrong types are client errors with a message.
+        let e = parse_redstone_body(br#"{"x":"abc"}"#).unwrap_err();
+        assert!(e.contains("invalid redstone body"), "{e}");
+        let e = parse_redstone_body(b"not json").unwrap_err();
+        assert!(e.contains("invalid redstone body"), "{e}");
+        let e = parse_redstone_body(b"{").unwrap_err();
+        assert!(e.contains("invalid redstone body"), "{e}");
+    }
+
+    // v26.5-alpha.2 (ROBUSTNESS_V264 F4): validation rules for the
+    // automation inputs, exercised without a live agent server.
+    #[test]
+    fn test_build_schedule_payload_validation() {
+        // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+        let cmd = serde_json::json!({"type": "chat", "text": "hi"});
+
+        assert!(build_schedule_payload("add", Some("hb"), Some(100), &[cmd.clone()]).is_ok());
+        assert!(build_schedule_payload("status", None, None, &[]).is_ok());
+        assert!(build_schedule_payload("remove", Some("hb"), None, &[]).is_ok());
+
+        // add requires name + periodTicks + at least one command
+        assert!(build_schedule_payload("add", None, Some(100), &[cmd.clone()]).is_err());
+        assert!(build_schedule_payload("add", Some("hb"), None, &[cmd.clone()]).is_err());
+        assert!(build_schedule_payload("add", Some("hb"), Some(100), &[]).is_err());
+
+        // remove requires a name
+        assert!(build_schedule_payload("remove", None, None, &[]).is_err());
+
+        // op whitelist
+        assert!(build_schedule_payload("boom", Some("x"), Some(1), &[cmd]).is_err());
+    }
+
+    #[test]
+    fn test_build_macro_payload_validation() {
+        assert!(build_macro_payload("start-recording", Some("m"), None).is_ok());
+        assert!(build_macro_payload(
+            "record-step",
+            Some("m"),
+            Some(&serde_json::json!({"type": "ping"}))
+        )
+        .is_ok());
+        assert!(build_macro_payload("status", None, None).is_ok());
+
+        // record-step requires a step
+        assert!(build_macro_payload("record-step", Some("m"), None).is_err());
+        // most ops require a name
+        assert!(build_macro_payload("start-recording", None, None).is_err());
+        assert!(build_macro_payload("play", None, None).is_err());
+        // op whitelist
+        assert!(build_macro_payload("rewind", Some("m"), None).is_err());
     }
 }

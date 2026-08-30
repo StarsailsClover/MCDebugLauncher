@@ -70,3 +70,6 @@ fuzz/coverage
 fuzz/crash-*
 fuzz/fuzz_targets/*.rs.orig
 
+
+# Host-specific performance baseline (scripts/perf-bench.ps1 -SaveBaseline)
+perf-baseline.json

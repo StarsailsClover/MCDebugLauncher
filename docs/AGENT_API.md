@@ -84,6 +84,16 @@ Response: `{"status","exit_code","stdout","error_code?","data?"}`.
 | `inject-agent` | `<name> <jar>` | params, java-path |
 | `server-cmd` | `<server> <command…>` | – |
 
+### Error shape (v26.5-alpha.2)
+
+Every client error on this API returns the JSON envelope
+`{"status":"error","error":"…"}` — including JSON-body extraction
+rejections (400), automation-input validation failures (400: unknown
+op, missing required fields), malformed `/redstone` bodies (400) and
+`/execute` failures (carrying machine-readable `error_code`). Only
+upstream Despotes failures map to 502. Bodies over the default limit
+return 413; unknown instances return 404.
+
 ## WebSocket Events (`GET /api/v1/events`)
 
 Every frame: JSON object with `type` + `timestamp`.
