@@ -279,9 +279,25 @@ pub fn resolve(hint: Option<&str>) -> Result<(String, PathBuf)> {
 }
 
 /// Remove an installed runtime by tag. Returns whether anything was deleted.
+///
+/// v26.5-alpha.1 hardening (ROBUSTNESS_V264 F1, PoC-confirmed): the tag used
+/// to be joined onto the cache base unchecked, so `mdl jdk remove ..\..\…`
+/// deleted directories OUTSIDE the java cache. The tag must now be a single
+/// path component - no separators, no parent components, no absolutes - so
+/// the join can never escape the cache root. Corrupt installs (no usable
+/// bin/java, hence invisible to [`installed`]) stay removable.
 pub fn remove(tag: &str) -> Result<bool> {
-    let base = jdk_base_dir()?;
-    let dir = base.join(tag);
+    // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+    if tag.is_empty()
+        || tag == "."
+        || tag.contains("..")
+        || tag.contains('/')
+        || tag.contains('\\')
+        || tag.contains(':')
+    {
+        anyhow::bail!("Invalid AprismJDK tag {tag:?}");
+    }
+    let dir = jdk_base_dir()?.join(tag);
     if !dir.exists() {
         return Ok(false);
     }
@@ -342,12 +358,31 @@ async fn verify_sha256(
     Ok(())
 }
 
+/// v26.5-alpha.1 hardening (ROBUSTNESS_V264 F2): asset names must never
+/// steer the write path. Reject path separators and parent components.
+fn is_safe_asset_name(name: &str) -> bool {
+    !(name.contains('/') || name.contains('\\') || name.contains(".."))
+}
+
 /// Download (streamed to disk), verify and extract the selected runtime.
 /// Returns the resolved java executable path.
 pub async fn download_and_install(
     release: &AprismJdkRelease,
     asset: &AprismJdkAsset,
 ) -> Result<PathBuf> {
+    // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+    // v26.5-alpha.1 hardening (ROBUSTNESS_V264 F2, defense in depth): the
+    // release JSON is trusted (we execute the JDK it ships), but a hostile
+    // or mangled asset name must never steer the write path out of the
+    // archive cache.
+    if !is_safe_asset_name(&asset.name) {
+        anyhow::bail!(
+            "Refusing suspicious release asset name: {:?}",
+            asset.name
+        );
+    }
+
     let base = jdk_base_dir()?;
     let archives = base.join("_archives");
     let target_dir = base.join(&release.tag);
@@ -502,5 +537,59 @@ mod tests {
     fn test_current_platform_is_known() {
         let (os, _arch) = current_platform();
         assert!(matches!(os, "windows" | "linux" | "macos"));
+    }
+
+    // ------------------------------------------------------------------
+    // v26.5-alpha.1 hardening (ROBUSTNESS_V264 F1/F2)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_remove_rejects_traversal_tags() {
+        // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+        // PoC inputs from ROBUSTNESS_V264 T1: the traversal string used to
+        // delete a sentinel directory outside the java cache. Hostile tags
+        // must fail validation with an error, never touch the filesystem.
+        for hostile in [
+            "..\\..\\..\\..\\..\\AppData\\Local\\Temp\\rb264\\victim",
+            "../../etc",
+            "..",
+            ".",
+            "",
+            "C:\\Windows",
+            "/etc/passwd",
+            "v26.2\\..\\..\\evil",
+            "a:b",
+        ] {
+            let err = remove(hostile)
+                .err()
+                .unwrap_or_else(|| panic!("hostile tag must error: {hostile}"));
+            assert!(
+                err.to_string().contains("Invalid AprismJDK tag"),
+                "wrong error for {hostile}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_remove_unknown_tag_is_noop() {
+        let ok = remove("v99.99-not-installed").unwrap();
+        assert!(!ok);
+    }
+
+    #[test]
+    fn test_asset_name_validation_rejects_path_steering() {
+        // F2: hostile names must fail the guard before any join() happens.
+        for name in [
+            "..\\..\\evil.zip",
+            "../../evil.zip",
+            "sub/dir/AprismJDK-26.2-windows-x64-jdk.zip",
+            "..\\AprismJDK-26.2-windows-x64-jdk.zip",
+        ] {
+            assert!(!is_safe_asset_name(name), "guard must reject {name}");
+        }
+        // Legitimate names pass the same predicate.
+        assert!(is_safe_asset_name("AprismJDK-26.2-windows-x64-jdk.zip"));
+        assert!(is_safe_asset_name("SHA256SUMS.txt"));
+        assert!(is_safe_asset_name("aprismate-26.2.jar"));
     }
 }

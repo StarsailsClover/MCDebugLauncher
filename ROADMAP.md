@@ -40,6 +40,19 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha 9 | Agent launch 支持 jdk + 文档刷新 | execute `launch` 新增 `jdk aprism[@ver]` 选项（与 java-path 互斥校验、解析失败回退 Adoptium 并记入事件流）；capabilities 清单与 AGENT_API.md 同步；README/README_CN 状态区与亮点刷新至 v26.4（新增 Aprism 生态条目、跨平台 CI/fuzz、MANIFEST 自动注入） | ✅ 已完成 |
 | Alpha 10 | LTS 收敛 | 版本转正 26.4.0；CHANGELOG 官方条目（Alpha 1–9 全记录）；回归验证：28 lib + 174 bin 测试、三平台 CI 绿、fuzz 三目标预算内零崩溃、capabilities 完整性断言通过 | ✅ 已完成 |
 
+## v26.5（主线：自主编排与运行时选择；独立分支开发，起点 ROBUSTNESS_V264.md）
+
+主题：面向 AI agent 的自主编排深化——实例级运行时绑定、编排能力复合与
+Agent API 一致性；ROBUSTNESS_V264 全部发现（F1–F6）作为鲁棒性工作纳入；
+自本版起执行分支开发与开发水印规范（GitHub@NDBlockConnect）。
+
+| Alpha | 主题 | 内容 | 状态 |
+|---|---|---|---|
+| Alpha 1 | jdk 删除穿越修复（F1/F2） | **F1 [Medium-High]**：`jdk remove` 路径穿越（PoC 确证缓存外哨兵被删）——tag 仅允许匹配 `installed()` 枚举条目 + 拒绝分隔符/父级组件；**F2 [Low-Medium]**：下载归档名 `archives.join(asset.name)` 拒绝含路径分隔符的资产名；两者均带回归测试 + 水印合规 | ✅ 已完成 |
+| Alpha 2 | Agent API 错误面收敛（F3/F4/F5）+ bench 基线（F6） | 提取器拒绝统一 JSON envelope；input 校验错误 4xx 归类；redstone 坏 body 显式 400；空闲环境落 `perf-bench.ps1 -Baseline` | 📋 规划中 |
+| Alpha 3 | 实例级 JDK 绑定 | `mdl jdk use <instance> aprism[@ver]|default`（instance.json java 偏好持久化，launch/doctor 遵从，`--jdk` 仍可临时覆盖） | 📋 规划中 |
+| Alpha 4–10 | 待定（按使用反馈） | 编排复合（schedule/macro/condition 声明式串联）、WS 事件流推送编排执行事件等候选 | 📋 规划中 |
+
 ## v26.3（已完成主线：加固与 Agent 面，收尾于 Alpha 10）
 
 主题：消化 v26.2 鲁棒性评估发现（F1/F3/F4，见 ROBUSTNESS_V262.md），补全 Agent REST/execute 能力面。
