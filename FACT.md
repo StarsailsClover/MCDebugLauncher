@@ -502,3 +502,36 @@ mdl search mod sodium --instance test       # ✅ 已实现，等待端到端测
 **测试版本：** Alpha 8.1 (v26.0.0-alpha.8.1)  
 **下一版本：** Alpha 9 (v26.0.0-alpha.9)  
 **预计发布：** 2026-08 月底
+
+---
+
+## 2026-08-23 OOM 保护排除项（ox-alpha 实施）
+
+**实施者：** ox-alpha（OpenCode CLI Agent，NDBlockConnect 组织）
+
+<!-- GitHub@NDBlockConnect | BlockConnect@StarsailsClover -->
+
+### 问题（实测根因）
+
+OpenLumin 项目（工作区位于 \...\Domain-Projects\Minecraft\OpenLumin\）的 NeoGradle 构建连续 3 次在 neoFormTransformSource 任务处无报错静默死亡。排查确认：mdl.log 中存在 **178 条 "terminating stale process" 击杀记录，时间与构建死亡精确吻合**。
+
+根因：stale 进程启发式对命令行含 "minecraft/net.minecraft/mcp/mdriven" 的 java 进程执行击杀——而 **NeoGradle 派生的构建工具进程（JST 源码变换器、Gradle worker、反编译器 fork）的 classpath/参数包含项目路径 \...\Minecraft\...\，被误判为 stale 游戏进程**。
+
+### 修复内容（src/game/oom_guard.rs）
+
+1. **内置开发工具链排除清单** \BUILTIN_EXCLUDE_SUBSTRINGS\：gradle / org.gradle.launcher / jst-cli / javac / forgeflower / vineflower / cfr / fernflower / net.neoforged / net.minecraftforge——命中即跳过击杀（debug 日志留痕）。
+2. **用户自定义排除文件** \<data_dir>/oom_excludes.txt\（Windows 即 %APPDATA%\\mdl\\oom_excludes.txt）：每行一个大小写不敏感子串，支持 # 注释，与内置清单合并生效；文件缺失为空表。
+3. 排除判定仅作用于 Phase 1 stale 击杀；Phase 2 工作集修剪不受影响（修剪无害）。
+4. 单元测试 +5（工具链命中、真实游戏不误伤、用户清单合并与大小写契约、加载容错），game::oom_guard 组 11/11 通过。
+5. 顺带修复两处既有编译损坏（非本功能引入）：agent/server.rs 两处 tokio entry.metadata() 缺 .await；util/validate.rs 测试数组 &str/String 混型。
+
+### 验证状态
+
+- cargo check ✅　cargo test oom_guard ✅ (11/11)　cargo build --release ✅（12MB）
+- 效果预期：mdl 任意命令的 OOM 扫描不再误杀 Gradle/NeoForm 工具链，长构建可与游戏实例并行。
+
+### 使用说明
+
+- 默认零配置生效（内置清单）。
+- 追加自定义排除：编辑 %APPDATA%\\mdl\\oom_excludes.txt，例如添加 \mycustomtool\。
+- 注意：内置 "gradle" 排除意味着通过 \gradlew runClient\ 启动的残留 MC 实例也不会被 stale 清理——需手动处理或加入用户清单反向管理。
