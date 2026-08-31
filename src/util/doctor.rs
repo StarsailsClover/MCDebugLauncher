@@ -68,6 +68,7 @@ pub async fn run_all() -> DoctorReport {
     checks.push(check_cache());
     checks.push(check_mirrors().await);
     checks.push(check_instances().await);
+    checks.push(check_jdk_bindings().await);
     checks.push(check_mojang().await);
     checks.push(check_modrinth().await);
     checks.push(check_github().await);
@@ -276,6 +277,84 @@ async fn check_instances() -> CheckResult {
             warn: false,
             detail: format!("Cannot open instances dir: {}", e),
         },
+    }
+}
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// v26.5-alpha.3: verify instance-level JDK bindings (`mdl jdk use`) resolve
+/// to an installed AprismJDK runtime. Unresolvable bindings are WARN (not
+/// FAIL): launch degrades to the standard Adoptium chain by design, but the
+/// operator should know the preference is currently inert.
+async fn check_jdk_bindings() -> CheckResult {
+    let manager = match crate::instance::InstanceManager::new() {
+        Ok(m) => m,
+        Err(_) => {
+            return CheckResult {
+                name: "jdk-bindings",
+                ok: true,
+                warn: false,
+                detail: "skipped (instances dir unavailable)".into(),
+            };
+        }
+    };
+    let list = match manager.list().await {
+        Ok(l) => l,
+        Err(_) => {
+            return CheckResult {
+                name: "jdk-bindings",
+                ok: true,
+                warn: false,
+                detail: "skipped (instances not listable)".into(),
+            };
+        }
+    };
+
+    let mut bound: Vec<(String, String)> = Vec::new();
+    for inst in &list {
+        if let Some(b) = &inst.config.jdk {
+            bound.push((inst.name.clone(), b.clone()));
+        }
+    }
+    if bound.is_empty() {
+        return CheckResult {
+            name: "jdk-bindings",
+            ok: true,
+            warn: false,
+            detail: "no instance-level JDK bindings".into(),
+        };
+    }
+
+    let mut broken: Vec<String> = Vec::new();
+    for (name, b) in &bound {
+        let hint = b.strip_prefix("aprism").map(|r| r.trim_start_matches('@'));
+        if crate::loader::aprism_jdk::resolve(hint).is_err() {
+            broken.push(format!("{} ({})", name, b));
+        }
+    }
+    if broken.is_empty() {
+        CheckResult {
+            name: "jdk-bindings",
+            ok: true,
+            warn: false,
+            detail: format!(
+                "{} binding(s), all resolve (e.g. {})",
+                bound.len(),
+                bound[0].1
+            ),
+        }
+    } else {
+        CheckResult {
+            name: "jdk-bindings",
+            ok: true,
+            warn: true,
+            detail: format!(
+                "{} binding(s), {} unresolvable (falling back to Adoptium): {}",
+                bound.len(),
+                broken.len(),
+                broken.join(", ")
+            ),
+        }
     }
 }
 

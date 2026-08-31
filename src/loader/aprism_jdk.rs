@@ -278,6 +278,41 @@ pub fn resolve(hint: Option<&str>) -> Result<(String, PathBuf)> {
     }
 }
 
+/// Normalize a JDK binding specification for `mdl jdk use` and the
+/// instance-level `jdk` config field (v26.5-alpha.3).
+///
+/// Accepted forms: `aprism` (newest installed), `aprism@<tag|version>`,
+/// a bare `<tag|version>`; or one of the clear words (`default`, `none`,
+/// `auto`, `clear`) which yield `None` = automatic selection.
+/// `Err` carries the client-facing message for invalid input.
+pub fn normalize_binding_spec(spec: &str) -> Result<Option<String>, String> {
+    // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+    let clear = matches!(
+        spec.trim().to_ascii_lowercase().as_str(),
+        "default" | "none" | "auto" | "clear"
+    );
+    if clear {
+        return Ok(None);
+    }
+    // Bare "aprism" binds the newest installed runtime.
+    if spec.trim().eq_ignore_ascii_case("aprism") {
+        return Ok(Some("aprism".into()));
+    }
+    let hint = spec
+        .strip_prefix("aprism")
+        .map(|rest| rest.trim_start_matches('@'))
+        .unwrap_or(spec)
+        // Canonical form stores the bare version (tags carry the 'v';
+        // resolve() matches either way, but the config reads cleaner).
+        .trim_start_matches('v');
+    if hint.contains('/') || hint.contains('\\') || hint.contains("..") || hint.is_empty() {
+        return Err(format!(
+            "Invalid JDK binding spec {spec:?}. Use aprism[@<tag|version>] or 'default'."
+        ));
+    }
+    Ok(Some(format!("aprism@{hint}")))
+}
+
 /// Remove an installed runtime by tag. Returns whether anything was deleted.
 ///
 /// v26.5-alpha.1 hardening (ROBUSTNESS_V264 F1, PoC-confirmed): the tag used
@@ -591,5 +626,26 @@ mod tests {
         assert!(is_safe_asset_name("AprismJDK-26.2-windows-x64-jdk.zip"));
         assert!(is_safe_asset_name("SHA256SUMS.txt"));
         assert!(is_safe_asset_name("aprismate-26.2.jar"));
+    }
+
+    #[test]
+    fn test_normalize_binding_spec() {
+        // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+        // v26.5-alpha.3: mdl jdk use spec forms.
+        assert_eq!(normalize_binding_spec("aprism").unwrap(), Some("aprism".into()));
+        // Bare "aprism" binds the newest installed runtime.
+        assert_eq!(normalize_binding_spec("aprism@26.2").unwrap(), Some("aprism@26.2".into()));
+        assert_eq!(normalize_binding_spec("26.2").unwrap(), Some("aprism@26.2".into()));
+        assert_eq!(normalize_binding_spec("v26.2").unwrap(), Some("aprism@26.2".into()));
+
+        // Clear words wipe the binding.
+        for w in ["default", "none", "auto", "clear"] {
+            assert_eq!(normalize_binding_spec(w).unwrap(), None, "{w}");
+        }
+
+        // Hostile / malformed input is rejected.
+        for bad in ["aprism@..", "..", "a/b", "a\\b", "aprism@"] {
+            assert!(normalize_binding_spec(bad).is_err(), "{bad}");
+        }
     }
 }

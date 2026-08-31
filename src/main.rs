@@ -599,6 +599,17 @@ enum JdkCommands {
         /// Release tag, e.g. v26.2
         tag: String,
     },
+    /// Bind an instance to a Java runtime (v26.5-alpha.3). The binding is
+    /// stored in instance.json and honored by every launch of the instance;
+    /// a launch-time --jdk/--java-path still wins for that launch.
+    /// SPEC: aprism | aprism@<tag|version> | default (clears the binding).
+    /// Omit SPEC to show the current binding.
+    Use {
+        /// Instance name
+        instance: String,
+        /// Binding spec (see above); omitted = show current binding
+        spec: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1620,6 +1631,9 @@ async fn run() -> Result<()> {
             }
             JdkCommands::List { format } => { cmd_jdk_list(&format)?; }
             JdkCommands::Remove { tag } => { cmd_jdk_remove(&tag)?; }
+            JdkCommands::Use { instance, spec } => {
+                cmd_jdk_use(&instance, spec.as_deref()).await?;
+            }
         },
         Commands::Import { name, pack, no_download } => {
             cmd_import(&name, &pack, no_download).await?;
@@ -1826,6 +1840,7 @@ async fn cmd_create(name: &str, version: &str, loader: Option<&str>, loader_vers
         version: version.to_string(),
         loader: loader_config,
         javaagents: Vec::new(),
+        jdk: None,
     };
 
     let manager = InstanceManager::new()?;
@@ -4293,6 +4308,57 @@ fn cmd_jdk_remove(tag: &str) -> Result<()> {
     Ok(())
 }
 
+/// Bind (or show/clear) an instance-level JDK runtime preference
+/// (v26.5-alpha.3). The binding lives in instance.json `jdk` and is honored
+/// by every launch path - CLI and agent execute alike - since the launcher
+/// reads it from the instance config.
+async fn cmd_jdk_use(instance: &str, spec: Option<&str>) -> Result<()> {
+    use instance::InstanceManager;
+
+    let manager = InstanceManager::new()?;
+    let inst = manager.get(instance).await?;
+
+    let Some(spec) = spec else {
+        // Show-only form.
+        match &inst.config.jdk {
+            Some(b) => println!("Instance '{instance}' JDK binding: {b}"),
+            None => println!(
+                "Instance '{instance}' has no JDK binding (automatic selection). \
+                 Set one with: mdl jdk use {instance} aprism[@<version>]"
+            ),
+        }
+        return Ok(());
+    };
+
+    // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+    let binding = match loader::aprism_jdk::normalize_binding_spec(spec) {
+        Ok(b) => b,
+        Err(msg) => anyhow::bail!("{msg}"),
+    };
+
+    match &binding {
+        Some(b) => {
+            // Advisory check: warn when the binding cannot resolve right now,
+            // but allow it (the runtime may be installed later; launch
+            // degrades gracefully per the alpha.7 fallback).
+            let hint = b.strip_prefix("aprism").map(|r| r.trim_start_matches('@'));
+            if let Err(e) = loader::aprism_jdk::resolve(hint) {
+                println!("Warning: {e:#}");
+                println!("The binding is stored anyway; launch falls back to Adoptium until it resolves.");
+            }
+            println!("Instance '{instance}' bound to JDK runtime: {b}");
+        }
+        None => {
+            println!("Instance '{instance}' JDK binding cleared (automatic selection).");
+        }
+    }
+
+    manager.update_config(instance, |cfg| {
+        cfg.jdk = binding.clone();
+    }).await?;
+    Ok(())
+}
+
 async fn cmd_aprism_status(format: &str, instance: &str) -> Result<()> {    use instance::{InstanceManager, ModManager};
     let manager = InstanceManager::new()?;
     let inst = manager.get(instance).await?;
@@ -4687,6 +4753,7 @@ async fn cmd_import(name: &str, pack: &str, no_download: bool) -> Result<()> {
             version: v.to_string(),
         }),
         javaagents: Vec::new(),
+        jdk: None,
     };
     let manager = InstanceManager::new()?;
     let instance = manager.create(config, true).await?;

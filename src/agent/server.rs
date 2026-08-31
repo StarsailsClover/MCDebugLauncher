@@ -992,6 +992,7 @@ async fn execute_command(
                 version: version.to_string(),
                 loader: None,
                 javaagents: Vec::new(),
+                jdk: None,
             };
 
             let manager = InstanceManager::new()?;

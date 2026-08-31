@@ -273,6 +273,23 @@ impl InstanceManager {
         })
     }
 
+    /// Read-modify-write the instance's `instance.json` (v26.5-alpha.3).
+    /// The closure mutates the freshly loaded config in place; the result is
+    /// persisted and returned. // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+    pub async fn update_config<F>(&self, name: &str, mutate: F) -> Result<InstanceConfig>
+    where
+        F: FnOnce(&mut InstanceConfig),
+    {
+        let mut inst = self.get(name).await?;
+        mutate(&mut inst.config);
+        let config_path = inst.path.join("instance.json");
+        let json = serde_json::to_string_pretty(&inst.config)?;
+        fs::write(&config_path, json)
+            .await
+            .with_context(|| format!("Failed to write {:?}", config_path))?;
+        Ok(inst.config)
+    }
+
     pub async fn delete(&self, name: &str) -> Result<()> {
         let instance_path = self.instances_dir.join(name);
 
@@ -383,6 +400,7 @@ mod tests {
             version: "1.21.4".to_string(),
             loader: None,
             javaagents: Vec::new(),
+            jdk: None,
         }
     }
 
