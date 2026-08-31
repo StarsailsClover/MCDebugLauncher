@@ -51,7 +51,8 @@ Agent API 一致性；ROBUSTNESS_V264 全部发现（F1–F6）作为鲁棒性�
 | Alpha 1 | jdk 删除穿越修复（F1/F2） | **F1 [Medium-High]**：`jdk remove` 路径穿越（PoC 确证缓存外哨兵被删）——tag 仅允许匹配 `installed()` 枚举条目 + 拒绝分隔符/父级组件；**F2 [Low-Medium]**：下载归档名 `archives.join(asset.name)` 拒绝含路径分隔符的资产名；两者均带回归测试 + 水印合规 | ✅ 已完成 |
 | Alpha 2 | Agent API 错误面收敛（F3/F4/F5）+ bench 基线（F6） | 提取器拒绝统一 JSON envelope；input 校验错误 4xx 归类；redstone 坏 body 显式 400；空闲环境落 `perf-bench.ps1 -Baseline` | 📋 规划中 |
 | Alpha 3 | 实例级 JDK 绑定 | `mdl jdk use <instance> [spec]`：spec = `aprism`/`aprism@<tag\|ver>`/`default`（清除）/省略（查看）；绑定持久化于 instance.json `jdk` 字段（serde default 保证旧配置兼容，round-trip 测试）；launch 决策链升级为三级——`--java-path/--jdk`（单次）→ 实例绑定（不可解析时 WARN 降级 Adoptium，同 alpha.1 语义）→ 自动供给；doctor 新增 `jdk-bindings` 检查（未解析绑定记 WARN 不判 FAIL）；`InstanceManager::update_config` 通用读改写；实测全生命周期（set/show/config 落盘/clear/doctor）。**事故记录**：PowerShell Set-Content 双重编码损坏 main.rs——git 恢复后全用 Edit 工具重做，规范永久禁用该路径（见 FACT.md 2026-08-31） | ✅ 已完成 |
-| Alpha 4–10 | 待定（按使用反馈） | 编排复合（schedule/macro/condition 声明式串联）、WS 事件流推送编排执行事件等候选 | 📋 规划中 |
+| Alpha 4 | Despotes v26.11 原语映射 | `mdl game circuit`（立方体元件扫描 radius 1-8，缺省十字准星）、`game redstone-action`（toggle/cycle 元件交互，face/count 可选）、`game screen`（窗口几何块，physical/guiScale=logical 换算）；Agent API 同步：`redstone-action` 输入类型（复用 CLI 构造器校验→400）+ `POST /circuit`（坏 body 显式 400，沿袭 F5 语义）+ `GET /screen`；capabilities + AGENT_API.md 同步；JSON 形状取自 v26.11 官方 Release Notes（实测证据：343 方块扫描、拉杆/音符盒交互） | ✅ 已完成 |
+| Alpha 5–10 | 待定（按使用反馈） | WS 事件流推送编排执行事件、编排复合等候选 | 📋 规划中 |
 
 ## v26.3（已完成主线：加固与 Agent 面，收尾于 Alpha 10）
 

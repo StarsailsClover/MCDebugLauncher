@@ -31,6 +31,8 @@ token mechanism exists — do not expose the port beyond localhost.
 | GET | `/api/v1/game/:instance/idle-status` | Idle watchdog: last-output age, threshold, fired? |
 | POST | `/api/v1/game/:instance/input` | Inject key/look/click/scroll/chat + v26.9 automation (schedule/macro/condition/raw-action) |
 | POST | `/api/v1/game/:instance/redstone` | Redstone signal query at a block position (no body = crosshair probe) |
+| POST | `/api/v1/game/:instance/circuit` | Redstone circuit cube scan, radius 1-8 (v26.11; no body = crosshair) |
+| GET | `/api/v1/game/:instance/screen` | Screen state + window geometry (physical/guiScale = logical, v26.11) |
 | GET | `/api/v1/instance/:instance/metrics` | Launch metrics; `?history=true` for all records |
 | GET | `/api/v1/instance/:instance/disk` | Disk usage + top-level breakdown |
 
@@ -61,11 +63,27 @@ v26.9 automation primitives:
 
 // raw-action: forward-compatible protocol passthrough
 {"type":"raw-action","command":{"type":"ping"}}
+
+// redstone-action (v26.11): component interaction via the useItemOn pipeline
+{"type":"redstone-action","op":"toggle","x":-516,"y":71,"z":-87,"face":"up"}
+{"type":"redstone-action","op":"cycle","x":-516,"y":71,"z":-87,"count":3}
 ```
 
 Redstone query (`POST /api/v1/game/:instance/redstone`): body optional —
 `{"x":..,"y":..,"z":..}` probes a block; an empty body probes the crosshair
 target block. Returns the block, max incoming signal and adjacent components.
+
+Circuit scan (`POST /api/v1/game/:instance/circuit`, v26.11): body optional —
+`{"x":..,"y":..,"z":..,"radius":1..8}` scans a cube of circuit components
+(wire/torch/lamp/repeater/comparator/lever/button/pressure plate/observer/
+piston/dispenser/dropper/hopper/note block/daylight detector/target/sculk)
+each with `powered` and properties (`delay`, `note`, `facing`, `locked`).
+Empty body scans around the crosshair target (agent-default radius 4).
+
+Screen (`GET /api/v1/game/:instance/screen`, v26.11): response carries the
+window geometry block `{"window":{"physicalWidth":…,"physicalHeight":…,
+"width":…,"height":…,"guiScale":…}}` — external agents convert OS window
+pixels to GUI click space via `physical / guiScale = logical`.
 
 ### Execute Commands (`POST /api/v1/execute`)
 

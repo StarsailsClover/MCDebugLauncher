@@ -205,6 +205,82 @@ pub fn condition_payload(if_query: Value, then_cmds: Value, else_cmds: Option<Va
     cmd
 }
 
+// ---------------------------------------------------------------------------
+// Despotes v26.11 redstone circuit completion
+// ---------------------------------------------------------------------------
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// Query a cube of redstone circuit components (v26.11). Radius 1-8, agent
+/// default 4; without coordinates the agent probes the crosshair target.
+pub async fn circuit_query(
+    instance_dir: &Path,
+    x: Option<i32>,
+    y: Option<i32>,
+    z: Option<i32>,
+    radius: Option<u8>,
+) -> Result<Value> {
+    let mut query = json!({"type": "circuit"});
+    if let (Some(x), Some(y), Some(z)) = (x, y, z) {
+        query["x"] = json!(x);
+        query["y"] = json!(y);
+        query["z"] = json!(z);
+    }
+    if let Some(r) = radius {
+        query["radius"] = json!(r);
+    }
+    send_query(instance_dir, query).await
+}
+
+/// Screen state query (v26.11): response carries the window geometry block
+/// (physical width/height, GUI-scaled width/height, guiScale) enabling
+/// `physical / guiScale = logical` click-space conversion for external
+/// agents.
+pub async fn screen_query(instance_dir: &Path) -> Result<Value> {
+    send_query(instance_dir, json!({"type": "screen"})).await
+}
+
+/// Validate and build a `{"type":"redstone-action", ...}` action payload
+/// (v26.11). `toggle` = one right-click on the component; `cycle` = N
+/// right-clicks spaced two ticks (repeater delay, note-block pitch,
+/// comparator mode). Coordinates are optional (crosshair fallback);
+/// `face` selects the clicked face.
+pub fn redstone_action_payload(
+    op: &str,
+    x: Option<i32>,
+    y: Option<i32>,
+    z: Option<i32>,
+    face: Option<&str>,
+    count: Option<u32>,
+) -> Result<Value> {
+    let op = op.to_ascii_lowercase();
+    if !matches!(op.as_str(), "toggle" | "cycle") {
+        anyhow::bail!(
+            "Unknown redstone-action op '{}'. Supported: toggle / cycle",
+            op
+        );
+    }
+    if (x.is_some() != y.is_some()) || (x.is_some() != z.is_some()) {
+        anyhow::bail!("--x, --y and --z must be given together (or all omitted for crosshair)");
+    }
+    if op == "cycle" && count == Some(0) {
+        anyhow::bail!("cycle count must be at least 1");
+    }
+    let mut cmd = json!({"type": "redstone-action", "op": op});
+    if let (Some(x), Some(y), Some(z)) = (x, y, z) {
+        cmd["x"] = json!(x);
+        cmd["y"] = json!(y);
+        cmd["z"] = json!(z);
+    }
+    if let Some(f) = face {
+        cmd["face"] = json!(f);
+    }
+    if let Some(c) = count {
+        cmd["count"] = json!(c);
+    }
+    Ok(cmd)
+}
+
 /// Press, release, or tap a keyboard key inside the game.
 ///
 /// `key` uses friendly names ("w", "a", "space", "escape", "e", ...) or raw

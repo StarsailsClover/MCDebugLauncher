@@ -380,6 +380,72 @@ enum GameCommands {
         json: String,
     },
 
+    /// Scan a cube of redstone circuit components (Despotes v26.11): wire,
+    /// torch, lamp, repeater, comparator, lever, button, pressure plate,
+    /// observer, piston, dispenser, dropper, hopper, note block, daylight
+    /// detector, target, sculk - each with powered state and properties.
+    /// Omit coordinates to probe the crosshair target block.
+    Circuit {
+        /// Instance name
+        instance: String,
+
+        /// Block X (requires y and z)
+        #[arg(long)]
+        x: Option<i32>,
+
+        /// Block Y
+        #[arg(long)]
+        y: Option<i32>,
+
+        /// Block Z
+        #[arg(long)]
+        z: Option<i32>,
+
+        /// Cube radius 1-8 (agent default 4)
+        #[arg(long)]
+        radius: Option<u8>,
+    },
+
+    /// Interact with a redstone component (v26.11): toggle = single
+    /// right-click; cycle = N right-clicks two ticks apart (repeater delay,
+    /// note-block pitch, comparator mode). Omit coordinates to target the
+    /// crosshair.
+    RedstoneAction {
+        /// Instance name
+        instance: String,
+
+        /// Operation: toggle or cycle
+        op: String,
+
+        /// Block X (requires y and z)
+        #[arg(long)]
+        x: Option<i32>,
+
+        /// Block Y
+        #[arg(long)]
+        y: Option<i32>,
+
+        /// Block Z
+        #[arg(long)]
+        z: Option<i32>,
+
+        /// Clicked face, e.g. up / down / north / south / east / west
+        #[arg(long)]
+        face: Option<String>,
+
+        /// Right-click count for cycle
+        #[arg(long)]
+        count: Option<u32>,
+    },
+
+    /// Query screen state (v26.11): in-game screen plus the window geometry
+    /// block - physical size, GUI-scaled size and guiScale for
+    /// physical/guiScale=logical click-space conversion.
+    Screen {
+        /// Instance name
+        instance: String,
+    },
+
     /// Hot-attach a Java agent JAR into the RUNNING game JVM (v26.2-alpha.6).
     /// Uses the JVM Attach API (agentmain); the agent must implement
     /// agentmain in its manifest. Unlike launch-time --javaagent this works
@@ -1530,6 +1596,15 @@ async fn run() -> Result<()> {
                 }
                 GameCommands::RawAction { instance, json } => {
                     cmd_game_raw_action(&instance, &json).await?;
+                }
+                GameCommands::Circuit { instance, x, y, z, radius } => {
+                    cmd_game_circuit(&instance, x, y, z, radius).await?;
+                }
+                GameCommands::RedstoneAction { instance, op, x, y, z, face, count } => {
+                    cmd_game_redstone_action(&instance, &op, x, y, z, face.as_deref(), count).await?;
+                }
+                GameCommands::Screen { instance } => {
+                    cmd_game_screen(&instance).await?;
                 }
                 GameCommands::InjectAgent { instance, jar, params, java_path } => {
                     cmd_game_inject_agent(&instance, &jar, params.as_deref(), java_path.as_deref()).await?;
@@ -3705,6 +3780,56 @@ async fn cmd_game_raw_action(instance: &str, json_payload: &str) -> Result<()> {
         .with_context(|| format!("Invalid action JSON: {json_payload}"))?;
     let dir = resolve_instance_dir(instance).await?;
     print_game_response(&game::client::automation_action(&dir, command).await?);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Despotes v26.11: circuit scan / redstone-action / screen geometry
+// ---------------------------------------------------------------------------
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+async fn cmd_game_circuit(
+    instance: &str,
+    x: Option<i32>,
+    y: Option<i32>,
+    z: Option<i32>,
+    radius: Option<u8>,
+) -> Result<()> {
+    if let Some(r) = radius {
+        if !(1..=8).contains(&r) {
+            anyhow::bail!("--radius must be within 1-8 (agent default 4)");
+        }
+    }
+    if x.is_some() != y.is_some() || x.is_some() != z.is_some() {
+        anyhow::bail!("--x, --y and --z must be given together (or all omitted for crosshair)");
+    }
+    let dir = resolve_instance_dir(instance).await?;
+    let response = game::client::circuit_query(&dir, x, y, z, radius).await?;
+    print_game_response(&response);
+    Ok(())
+}
+
+async fn cmd_game_redstone_action(
+    instance: &str,
+    op: &str,
+    x: Option<i32>,
+    y: Option<i32>,
+    z: Option<i32>,
+    face: Option<&str>,
+    count: Option<u32>,
+) -> Result<()> {
+    // Offline validation first: op whitelist + coordinate pairing + count.
+    let payload = game::client::redstone_action_payload(op, x, y, z, face, count)?;
+    let dir = resolve_instance_dir(instance).await?;
+    print_game_response(&game::client::automation_action(&dir, payload).await?);
+    Ok(())
+}
+
+async fn cmd_game_screen(instance: &str) -> Result<()> {
+    let dir = resolve_instance_dir(instance).await?;
+    let response = game::client::screen_query(&dir).await?;
+    print_game_response(&response);
     Ok(())
 }
 

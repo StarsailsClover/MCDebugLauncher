@@ -176,6 +176,22 @@ enum GameInputRequest {
     RawAction {
         command: serde_json::Value,
     },
+    /// Redstone component interaction (v26.11): op = toggle | cycle,
+    /// coordinates optional (crosshair fallback), face selects the clicked
+    /// face, count repeats for cycle.
+    RedstoneAction {
+        op: String,
+        #[serde(default)]
+        x: Option<i32>,
+        #[serde(default)]
+        y: Option<i32>,
+        #[serde(default)]
+        z: Option<i32>,
+        #[serde(default)]
+        face: Option<String>,
+        #[serde(default)]
+        count: Option<u32>,
+    },
 }
 
 fn default_action() -> String {
@@ -236,6 +252,8 @@ impl AgentServer {
             .route("/api/v1/game/:instance/idle-status", get(handle_idle_status))
             .route("/api/v1/game/:instance/input", post(handle_game_input))
 .route("/api/v1/game/:instance/redstone", post(handle_game_redstone))
+.route("/api/v1/game/:instance/circuit", post(handle_game_circuit))
+.route("/api/v1/game/:instance/screen", get(handle_game_screen))
             // v26.3-alpha.1: instance-scoped observability
             .route("/api/v1/instance/:instance/metrics", get(handle_instance_metrics))
             .route("/api/v1/instance/:instance/disk", get(handle_instance_disk))
@@ -767,6 +785,16 @@ async fn handle_game_input(
             )))
         }
         GameInputRequest::RawAction { command } => Some(Ok(command.clone())),
+        GameInputRequest::RedstoneAction { op, x, y, z, face, count } => {
+            // v26.11 component interaction; offline validation via the same
+            // builder the CLI uses (client errors -> 400, not 502).
+            Some(
+                crate::game::client::redstone_action_payload(
+                    op, *x, *y, *z, face.as_deref(), *count,
+                )
+                .map_err(|e| e.to_string()),
+            )
+        }
         _ => None,
     };
 
@@ -792,7 +820,8 @@ async fn handle_game_input(
         GameInputRequest::Schedule { .. }
         | GameInputRequest::Macro { .. }
         | GameInputRequest::Condition { .. }
-        | GameInputRequest::RawAction { .. } => {
+        | GameInputRequest::RawAction { .. }
+        | GameInputRequest::RedstoneAction { .. } => {
             // Validation passed above; the payload is guaranteed present.
             let p = automation_payload.unwrap().expect("validated payload");
             crate::game::client::automation_action(&dir, p).await
@@ -936,6 +965,94 @@ async fn handle_game_redstone(
         None => (None, None, None),
     };
     match crate::game::client::redstone_query(&dir, x, y, z).await {
+        Ok(response) => (StatusCode::OK, Json(response)),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+        ),
+    }
+}
+
+/// v26.11 circuit-scan request body (all fields optional; empty = crosshair
+/// probe with the agent-default radius).
+#[derive(Debug, Deserialize, Default)]
+struct GameCircuitRequest {
+    #[serde(default)]
+    x: Option<i32>,
+    #[serde(default)]
+    y: Option<i32>,
+    #[serde(default)]
+    z: Option<i32>,
+    #[serde(default)]
+    radius: Option<u8>,
+}
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// Parse the circuit-scan body (v26.5-alpha.4). Mirrors parse_redstone_body:
+/// an existing-but-malformed body must be a client error, never a silent
+/// crosshair probe. Pure function for testability.
+fn parse_circuit_body(bytes: &[u8]) -> Result<(Option<i32>, Option<i32>, Option<i32>, Option<u8>), String> {
+    if bytes.iter().all(|b| b.is_ascii_whitespace()) {
+        return Ok((None, None, None, None));
+    }
+    let req: GameCircuitRequest = serde_json::from_slice(bytes)
+        .map_err(|e| format!("invalid circuit body: {e}"))?;
+    if req.x.is_some() != req.y.is_some() || req.x.is_some() != req.z.is_some() {
+        return Err("x, y and z must be given together (or all omitted for crosshair probe)".into());
+    }
+    if let Some(r) = req.radius {
+        if !(1..=8).contains(&r) {
+            return Err("radius must be within 1-8".into());
+        }
+    }
+    Ok((req.x, req.y, req.z, req.radius))
+}
+
+async fn handle_game_circuit(
+    Path(instance): Path<String>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let dir = match resolve_instance_dir(&instance).await {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+            );
+        }
+    };
+    let (x, y, z, radius) = match parse_circuit_body(&body) {
+        Ok(c) => c,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"status": "error", "error": msg})),
+            );
+        }
+    };
+    match crate::game::client::circuit_query(&dir, x, y, z, radius).await {
+        Ok(response) => (StatusCode::OK, Json(response)),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+        ),
+    }
+}
+
+async fn handle_game_screen(
+    Path(instance): Path<String>,
+) -> impl IntoResponse {
+    let dir = match resolve_instance_dir(&instance).await {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+            );
+        }
+    };
+    match crate::game::client::screen_query(&dir).await {
         Ok(response) => (StatusCode::OK, Json(response)),
         Err(e) => (
             StatusCode::BAD_GATEWAY,
@@ -1488,5 +1605,43 @@ mod tests {
         assert!(build_macro_payload("play", None, None).is_err());
         // op whitelist
         assert!(build_macro_payload("rewind", Some("m"), None).is_err());
+    }
+}
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+#[cfg(test)]
+mod circuit_tests {
+    use super::*;
+
+    /// v26.5-alpha.4 (Despotes v26.11 mapping): circuit body parsing.
+    #[test]
+    fn test_parse_circuit_body() {
+        // Empty / whitespace-only = crosshair probe with default radius.
+        assert_eq!(parse_circuit_body(b""), Ok((None, None, None, None)));
+        assert_eq!(parse_circuit_body(b" \r\n"), Ok((None, None, None, None)));
+
+        // Full body parses.
+        assert_eq!(
+            parse_circuit_body(br#"{"x":-516,"y":71,"z":-87,"radius":3}"#),
+            Ok((Some(-516), Some(71), Some(-87), Some(3)))
+        );
+
+        // Radius-only is valid (crosshair + explicit radius).
+        assert_eq!(
+            parse_circuit_body(br#"{"radius":8}"#),
+            Ok((None, None, None, Some(8)))
+        );
+
+        // Partial coordinates are a client error.
+        assert!(parse_circuit_body(br#"{"x":1,"y":2}"#).is_err());
+
+        // Radius out of range is a client error.
+        assert!(parse_circuit_body(br#"{"radius":9}"#).is_err());
+        assert!(parse_circuit_body(br#"{"radius":0}"#).is_err());
+
+        // Malformed JSON is a client error with a message.
+        let e = parse_circuit_body(b"{").unwrap_err();
+        assert!(e.contains("invalid circuit body"), "{e}");
     }
 }

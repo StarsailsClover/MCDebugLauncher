@@ -108,6 +108,8 @@ pub fn manifest() -> Capabilities {
             Endpoint { method: "GET",  path: "/api/v1/game/:instance/idle-status",purpose: "Idle watchdog status (last output age, threshold, remaining)" },
             Endpoint { method: "POST", path: "/api/v1/game/:instance/input",     purpose: "Inject an in-game input (key/click/look/chat/scroll/schedule/macro/condition/raw-action)" },
             Endpoint { method: "POST", path: "/api/v1/game/:instance/redstone",  purpose: "Redstone signal query at a block position (crosshair when no coords)" },
+            Endpoint { method: "POST", path: "/api/v1/game/:instance/circuit",   purpose: "Redstone circuit component cube scan, radius 1-8 (v26.11)" },
+            Endpoint { method: "GET",  path: "/api/v1/game/:instance/screen",    purpose: "Screen state + window geometry block for click-space conversion (v26.11)" },
             // v26.3-alpha.1: instance-scoped observability
             Endpoint { method: "GET",  path: "/api/v1/instance/:instance/metrics", purpose: "Launch metrics for an instance (?history=true for full history)" },
             Endpoint { method: "GET",  path: "/api/v1/instance/:instance/disk",    purpose: "Disk usage with a top-level breakdown" },
@@ -296,6 +298,19 @@ pub fn manifest() -> Capabilities {
                     ArgSpec { name: "command", required: true, description: "Full protocol action as a JSON object" },
                 ],
             },
+            // Despotes v26.11 redstone circuit completion (v26.5-alpha.4)
+            GameInput {
+                input_type: "redstone-action",
+                description: "Interact with a redstone component: toggle (one right-click) or cycle (N right-clicks, 2 ticks apart)",
+                fields: vec![
+                    ArgSpec { name: "op", required: true, description: "toggle | cycle" },
+                    ArgSpec { name: "x", required: false, description: "Block X (with y+z; omit for crosshair)" },
+                    ArgSpec { name: "y", required: false, description: "Block Y" },
+                    ArgSpec { name: "z", required: false, description: "Block Z" },
+                    ArgSpec { name: "face", required: false, description: "Clicked face: up/down/north/south/east/west" },
+                    ArgSpec { name: "count", required: false, description: "Right-click count for cycle (>=1)" },
+                ],
+            },
         ],
         events: EventsSpec {
             websocket_path: "/api/v1/events",
@@ -366,7 +381,7 @@ mod tests {
         }
         // All five game input types must be declared.
         let types: Vec<&str> = caps.game_inputs.iter().map(|g| g.input_type).collect();
-            for t in ["key", "look", "click", "scroll", "chat", "schedule", "macro", "condition", "raw-action"] {
+            for t in ["key", "look", "click", "scroll", "chat", "schedule", "macro", "condition", "raw-action", "redstone-action"] {
                 assert!(types.contains(&t), "missing game input {}", t);
             }
         // Event stream contract must include all actual ServerEvent kinds.
