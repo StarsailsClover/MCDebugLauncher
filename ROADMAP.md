@@ -54,7 +54,8 @@ Agent API 一致性；ROBUSTNESS_V264 全部发现（F1–F6）作为鲁棒性�
 | Alpha 4 | Despotes v26.11 原语映射 | `mdl game circuit`（立方体元件扫描 radius 1-8，缺省十字准星）、`game redstone-action`（toggle/cycle 元件交互，face/count 可选）、`game screen`（窗口几何块，physical/guiScale=logical 换算）；Agent API 同步：`redstone-action` 输入类型（复用 CLI 构造器校验→400）+ `POST /circuit`（坏 body 显式 400，沿袭 F5 语义）+ `GET /screen`；capabilities + AGENT_API.md 同步；JSON 形状取自 v26.11 官方 Release Notes（实测证据：343 方块扫描、拉杆/音符盒交互） | ✅ 已完成 |
 | Alpha 5 | WS 编排事件流 | agent server 内置 orchestration watcher（5s 轮询 tracked 游戏的 Despotes schedule status，diff 后广播 `schedule_registered`/`schedule_fired`/`schedule_removed`）——agent 从轮询编排状态转为事件驱动响应；响应形状取自 Despotes 源码 `ScheduleManager.statusJson()`（权威证据，pin 测试锁定）；diff 纯函数化 + 快照语义（瞬时失败不产生幻影 removed；游戏失联清空快照自然重注册）；capabilities 事件清单 + AGENT_API.md 同步；watcher 故障绝不拖垮 server | ✅ 已完成 |
 | Alpha 6 | macro 生命周期事件流 | 编排 watcher 扩展至 macro 状态（MacroRecorder.statusJson 形状自 Despotes 源码 pin 测试锁定）：`macro_recorded`（录制完成入列）/`macro_play_started`（含总步数）/`macro_play_finished`/`macro_removed`；播放中换宏 emitting finish+start 保序；与 schedule 轮询同循环同快照语义（瞬时失败不幻影、失联清空）；capabilities + AGENT_API.md 同步 | ✅ 已完成 |
-| Alpha 7–10 | 待定（按使用反馈） | 编排复合、更多生态候选 | 📋 规划中 |
+| Alpha 7 | **Bug 修复**：instance→window 映射穿越 | **字段报告**（alpha.5 期间观察）：openlumin 游戏错误画面被映射到另一实例名——`collect_running_pids` 无条件信任 runtime/pid 文件，游戏崩溃后文件残留 + Windows PID 复用 → 他实例 java 进程持有该 pid → Match 2/Path 1 错误归属（且 `find_for_instance` 强制改写合成名加重错配）。修复三重校验：①pid 存活且为 java/javaw 且命令行含 `instances/<name>` gameDir 标记（边界字符校验防前缀混淆，纯函数测试锁定）；②同 pid 被多实例声明即歧义整体丢弃；③`find_for_instance` Path 1 身份校验失败降级标题匹配。**环境发现**：本机 IPv6 路由失效（ping -6 100% 丢包）+ DNS AAAA 优先 → reqwest 30s 超时而 curl 正常（test_fetch_manifest 本地失败、CI 绿，判定环境非代码） | ✅ 已完成 |
+| Alpha 8–10 | 待定（按使用反馈） | 编排复合、更多生态候选 | 📋 规划中 |
 
 ## v26.3（已完成主线：加固与 Agent 面，收尾于 Alpha 10）
 
