@@ -22,9 +22,11 @@
 
 // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use super::server::ServerEvent;
 
 /// Poll cadence. 5s keeps `schedule_fired` latency well under one period of
@@ -64,6 +66,121 @@ pub enum MacroEvent {
     Removed { name: String },
     PlaybackStarted { name: String, total_steps: u64 },
     PlaybackFinished { name: String },
+}
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// A registered circuit watch subscription (v26.5-alpha.8): a cube the
+/// watcher repeatedly scans and diffs on behalf of an agent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CircuitWatch {
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub radius: u8,
+}
+
+/// One circuit component, keyed by its position.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CircuitComponent {
+    pub block: String,
+    pub powered: Option<bool>,
+    pub delay: Option<i64>,
+    pub note: Option<i64>,
+    pub facing: Option<String>,
+    pub locked: Option<bool>,
+}
+
+pub type CircuitSnapshot = HashMap<(i32, i32, i32), CircuitComponent>;
+
+/// Parse a Despotes circuit-scan `result` (WorldProbes.circuit, v26.11).
+/// Shape: inWorld, cx/cy/cz/radius, scanned, count, components[] with
+/// block/x/y/z (+powered/delay/note/facing/locked when the blockstate has
+/// them). Returns None while the game is not in a world (inWorld=false) so
+/// the watcher keeps its previous snapshot instead of emitting mass
+/// removals for a menu screen.
+pub fn parse_circuit_snapshot(result: &serde_json::Value) -> Option<CircuitSnapshot> {
+    if result.get("inWorld").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    let arr = result.get("components")?.as_array()?;
+    let mut out = CircuitSnapshot::new();
+    for c in arr {
+        let (Some(x), Some(y), Some(z)) = (
+            c.get("x").and_then(|v| v.as_i64()).map(|v| v as i32),
+            c.get("y").and_then(|v| v.as_i64()).map(|v| v as i32),
+            c.get("z").and_then(|v| v.as_i64()).map(|v| v as i32),
+        ) else {
+            continue;
+        };
+        let Some(block) = c.get("block").and_then(|v| v.as_str()) else { continue };
+        let opt_bool = |k: &str| c.get(k).and_then(|v| v.as_bool());
+        let opt_i64 = |k: &str| {
+            c.get(k)
+                .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+        };
+        out.insert(
+            (x, y, z),
+            CircuitComponent {
+                block: block.to_string(),
+                powered: opt_bool("powered"),
+                delay: opt_i64("delay"),
+                note: opt_i64("note"),
+                facing: c.get("facing").and_then(|v| v.as_str()).map(String::from),
+                locked: opt_bool("locked"),
+            },
+        );
+    }
+    Some(out)
+}
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// Diff two circuit scans into compact per-component change entries:
+/// appeared / removed / changed (any of powered, delay, note, facing,
+/// locked, or the block id itself). Pure function; unit-tested.
+pub fn diff_circuits(prev: &CircuitSnapshot, current: &CircuitSnapshot) -> Vec<serde_json::Value> {
+    let mut changes = Vec::new();
+    for (pos, cur) in current {
+        let (x, y, z) = pos;
+        match prev.get(pos) {
+            None => {
+                let mut e = json!({
+                    "event": "appeared",
+                    "block": cur.block,
+                    "x": x, "y": y, "z": z,
+                });
+                if let Some(p) = cur.powered { e["powered"] = json!(p); }
+                changes.push(e);
+            }
+            Some(old) if old != cur => {
+                let mut e = json!({
+                    "event": "changed",
+                    "block": cur.block,
+                    "x": x, "y": y, "z": z,
+                });
+                if let Some(p) = cur.powered { e["powered"] = json!(p); }
+                if old.block != cur.block { e["wasBlock"] = json!(old.block); }
+                if old.powered != cur.powered {
+                    e["wasPowered"] = old.powered.map(|p| json!(p)).unwrap_or(json!(null));
+                }
+                changes.push(e);
+            }
+            _ => {}
+        }
+    }
+    for (pos, old) in prev {
+        if !current.contains_key(pos) {
+            let (x, y, z) = pos;
+            changes.push(json!({
+                "event": "removed",
+                "block": old.block,
+                "x": x, "y": y, "z": z,
+            }));
+        }
+    }
+    changes
 }
 
 /// Parse a Despotes schedule-status `result` envelope into a snapshot map.
@@ -198,21 +315,29 @@ pub(super) async fn watch_loop(
     // Snapshots keyed by instance name.
     let mut snapshots: HashMap<String, HashMap<String, ScheduleSnapshot>> = HashMap::new();
     let mut macro_snapshots: HashMap<String, MacroSnapshot> = HashMap::new();
+    let mut circuit_snapshots: HashMap<(String, String), CircuitSnapshot> = HashMap::new();
 
     loop {
         ticker.tick().await;
         // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
-        let instances: Vec<String> = {
+        let instances: Vec<(String, Vec<CircuitWatch>)> = {
             let st = state.read().await;
-            st.running_instances.keys().cloned().collect()
+            st.running_instances
+                .keys()
+                .map(|instance| (
+                    instance.clone(),
+                    st.watches.get(instance).cloned().unwrap_or_default(),
+                ))
+                .collect()
         };
 
-        for instance in instances {
+        for (instance, watches) in instances {
             let dir = match super::server::resolve_instance_dir(&instance).await {
                 Ok(d) => d,
                 Err(_) => {
                     snapshots.remove(&instance);
                     macro_snapshots.remove(&instance);
+                    circuit_snapshots.retain(|(i, _), _| i != &instance);
                     continue;
                 }
             };
@@ -221,6 +346,7 @@ pub(super) async fn watch_loop(
             if !crate::game::client::is_available(&dir).await {
                 snapshots.remove(&instance);
                 macro_snapshots.remove(&instance);
+                circuit_snapshots.retain(|(i, _), _| i != &instance);
                 continue;
             }
             let timestamp = chrono::Utc::now().to_rfc3339();
@@ -303,6 +429,49 @@ pub(super) async fn watch_loop(
                 let _ = event_tx.send(event);
             }
             *mprev = mcurrent;
+
+            // ---- circuit watches (v26.5-alpha.8) ----
+            // Remove snapshots for watches deleted through the API. Without
+            // this, deleting then re-adding the same name could inherit an
+            // old scan and suppress its first appeared/change event.
+            let active_watches: HashSet<&str> = watches.iter().map(|w| w.name.as_str()).collect();
+            circuit_snapshots.retain(|(watch_instance, watch_name), _| {
+                watch_instance != &instance || active_watches.contains(watch_name.as_str())
+            });
+            for watch in watches {
+                let cstatus = match crate::game::client::circuit_query(
+                    &dir,
+                    Some(watch.x),
+                    Some(watch.y),
+                    Some(watch.z),
+                    Some(watch.radius),
+                )
+                .await
+                {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                // Menu / not-in-world responses keep the prior scan so the
+                // next world entry does not emit a mass removal event.
+                let Some(current) = parse_circuit_snapshot(&cstatus) else { continue };
+                let key = (instance.clone(), watch.name.clone());
+                let prev = circuit_snapshots.entry(key).or_default();
+                let mut changes = diff_circuits(prev, &current);
+                if !changes.is_empty() {
+                    let truncated = changes.len() > 64;
+                    changes.truncate(64);
+                    if truncated {
+                        changes.push(json!({"event": "truncated", "remaining": true}));
+                    }
+                    let _ = event_tx.send(ServerEvent::CircuitChanged {
+                        instance: instance.clone(),
+                        watch: watch.name,
+                        changes,
+                        timestamp: timestamp.clone(),
+                    });
+                }
+                *prev = current;
+            }
         }
     }
 }
@@ -434,5 +603,71 @@ mod tests {
 
         // No-op.
         assert!(diff_macros(&recorded, &recorded).is_empty());
+    }
+
+    // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+    fn component(block: &str, powered: Option<bool>) -> CircuitComponent {
+        CircuitComponent {
+            block: block.into(),
+            powered,
+            delay: None,
+            note: None,
+            facing: None,
+            locked: None,
+        }
+    }
+
+    /// Shape pinned to Despotes WorldProbes.circuit() (v26.11).
+    #[test]
+    fn test_parse_circuit_snapshot_official_shape() {
+        let result = json!({
+            "inWorld": true,
+            "cx": -516, "cy": 71, "cz": -87, "radius": 3,
+            "scanned": 343, "count": 2,
+            "components": [
+                {"block":"minecraft:lever","x":-516,"y":71,"z":-87,
+                 "powered":true,"facing":"north"},
+                {"block":"minecraft:note_block","x":-515,"y":71,"z":-87,
+                 "note":3,"powered":false}
+            ]
+        });
+        let snap = parse_circuit_snapshot(&result).unwrap();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[&(-516, 71, -87)].powered, Some(true));
+        assert_eq!(snap[&(-515, 71, -87)].note, Some(3));
+
+        // Menu screen: keep prior snapshot, never emit mass removals.
+        assert!(parse_circuit_snapshot(&json!({"inWorld": false})).is_none());
+        // Missing components is unsupported/junk, skip safely.
+        assert!(parse_circuit_snapshot(&json!({"inWorld": true})).is_none());
+    }
+
+    #[test]
+    fn test_diff_circuits_lifecycle_and_state() {
+        let empty = CircuitSnapshot::new();
+        let mut lever_off = CircuitSnapshot::new();
+        lever_off.insert((1, 2, 3), component("minecraft:lever", Some(false)));
+
+        // Appearance.
+        let evs = diff_circuits(&empty, &lever_off);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0]["event"], "appeared");
+        assert_eq!(evs[0]["powered"], false);
+
+        // Powered flip carries current + prior state.
+        let mut lever_on = CircuitSnapshot::new();
+        lever_on.insert((1, 2, 3), component("minecraft:lever", Some(true)));
+        let evs = diff_circuits(&lever_off, &lever_on);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0]["event"], "changed");
+        assert_eq!(evs[0]["powered"], true);
+        assert_eq!(evs[0]["wasPowered"], false);
+
+        // Removal and no-op.
+        let evs = diff_circuits(&lever_on, &empty);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0]["event"], "removed");
+        assert!(diff_circuits(&lever_on, &lever_on).is_empty());
     }
 }

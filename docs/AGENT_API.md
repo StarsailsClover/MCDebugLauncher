@@ -33,6 +33,9 @@ token mechanism exists — do not expose the port beyond localhost.
 | POST | `/api/v1/game/:instance/redstone` | Redstone signal query at a block position (no body = crosshair probe) |
 | POST | `/api/v1/game/:instance/circuit` | Redstone circuit cube scan, radius 1-8 (v26.11; no body = crosshair) |
 | GET | `/api/v1/game/:instance/screen` | Screen state + window geometry (physical/guiScale = logical, v26.11) |
+| GET | `/api/v1/game/:instance/watch` | List in-memory circuit change watches (v26.5-alpha.8) |
+| POST | `/api/v1/game/:instance/watch` | Register a circuit change watch: `{name?,x,y,z,radius?}` |
+| DELETE | `/api/v1/game/:instance/watch/:name` | Remove a circuit change watch |
 | GET | `/api/v1/instance/:instance/metrics` | Launch metrics; `?history=true` for all records |
 | GET | `/api/v1/instance/:instance/disk` | Disk usage + top-level breakdown |
 
@@ -85,6 +88,26 @@ window geometry block `{"window":{"physicalWidth":…,"physicalHeight":…,
 "width":…,"height":…,"guiScale":…}}` — external agents convert OS window
 pixels to GUI click space via `physical / guiScale = logical`.
 
+### Circuit Watches (v26.5-alpha.8)
+
+Register a persistent-in-agent-memory cube watch; it does not modify the
+world or game configuration. The orchestration watcher scans it every 5s
+while the instance is tracked by this agent server and emits `circuit_changed`
+over WebSocket when components appear, disappear, or change powered/delay/
+note/facing/locked state. Watches are intentionally lost when the agent server
+restarts.
+
+```bash
+# Register (radius defaults to 4; valid range 1..8)
+curl -s -X POST localhost:8080/api/v1/game/demo/watch \
+  -H 'content-type: application/json' \
+  -d '{"name":"door","x":-516,"y":71,"z":-87,"radius":3}'
+
+# List / remove
+curl -s localhost:8080/api/v1/game/demo/watch
+curl -s -X DELETE localhost:8080/api/v1/game/demo/watch/door
+```
+
 ### Execute Commands (`POST /api/v1/execute`)
 
 Body: `{"command":"…","args":[…],"options":{…}}`.
@@ -133,6 +156,7 @@ Every frame: JSON object with `type` + `timestamp`.
 | `macro_play_started` | name, totalSteps |
 | `macro_play_finished` | name |
 | `macro_removed` | name |
+| `circuit_changed` | watch, changes[] (appeared/changed/removed; max 64 + truncated marker) |
 
 Schedule and macro events (v26.5-alpha.5/6) come from a background watcher
 that polls each tracked game's Despotes schedule/macro status every 5s and

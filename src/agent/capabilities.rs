@@ -110,6 +110,9 @@ pub fn manifest() -> Capabilities {
             Endpoint { method: "POST", path: "/api/v1/game/:instance/redstone",  purpose: "Redstone signal query at a block position (crosshair when no coords)" },
             Endpoint { method: "POST", path: "/api/v1/game/:instance/circuit",   purpose: "Redstone circuit component cube scan, radius 1-8 (v26.11)" },
             Endpoint { method: "GET",  path: "/api/v1/game/:instance/screen",    purpose: "Screen state + window geometry block for click-space conversion (v26.11)" },
+            Endpoint { method: "GET",  path: "/api/v1/game/:instance/watch",     purpose: "List in-memory circuit change watches (v26.5-alpha.8)" },
+            Endpoint { method: "POST", path: "/api/v1/game/:instance/watch",     purpose: "Register a circuit change watch: {name?,x,y,z,radius?}" },
+            Endpoint { method: "DELETE", path: "/api/v1/game/:instance/watch/:name", purpose: "Remove a circuit change watch" },
             // v26.3-alpha.1: instance-scoped observability
             Endpoint { method: "GET",  path: "/api/v1/instance/:instance/metrics", purpose: "Launch metrics for an instance (?history=true for full history)" },
             Endpoint { method: "GET",  path: "/api/v1/instance/:instance/disk",    purpose: "Disk usage with a top-level breakdown" },
@@ -334,6 +337,7 @@ pub fn manifest() -> Capabilities {
                 "macro_play_started",
                 "macro_play_finished",
                 "macro_removed",
+                "circuit_changed",
             ],
         },
         error_codes: vec![
@@ -405,6 +409,14 @@ mod tests {
             "instance_stopped",
             "game_ready",
             "game_idle_timeout",
+            "schedule_registered",
+            "schedule_fired",
+            "schedule_removed",
+            "macro_recorded",
+            "macro_play_started",
+            "macro_play_finished",
+            "macro_removed",
+            "circuit_changed",
         ] {
             assert!(caps.events.kinds.contains(&k), "missing event kind {}", k);
         }

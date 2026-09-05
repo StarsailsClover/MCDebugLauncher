@@ -5,7 +5,7 @@ use axum::{
     extract::{FromRequest, Path, Request, State, WebSocketUpgrade},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use axum::extract::ws::{WebSocket, Message};
@@ -53,6 +53,10 @@ pub struct AgentServer {
 pub(super) struct ServerState {
     pub(super) uptime_start: std::time::Instant,
     pub(super) running_instances: HashMap<String, InstanceProcess>,
+    /// v26.5-alpha.8: circuit watch subscriptions, keyed by instance. The
+    /// orchestration watcher polls each watch's cube scan and emits
+    /// circuit_changed events on state diffs.
+    pub(super) watches: HashMap<String, Vec<crate::agent::orchestration::CircuitWatch>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,6 +94,12 @@ pub enum ServerEvent {
     MacroPlaybackFinished { instance: String, name: String, timestamp: String },
     /// v26.5-alpha.6: the macro was deleted.
     MacroRemoved { instance: String, name: String, timestamp: String },
+    // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+    /// v26.5-alpha.8: a watched circuit region changed - components appeared,
+    /// disappeared or flipped state (powered/delay/note/facing/locked).
+    /// `changes` carries compact per-component diffs (capped at 64 entries
+    /// with a truncated flag in the payload).
+    CircuitChanged { instance: String, watch: String, changes: Vec<serde_json::Value>, timestamp: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,6 +252,7 @@ impl AgentServer {
         let state = ServerState {
             uptime_start: std::time::Instant::now(),
             running_instances: HashMap::new(),
+            watches: HashMap::new(),
         };
 
         let (event_tx, _) = broadcast::channel(1024);
@@ -271,9 +282,17 @@ impl AgentServer {
             // v26.2-alpha.1: idle watchdog status
             .route("/api/v1/game/:instance/idle-status", get(handle_idle_status))
             .route("/api/v1/game/:instance/input", post(handle_game_input))
-.route("/api/v1/game/:instance/redstone", post(handle_game_redstone))
-.route("/api/v1/game/:instance/circuit", post(handle_game_circuit))
-.route("/api/v1/game/:instance/screen", get(handle_game_screen))
+            .route("/api/v1/game/:instance/redstone", post(handle_game_redstone))
+            .route("/api/v1/game/:instance/circuit", post(handle_game_circuit))
+            .route("/api/v1/game/:instance/screen", get(handle_game_screen))
+            .route(
+                "/api/v1/game/:instance/watch",
+                get(handle_circuit_watch_list).post(handle_circuit_watch_add),
+            )
+            .route(
+                "/api/v1/game/:instance/watch/:name",
+                delete(handle_circuit_watch_remove),
+            )
             // v26.3-alpha.1: instance-scoped observability
             .route("/api/v1/instance/:instance/metrics", get(handle_instance_metrics))
             .route("/api/v1/instance/:instance/disk", get(handle_instance_disk))
@@ -1088,6 +1107,111 @@ async fn handle_game_screen(
             Json(serde_json::json!({"status": "error", "error": e.to_string()})),
         ),
     }
+}
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// Register a circuit cube for event-driven state-change observation
+/// (v26.5-alpha.8). Watches live in the agent server's memory: restart the
+/// server to discard them; the game itself is never modified.
+#[derive(Debug, Deserialize)]
+struct CircuitWatchRequest {
+    #[serde(default)]
+    name: Option<String>,
+    x: i32,
+    y: i32,
+    z: i32,
+    #[serde(default)]
+    radius: Option<u8>,
+}
+
+fn validate_watch_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.len() > 64
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.chars().any(char::is_control)
+    {
+        return Err("watch name must be 1-64 printable characters without path separators".into());
+    }
+    Ok(())
+}
+
+async fn handle_circuit_watch_add(
+    State((state, _)): State<(Arc<RwLock<ServerState>>, broadcast::Sender<ServerEvent>)>,
+    Path(instance): Path<String>,
+    ApiJson(request): ApiJson<CircuitWatchRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = resolve_instance_dir(&instance).await {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+        );
+    }
+    let radius = request.radius.unwrap_or(4);
+    if !(1..=8).contains(&radius) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"status": "error", "error": "radius must be within 1-8"})),
+        );
+    }
+
+    let mut st = state.write().await;
+    let watches = st.watches.entry(instance.clone()).or_default();
+    let name = request.name.unwrap_or_else(|| format!("circuit-{}", watches.len() + 1));
+    if let Err(msg) = validate_watch_name(&name) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"status": "error", "error": msg})));
+    }
+    if watches.iter().any(|w| w.name == name) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"status": "error", "error": format!("watch '{}' already exists", name)})),
+        );
+    }
+    let watch = super::orchestration::CircuitWatch {
+        name,
+        x: request.x,
+        y: request.y,
+        z: request.z,
+        radius,
+    };
+    watches.push(watch.clone());
+    (StatusCode::CREATED, Json(serde_json::json!({"status": "success", "data": watch})))
+}
+
+async fn handle_circuit_watch_list(
+    State((state, _)): State<(Arc<RwLock<ServerState>>, broadcast::Sender<ServerEvent>)>,
+    Path(instance): Path<String>,
+) -> impl IntoResponse {
+    let st = state.read().await;
+    let watches = st.watches.get(&instance).cloned().unwrap_or_default();
+    (StatusCode::OK, Json(serde_json::json!({"status": "success", "data": watches})))
+}
+
+async fn handle_circuit_watch_remove(
+    State((state, _)): State<(Arc<RwLock<ServerState>>, broadcast::Sender<ServerEvent>)>,
+    Path((instance, name)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let mut st = state.write().await;
+    let Some(watches) = st.watches.get_mut(&instance) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"status": "error", "error": format!("watch '{}' not found", name)})),
+        );
+    };
+    let before = watches.len();
+    watches.retain(|w| w.name != name);
+    if watches.len() == before {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"status": "error", "error": format!("watch '{}' not found", name)})),
+        );
+    }
+    if watches.is_empty() {
+        st.watches.remove(&instance);
+    }
+    (StatusCode::OK, Json(serde_json::json!({"status": "success", "data": {"removed": name}})))
 }
 
 async fn execute_command(

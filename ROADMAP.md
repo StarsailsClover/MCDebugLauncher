@@ -55,7 +55,8 @@ Agent API 一致性；ROBUSTNESS_V264 全部发现（F1–F6）作为鲁棒性�
 | Alpha 5 | WS 编排事件流 | agent server 内置 orchestration watcher（5s 轮询 tracked 游戏的 Despotes schedule status，diff 后广播 `schedule_registered`/`schedule_fired`/`schedule_removed`）——agent 从轮询编排状态转为事件驱动响应；响应形状取自 Despotes 源码 `ScheduleManager.statusJson()`（权威证据，pin 测试锁定）；diff 纯函数化 + 快照语义（瞬时失败不产生幻影 removed；游戏失联清空快照自然重注册）；capabilities 事件清单 + AGENT_API.md 同步；watcher 故障绝不拖垮 server | ✅ 已完成 |
 | Alpha 6 | macro 生命周期事件流 | 编排 watcher 扩展至 macro 状态（MacroRecorder.statusJson 形状自 Despotes 源码 pin 测试锁定）：`macro_recorded`（录制完成入列）/`macro_play_started`（含总步数）/`macro_play_finished`/`macro_removed`；播放中换宏 emitting finish+start 保序；与 schedule 轮询同循环同快照语义（瞬时失败不幻影、失联清空）；capabilities + AGENT_API.md 同步 | ✅ 已完成 |
 | Alpha 7 | **Bug 修复**：instance→window 映射穿越 | **字段报告**（alpha.5 期间观察）：openlumin 游戏错误画面被映射到另一实例名——`collect_running_pids` 无条件信任 runtime/pid 文件，游戏崩溃后文件残留 + Windows PID 复用 → 他实例 java 进程持有该 pid → Match 2/Path 1 错误归属（且 `find_for_instance` 强制改写合成名加重错配）。修复三重校验：①pid 存活且为 java/javaw 且命令行含 `instances/<name>` gameDir 标记（边界字符校验防前缀混淆，纯函数测试锁定）；②同 pid 被多实例声明即歧义整体丢弃；③`find_for_instance` Path 1 身份校验失败降级标题匹配。**环境发现**：本机 IPv6 路由失效（ping -6 100% 丢包）+ DNS AAAA 优先 → reqwest 30s 超时而 curl 正常（test_fetch_manifest 本地失败、CI 绿，判定环境非代码） | ✅ 已完成 |
-| Alpha 8–10 | 待定（按使用反馈） | 编排复合、更多生态候选 | 📋 规划中 |
+| Alpha 8 | circuit 变化事件 / watch API | API 内存订阅：`POST/GET/DELETE /game/:instance/watch` 注册命名 cube（x/y/z 必填，radius 1-8）；watcher 仅轮询 tracked 游戏的订阅，WorldProbes.circuit 权威响应形状 pin 测试锁定，按位置 diff 后广播 `circuit_changed`（appeared/changed/removed，变化列表上限 64）；菜单 `inWorld=false` 不制造 mass removals，删除 watch 清理快照确保同名重注册重新触发；不修改游戏配置、server 重启即丢弃订阅 | ✅ 已完成 |
+| Alpha 9–10 | 待定（按使用反馈） | 编排复合 DSL、更多生态候选 | 📋 规划中 |
 
 ## v26.3（已完成主线：加固与 Agent 面，收尾于 Alpha 10）
 
