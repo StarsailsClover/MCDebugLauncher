@@ -80,6 +80,16 @@ pub enum ServerEvent {
     /// v26.5-alpha.5: the schedule disappeared (removed or game session
     /// ended; removals are diffed, session ends reset the whole snapshot).
     ScheduleRemoved { instance: String, name: String, timestamp: String },
+    // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+    /// v26.5-alpha.6: a macro appeared in the game's macro recorder
+    /// (recording finished).
+    MacroRecorded { instance: String, name: String, step_count: u64, timestamp: String },
+    /// v26.5-alpha.6: macro playback started (name + total step count).
+    MacroPlaybackStarted { instance: String, name: String, total_steps: u64, timestamp: String },
+    /// v26.5-alpha.6: macro playback finished.
+    MacroPlaybackFinished { instance: String, name: String, timestamp: String },
+    /// v26.5-alpha.6: the macro was deleted.
+    MacroRemoved { instance: String, name: String, timestamp: String },
 }
 
 #[derive(Debug, Clone, Serialize)]

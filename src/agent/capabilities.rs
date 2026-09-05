@@ -328,6 +328,12 @@ pub fn manifest() -> Capabilities {
                 "schedule_registered",
                 "schedule_fired",
                 "schedule_removed",
+                // v26.5-alpha.6: macro lifecycle events (same watcher,
+                // MacroRecorder status polled alongside schedules)
+                "macro_recorded",
+                "macro_play_started",
+                "macro_play_finished",
+                "macro_removed",
             ],
         },
         error_codes: vec![

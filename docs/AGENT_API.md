@@ -129,12 +129,16 @@ Every frame: JSON object with `type` + `timestamp`.
 | `schedule_registered` | name, periodTicks |
 | `schedule_fired` | name, executionCount, nextRunIn |
 | `schedule_removed` | name |
+| `macro_recorded` | name, stepCount |
+| `macro_play_started` | name, totalSteps |
+| `macro_play_finished` | name |
+| `macro_removed` | name |
 
-Schedule events (v26.5-alpha.5) come from a background watcher that polls
-each tracked game's Despotes schedule status every 5s and diffs it, so
-agents can react to orchestration instead of polling it. Only games tracked
-by the agent server are watched; transient poll failures never emit phantom
-`schedule_removed`.
+Schedule and macro events (v26.5-alpha.5/6) come from a background watcher
+that polls each tracked game's Despotes schedule/macro status every 5s and
+diffs it, so agents can react to orchestration instead of polling it. Only
+games tracked by the agent server are watched; transient poll failures
+never emit phantom removals.
 
 ## Error Codes
 

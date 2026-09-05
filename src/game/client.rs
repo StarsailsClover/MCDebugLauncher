@@ -247,6 +247,12 @@ pub async fn schedule_status(instance_dir: &Path) -> Result<Value> {
     send_action(instance_dir, json!({"type": "schedule", "op": "status"})).await
 }
 
+/// Macro status query (v26.9): recorded macros + recording/playback state.
+/// Consumed by the agent orchestration watcher.
+pub async fn macro_status(instance_dir: &Path) -> Result<Value> {
+    send_action(instance_dir, json!({"type": "macro", "op": "status"})).await
+}
+
 /// Validate and build a `{"type":"redstone-action", ...}` action payload
 /// (v26.11). `toggle` = one right-click on the component; `cycle` = N
 /// right-clicks spaced two ticks (repeater delay, note-block pitch,

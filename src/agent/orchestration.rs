@@ -39,11 +39,31 @@ pub struct ScheduleSnapshot {
     pub next_run_in: u64,
 }
 
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// Macro state (v26.5-alpha.6). Shape pinned from Despotes
+/// MacroRecorder.statusJson(): macroCount, recording, playing (+playingName
+/// /playingStep/playingTotalSteps while playing), macros[] with name +
+/// stepCount.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MacroSnapshot {
+    pub macros: HashMap<String, u64>,
+    pub playing: Option<(String, u64)>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScheduleEvent {
     Registered { name: String, period_ticks: u64 },
     Removed { name: String },
     Fired { name: String, execution_count: u64, next_run_in: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MacroEvent {
+    Recorded { name: String, step_count: u64 },
+    Removed { name: String },
+    PlaybackStarted { name: String, total_steps: u64 },
+    PlaybackFinished { name: String },
 }
 
 /// Parse a Despotes schedule-status `result` envelope into a snapshot map.
@@ -103,6 +123,69 @@ pub fn diff_schedules(
     events
 }
 
+/// Parse a Despotes macro-status `result` envelope (MacroRecorder.statusJson).
+/// Returns None when the payload lacks the expected fields (older Despotes).
+pub fn parse_macro_snapshot(result: &serde_json::Value) -> Option<MacroSnapshot> {
+    // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+    // Shape gate: "recording"/"playing" booleans are the contract markers.
+    result.get("playing")?.as_bool()?;
+    result.get("recording").and_then(|v| v.as_bool())?;
+
+    let mut macros = HashMap::new();
+    if let Some(arr) = result.get("macros").and_then(|v| v.as_array()) {
+        for m in arr {
+            let Some(name) = m.get("name").and_then(|v| v.as_str()) else { continue };
+            let steps = m
+                .get("stepCount")
+                .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
+                .unwrap_or(0);
+            macros.insert(name.to_string(), steps);
+        }
+    }
+    let playing = if result.get("playing").and_then(|v| v.as_bool()) == Some(true) {
+        let name = result.get("playingName").and_then(|v| v.as_str())?.to_string();
+        let total = result
+            .get("playingTotalSteps")
+            .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
+            .unwrap_or(0);
+        Some((name, total))
+    } else {
+        None
+    };
+    Some(MacroSnapshot { macros, playing })
+}
+
+/// Diff macro snapshots into lifecycle events. Order: recordings, playback
+/// start, playback finish, removals.
+pub fn diff_macros(prev: &MacroSnapshot, current: &MacroSnapshot) -> Vec<MacroEvent> {
+    let mut events = Vec::new();
+    for (name, steps) in &current.macros {
+        if !prev.macros.contains_key(name) {
+            events.push(MacroEvent::Recorded { name: name.clone(), step_count: *steps });
+        }
+    }
+    // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+    match (&prev.playing, &current.playing) {
+        (Some(old), Some((new, total))) if old.0 != *new => {
+            events.push(MacroEvent::PlaybackFinished { name: old.0.clone() });
+            events.push(MacroEvent::PlaybackStarted { name: new.clone(), total_steps: *total });
+        }
+        (None, Some((new, total))) => {
+            events.push(MacroEvent::PlaybackStarted { name: new.clone(), total_steps: *total });
+        }
+        (Some(old), None) => {
+            events.push(MacroEvent::PlaybackFinished { name: old.0.clone() });
+        }
+        _ => {}
+    }
+    for name in prev.macros.keys() {
+        if !current.macros.contains_key(name) {
+            events.push(MacroEvent::Removed { name: name.clone() });
+        }
+    }
+    events
+}
+
 /// Background loop: poll tracked instances, diff, broadcast. Never returns
 /// (spawned once per agent server); all failures are swallowed - the watcher
 /// must never take the server down.
@@ -114,6 +197,7 @@ pub(super) async fn watch_loop(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Snapshots keyed by instance name.
     let mut snapshots: HashMap<String, HashMap<String, ScheduleSnapshot>> = HashMap::new();
+    let mut macro_snapshots: HashMap<String, MacroSnapshot> = HashMap::new();
 
     loop {
         ticker.tick().await;
@@ -128,6 +212,7 @@ pub(super) async fn watch_loop(
                 Ok(d) => d,
                 Err(_) => {
                     snapshots.remove(&instance);
+                    macro_snapshots.remove(&instance);
                     continue;
                 }
             };
@@ -135,8 +220,12 @@ pub(super) async fn watch_loop(
             // re-registers them.
             if !crate::game::client::is_available(&dir).await {
                 snapshots.remove(&instance);
+                macro_snapshots.remove(&instance);
                 continue;
             }
+            let timestamp = chrono::Utc::now().to_rfc3339();
+
+            // ---- schedules (v26.9+) ----
             let status = match crate::game::client::schedule_status(&dir).await {
                 Ok(v) => v,
                 // Transient failure (menu screen, tick hitch): keep the old
@@ -151,7 +240,6 @@ pub(super) async fn watch_loop(
 
             let prev = snapshots.entry(instance.clone()).or_default();
             for ev in diff_schedules(prev, &current) {
-                let timestamp = chrono::Utc::now().to_rfc3339();
                 let event = match ev {
                     ScheduleEvent::Registered { name, period_ticks } => ServerEvent::ScheduleRegistered {
                         instance: instance.clone(),
@@ -169,12 +257,52 @@ pub(super) async fn watch_loop(
                     ScheduleEvent::Removed { name } => ServerEvent::ScheduleRemoved {
                         instance: instance.clone(),
                         name,
-                        timestamp,
+                        timestamp: timestamp.clone(),
                     },
                 };
                 let _ = event_tx.send(event);
             }
             *prev = current;
+
+            // ---- macros (v26.5-alpha.6) ----
+            // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+            let mstatus = match crate::game::client::macro_status(&dir).await {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let mcurrent = match parse_macro_snapshot(&mstatus) {
+                Some(c) => c,
+                None => continue,
+            };
+            let mprev = macro_snapshots.entry(instance.clone()).or_default();
+            for ev in diff_macros(mprev, &mcurrent) {
+                let event = match ev {
+                    MacroEvent::Recorded { name, step_count } => ServerEvent::MacroRecorded {
+                        instance: instance.clone(),
+                        name,
+                        step_count,
+                        timestamp: timestamp.clone(),
+                    },
+                    MacroEvent::PlaybackStarted { name, total_steps } => ServerEvent::MacroPlaybackStarted {
+                        instance: instance.clone(),
+                        name,
+                        total_steps,
+                        timestamp: timestamp.clone(),
+                    },
+                    MacroEvent::PlaybackFinished { name } => ServerEvent::MacroPlaybackFinished {
+                        instance: instance.clone(),
+                        name,
+                        timestamp: timestamp.clone(),
+                    },
+                    MacroEvent::Removed { name } => ServerEvent::MacroRemoved {
+                        instance: instance.clone(),
+                        name,
+                        timestamp: timestamp.clone(),
+                    },
+                };
+                let _ = event_tx.send(event);
+            }
+            *mprev = mcurrent;
         }
     }
 }
@@ -237,5 +365,74 @@ mod tests {
         // Removal.
         let evs = diff_schedules(&fired, &empty);
         assert_eq!(evs, vec![ScheduleEvent::Removed { name: "hb".into() }]);
+    }
+
+    // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+    /// Shape pinned to Despotes MacroRecorder.statusJson() (v26.9+).
+    #[test]
+    fn test_parse_macro_snapshot_official_shape() {
+        let idle = json!({
+            "macroCount": 1,
+            "recording": false,
+            "playing": false,
+            "macros": [{"name": "demo", "stepCount": 5}]
+        });
+        let s = parse_macro_snapshot(&idle).unwrap();
+        assert_eq!(s.macros.get("demo"), Some(&5u64));
+        assert_eq!(s.playing, None);
+
+        let playing = json!({
+            "macroCount": 1,
+            "recording": false,
+            "playing": true,
+            "playingName": "demo",
+            "playingStep": 2,
+            "playingTotalSteps": 5,
+            "macros": [{"name": "demo", "stepCount": 5}]
+        });
+        let s = parse_macro_snapshot(&playing).unwrap();
+        assert_eq!(s.playing, Some(("demo".into(), 5u64)));
+
+        // Older Despotes / junk payloads -> None.
+        assert!(parse_macro_snapshot(&json!({})).is_none());
+        assert!(parse_macro_snapshot(&json!({"playing": "yes"})).is_none());
+        assert!(parse_macro_snapshot(&json!({"playing": true})).is_none(), "missing playingName");
+    }
+
+    #[test]
+    fn test_diff_macros_lifecycle() {
+        let empty = MacroSnapshot::default();
+
+        let mut recorded = MacroSnapshot::default();
+        recorded.macros.insert("demo".into(), 5);
+        let evs = diff_macros(&empty, &recorded);
+        assert_eq!(evs, vec![MacroEvent::Recorded { name: "demo".into(), step_count: 5 }]);
+
+        // Playback start.
+        let mut playing = recorded.clone();
+        playing.playing = Some(("demo".into(), 5));
+        let evs = diff_macros(&recorded, &playing);
+        assert_eq!(evs, vec![MacroEvent::PlaybackStarted { name: "demo".into(), total_steps: 5 }]);
+
+        // Playback finish.
+        let evs = diff_macros(&playing, &recorded);
+        assert_eq!(evs, vec![MacroEvent::PlaybackFinished { name: "demo".into() }]);
+
+        // Macro swap while playing: finish + start, order preserved.
+        let mut swapped = recorded.clone();
+        swapped.playing = Some(("other".into(), 3));
+        let evs = diff_macros(&playing, &swapped);
+        assert_eq!(evs, vec![
+            MacroEvent::PlaybackFinished { name: "demo".into() },
+            MacroEvent::PlaybackStarted { name: "other".into(), total_steps: 3 },
+        ]);
+
+        // Removal.
+        let evs = diff_macros(&recorded, &empty);
+        assert_eq!(evs, vec![MacroEvent::Removed { name: "demo".into() }]);
+
+        // No-op.
+        assert!(diff_macros(&recorded, &recorded).is_empty());
     }
 }
