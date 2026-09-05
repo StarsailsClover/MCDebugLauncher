@@ -323,6 +323,11 @@ pub fn manifest() -> Capabilities {
                 "instance_stopped",
                 "game_ready",
                 "game_idle_timeout",
+                // v26.5-alpha.5: orchestration observability (Despotes
+                // schedule polls diffed into lifecycle/firing events)
+                "schedule_registered",
+                "schedule_fired",
+                "schedule_removed",
             ],
         },
         error_codes: vec![

@@ -50,9 +50,9 @@ pub struct AgentServer {
     event_tx: broadcast::Sender<ServerEvent>,
 }
 
-struct ServerState {
-    uptime_start: std::time::Instant,
-    running_instances: HashMap<String, InstanceProcess>,
+pub(super) struct ServerState {
+    pub(super) uptime_start: std::time::Instant,
+    pub(super) running_instances: HashMap<String, InstanceProcess>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,12 +70,22 @@ pub enum ServerEvent {
     /// v26.2-alpha.1: broadcast when the idle watchdog terminates a game
     /// process after a configurable period of no log output.
     GameIdleTimeout { instance: String, pid: u32, idle_seconds: u64, last_line: String, timestamp: String },
+    // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+    /// v26.5-alpha.5: orchestration observability - a schedule appeared in
+    /// the game's Despotes schedule manager.
+    ScheduleRegistered { instance: String, name: String, period_ticks: u64, timestamp: String },
+    /// v26.5-alpha.5: the schedule's execution count increased since the
+    /// last poll.
+    ScheduleFired { instance: String, name: String, execution_count: u64, next_run_in: u64, timestamp: String },
+    /// v26.5-alpha.5: the schedule disappeared (removed or game session
+    /// ended; removals are diffed, session ends reset the whole snapshot).
+    ScheduleRemoved { instance: String, name: String, timestamp: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct InstanceProcess {
-    pid: u32,
-    started: String,
+pub(super) struct InstanceProcess {
+    pub(super) pid: u32,
+    pub(super) started: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,6 +272,15 @@ impl AgentServer {
         let addr = format!("{}:{}", bind_address, port);
         tracing::info!("Starting agent server on {}", addr);
 
+        // v26.5-alpha.5: orchestration watcher - polls tracked games'
+        // schedule status and emits schedule_* events on the WS stream.
+        {
+            // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+            let watcher_state = self.state.clone();
+            let watcher_tx = self.event_tx.clone();
+            tokio::spawn(super::orchestration::watch_loop(watcher_state, watcher_tx));
+        }
+
         let listener = tokio::net::TcpListener::bind(&addr).await?;
 
         axum::serve(listener, app)
@@ -423,7 +442,7 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 /// Resolve an instance's directory by name.
-async fn resolve_instance_dir(instance: &str) -> Result<std::path::PathBuf> {
+pub(super) async fn resolve_instance_dir(instance: &str) -> Result<std::path::PathBuf> {
     use crate::instance::InstanceManager;
     let manager = InstanceManager::new()?;
     let inst = manager.get(instance).await?;

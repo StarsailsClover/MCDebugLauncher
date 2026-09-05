@@ -126,6 +126,15 @@ Every frame: JSON object with `type` + `timestamp`.
 | `instance_stopped` | exit_code |
 | `game_ready` | pid, in_world |
 | `game_idle_timeout` | pid, idle_seconds |
+| `schedule_registered` | name, periodTicks |
+| `schedule_fired` | name, executionCount, nextRunIn |
+| `schedule_removed` | name |
+
+Schedule events (v26.5-alpha.5) come from a background watcher that polls
+each tracked game's Despotes schedule status every 5s and diffs it, so
+agents can react to orchestration instead of polling it. Only games tracked
+by the agent server are watched; transient poll failures never emit phantom
+`schedule_removed`.
 
 ## Error Codes
 
