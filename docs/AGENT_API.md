@@ -164,6 +164,39 @@ diffs it, so agents can react to orchestration instead of polling it. Only
 games tracked by the agent server are watched; transient poll failures
 never emit phantom removals.
 
+## Orchestration Flows (`mdl game flow`, v26.5-alpha.9)
+
+A flow is an ordered, fail-fast composition of existing primitives. It is
+executed CLI-side step by step through the same Despotes channel — the DSL
+adds sequencing and validation, not a new protocol.
+
+```jsonc
+{
+  "name": "demo",
+  "steps": [
+    {"type": "wait-ready", "timeoutSecs": 120},
+    {"type": "wait-condition", "timeoutSecs": 60, "pollMs": 500,
+     "if": {"query": {"type": "status"}, "field": "inGame", "op": "eq", "value": true}},
+    {"type": "action", "command": {"type": "chat", "text": "go"}},
+    {"type": "schedule", "op": "add", "name": "hb", "periodTicks": 100,
+     "commands": [{"type": "ping"}]},
+    {"type": "macro", "op": "play", "name": "demo"},
+    {"type": "sleep", "secs": 2.5}
+  ]
+}
+```
+
+```bash
+mdl game flow <instance> --file flow.json
+```
+
+Rules: steps run strictly in order; the first failure aborts with a
+step-indexed error (`step [N] <type>: …`). Timeouts are bounded (1–86400s),
+flows cap at 256 steps. `wait-condition` evaluates `exists / eq / ne / gt /
+lt / contains` against a dot-path (`if.field`) of an arbitrary query
+response (`if.query`, default `{"type":"status"}`). Files carrying a UTF-8
+BOM are accepted (the reader reuses the BOM-tolerant path).
+
 ## Error Codes
 
 `POST /execute` failures carry `error_code`; treat unknown codes as INTERNAL.

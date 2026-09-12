@@ -253,6 +253,13 @@ pub async fn macro_status(instance_dir: &Path) -> Result<Value> {
     send_action(instance_dir, json!({"type": "macro", "op": "status"})).await
 }
 
+/// Raw query passthrough (v26.5-alpha.9): used by the flow executor's
+/// wait-condition steps to poll arbitrary query payloads (default: status).
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+pub async fn query_raw(instance_dir: &Path, query: Value) -> Result<Value> {
+    send_query(instance_dir, query).await
+}
+
 /// Validate and build a `{"type":"redstone-action", ...}` action payload
 /// (v26.11). `toggle` = one right-click on the component; `cycle` = N
 /// right-clicks spaced two ticks (repeater delay, note-block pitch,

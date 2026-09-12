@@ -446,6 +446,20 @@ enum GameCommands {
         instance: String,
     },
 
+    /// Run a declarative orchestration flow (v26.5-alpha.9): an ordered,
+    /// fail-fast composition of wait-ready / wait-condition / action /
+    /// schedule / macro / sleep steps. Steps are submitted through the
+    /// existing Despotes action channel - the DSL adds sequencing and
+    /// validation, not a new game-control protocol.
+    Flow {
+        /// Instance name
+        instance: String,
+
+        /// Path to the flow JSON file
+        #[arg(long)]
+        file: String,
+    },
+
     /// Hot-attach a Java agent JAR into the RUNNING game JVM (v26.2-alpha.6).
     /// Uses the JVM Attach API (agentmain); the agent must implement
     /// agentmain in its manifest. Unlike launch-time --javaagent this works
@@ -1605,6 +1619,9 @@ async fn run() -> Result<()> {
                 }
                 GameCommands::Screen { instance } => {
                     cmd_game_screen(&instance).await?;
+                }
+                GameCommands::Flow { instance, file } => {
+                    run_flow_cmd(&instance, &file).await?;
                 }
                 GameCommands::InjectAgent { instance, jar, params, java_path } => {
                     cmd_game_inject_agent(&instance, &jar, params.as_deref(), java_path.as_deref()).await?;
@@ -3831,6 +3848,158 @@ async fn cmd_game_screen(instance: &str) -> Result<()> {
     let response = game::client::screen_query(&dir).await?;
     print_game_response(&response);
     Ok(())
+}
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// Execute a declarative orchestration flow (v26.5-alpha.9).
+///
+/// Steps run strictly in order and fail-fast: the first failing step aborts
+/// the flow with a step-indexed error. Every step is submitted through the
+/// existing Despotes channel ([`game::client`]), so the DSL adds sequencing
+/// and validation only - no second game-control protocol.
+async fn run_flow_cmd(instance: &str, file: &str) -> Result<()> {
+    use game::flow::{self, CompareOp, FlowStep};
+
+    let raw = std::fs::read(file)
+        .with_context(|| format!("Failed to read flow file: {file}"))?;
+    // BOM-tolerant: authors edit flow files in Windows editors that prepend
+    // a UTF-8 BOM (the same class of failure the config readers guard with
+    // util::jsonio).
+    let raw = String::from_utf8(util::jsonio::strip_bom(&raw).to_vec())
+        .with_context(|| format!("Flow file is not valid UTF-8: {file}"))?;
+    let parsed = flow::parse_and_validate(&raw)?;
+    let dir = resolve_instance_dir(instance).await?;
+
+    println!(
+        "Flow '{}': {} step(s) on instance '{}'",
+        parsed.name,
+        parsed.steps.len(),
+        instance
+    );
+
+    for (index, step) in parsed.steps.iter().enumerate() {
+        let label = match step {
+            FlowStep::WaitReady { .. } => "wait-ready".to_string(),
+            FlowStep::WaitCondition { .. } => "wait-condition".to_string(),
+            FlowStep::Action { .. } => "action".to_string(),
+            FlowStep::Schedule { op, .. } => format!("schedule:{op}"),
+            FlowStep::Macro { op, .. } => format!("macro:{op}"),
+            FlowStep::Sleep { .. } => "sleep".to_string(),
+        };
+        print!("  [{index}] {label} ... ");
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+
+        let outcome: Result<String> = match step {
+            FlowStep::WaitReady { timeout_secs } => {
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(*timeout_secs);
+                loop {
+                    let ready = match game::client::game_status(&dir).await {
+                        Ok(st) => {
+                            st.get("inGame").and_then(|v| v.as_bool()).unwrap_or(false)
+                                || st.get("screenOpen").and_then(|v| v.as_bool()).unwrap_or(false)
+                        }
+                        Err(_) => false,
+                    };
+                    if ready {
+                        break Ok("ready".to_string());
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        break Err(anyhow::anyhow!(
+                            "timed out after {}s waiting for ready",
+                            timeout_secs
+                        ));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
+            FlowStep::WaitCondition { r#if, timeout_secs, poll_ms } => {
+                let field = r#if
+                    .get("field")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("wait-condition requires an 'if.field' dot-path"))?
+                    .to_string();
+                let op: CompareOp = serde_json::from_value(
+                    r#if.get("op").cloned().unwrap_or(serde_json::json!("exists")),
+                )
+                .with_context(|| "wait-condition 'if.op' must be one of exists/eq/ne/gt/lt/contains")?;
+                let expected = r#if.get("value").cloned();
+                let query = r#if.get("query").cloned().unwrap_or(serde_json::json!({"type": "status"}));
+
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(*timeout_secs);
+                loop {
+                    let matched = match game::client::query_raw(&dir, query.clone()).await {
+                        Ok(v) => flow::condition_matches(&v, &field, op, expected.as_ref()),
+                        Err(_) => false,
+                    };
+                    if matched {
+                        break Ok(format!("matched ({field})"));
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        break Err(anyhow::anyhow!(
+                            "timed out after {}s waiting for condition '{field}'",
+                            timeout_secs
+                        ));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(*poll_ms)).await;
+                }
+            }
+            FlowStep::Action { command } => game::client::automation_action(&dir, command.clone())
+                .await
+                .map(|v| summarize(&v)),
+            FlowStep::Schedule { op, name, period_ticks, commands } => {
+                if op == "add" && (name.is_none() || period_ticks.is_none() || commands.is_empty()) {
+                    Err(anyhow::anyhow!(
+                        "schedule add requires name, periodTicks and at least one command"
+                    ))
+                } else if op == "remove" && name.is_none() {
+                    Err(anyhow::anyhow!("schedule remove requires a name"))
+                } else {
+                    let payload = game::client::schedule_payload(
+                        op,
+                        name.as_deref(),
+                        *period_ticks,
+                        (!commands.is_empty()).then(|| serde_json::Value::Array(commands.clone())),
+                    );
+                    game::client::automation_action(&dir, payload).await.map(|v| summarize(&v))
+                }
+            }
+            FlowStep::Macro { op, name, step } => {
+                let payload = game::client::macro_payload(op, name.as_deref(), step.clone());
+                game::client::automation_action(&dir, payload).await.map(|v| summarize(&v))
+            }
+            FlowStep::Sleep { secs } => {
+                tokio::time::sleep(std::time::Duration::from_secs_f64(*secs)).await;
+                Ok(format!("slept {secs}s"))
+            }
+        };
+
+        match outcome {
+            Ok(detail) => println!("{detail}"),
+            Err(e) => {
+                println!("FAILED");
+                anyhow::bail!("flow '{}' aborted at step [{index}] {label}: {e:#}", parsed.name);
+            }
+        }
+    }
+
+    println!("Flow '{}' completed.", parsed.name);
+    Ok(())
+}
+
+/// One-line summary of a Despotes action result for flow progress output.
+fn summarize(value: &serde_json::Value) -> String {
+    let count = value
+        .get("count")
+        .or_else(|| value.get("macroCount"))
+        .and_then(|v| v.as_u64());
+    match count {
+        Some(c) => format!("ok ({c})"),
+        None => "ok".to_string(),
+    }
 }
 
 /// Hot-attach a Java agent JAR into the running game JVM (v26.2-alpha.6).

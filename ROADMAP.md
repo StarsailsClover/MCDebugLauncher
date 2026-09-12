@@ -56,7 +56,8 @@ Agent API 一致性；ROBUSTNESS_V264 全部发现（F1–F6）作为鲁棒性�
 | Alpha 6 | macro 生命周期事件流 | 编排 watcher 扩展至 macro 状态（MacroRecorder.statusJson 形状自 Despotes 源码 pin 测试锁定）：`macro_recorded`（录制完成入列）/`macro_play_started`（含总步数）/`macro_play_finished`/`macro_removed`；播放中换宏 emitting finish+start 保序；与 schedule 轮询同循环同快照语义（瞬时失败不幻影、失联清空）；capabilities + AGENT_API.md 同步 | ✅ 已完成 |
 | Alpha 7 | **Bug 修复**：instance→window 映射穿越 | **字段报告**（alpha.5 期间观察）：openlumin 游戏错误画面被映射到另一实例名——`collect_running_pids` 无条件信任 runtime/pid 文件，游戏崩溃后文件残留 + Windows PID 复用 → 他实例 java 进程持有该 pid → Match 2/Path 1 错误归属（且 `find_for_instance` 强制改写合成名加重错配）。修复三重校验：①pid 存活且为 java/javaw 且命令行含 `instances/<name>` gameDir 标记（边界字符校验防前缀混淆，纯函数测试锁定）；②同 pid 被多实例声明即歧义整体丢弃；③`find_for_instance` Path 1 身份校验失败降级标题匹配。**环境发现**：本机 IPv6 路由失效（ping -6 100% 丢包）+ DNS AAAA 优先 → reqwest 30s 超时而 curl 正常（test_fetch_manifest 本地失败、CI 绿，判定环境非代码） | ✅ 已完成 |
 | Alpha 8 | circuit 变化事件 / watch API | API 内存订阅：`POST/GET/DELETE /game/:instance/watch` 注册命名 cube（x/y/z 必填，radius 1-8）；watcher 仅轮询 tracked 游戏的订阅，WorldProbes.circuit 权威响应形状 pin 测试锁定，按位置 diff 后广播 `circuit_changed`（appeared/changed/removed，变化列表上限 64）；菜单 `inWorld=false` 不制造 mass removals，删除 watch 清理快照确保同名重注册重新触发；不修改游戏配置、server 重启即丢弃订阅 | ✅ 已完成 |
-| Alpha 9–10 | 待定（按使用反馈） | 编排复合 DSL、更多生态候选 | 📋 规划中 |
+| Alpha 9 | 编排复合 DSL（flow） | `mdl game flow <instance> --file <flow.json>`：声明式有序复合——`wait-ready`/`wait-condition`（六算子 + 点路径，MDL 侧求值）/`action`/`schedule`/`macro`/`sleep`；严格顺序 + fail-fast，错误带 step 索引与类型；**不发明新执行语义**——每步经既有 Despotes 通道提交（新增 `client::query_raw` 透传 + `flow.rs` 纯逻辑验证/求值，2+3 测试）。**实测中发现并修复真 bug**：PS 5.1 `Set-Content` 写入的 UTF-8 BOM 使 flow 文件解析直接失败——改用 `jsonio::strip_bom` 复用 v26.3 容错路径并加回归测试（BOM 文件现报语义错误而非 JSON 错误） | ✅ 已完成 |
+| Alpha 10 | LTS 收敛 | — | 📋 规划中 |
 
 ## v26.3（已完成主线：加固与 Agent 面，收尾于 Alpha 10）
 

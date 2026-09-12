@@ -15,6 +15,7 @@
 
 pub mod client;
 pub mod despotes;
+pub mod flow;
 pub mod oom_guard;
 pub mod options;
 pub mod watchdog;
