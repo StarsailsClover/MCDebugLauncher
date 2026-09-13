@@ -40,6 +40,18 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha 9 | Agent launch 支持 jdk + 文档刷新 | execute `launch` 新增 `jdk aprism[@ver]` 选项（与 java-path 互斥校验、解析失败回退 Adoptium 并记入事件流）；capabilities 清单与 AGENT_API.md 同步；README/README_CN 状态区与亮点刷新至 v26.4（新增 Aprism 生态条目、跨平台 CI/fuzz、MANIFEST 自动注入） | ✅ 已完成 |
 | Alpha 10 | LTS 收敛 | 版本转正 26.4.0；CHANGELOG 官方条目（Alpha 1–9 全记录）；回归验证：28 lib + 174 bin 测试、三平台 CI 绿、fuzz 三目标预算内零崩溃、capabilities 完整性断言通过 | ✅ 已完成 |
 
+## v26.6（主线：生命周期闭环与运维加固；独立分支开发，起点 ROBUSTNESS_V265.md）
+
+主题：进程生命周期闭环——实例级 stop/kill 补全 v26.2 启动的生命周期故事，
+实例名称校验在全部读写入口统一；ROBUSTNESS_V265 全部发现（F1–F5）作为
+鲁棒性工作纳入。
+
+| Alpha | 主题 | 内容 | 状态 |
+|---|---|---|---|
+| Alpha 1 | 实例名称校验统一（F1–F5） | **F1 [Serious]**：`mdl delete` 路径穿越（PoC 确证实例目录外哨兵被删、exit 0）——delete 入口补 `validate_name`（create/clone-dst/rename-new 一直有，delete 遗漏）；**F2 [Serious]**：rename 源名补校验（`rename .. x` 可移动整个数据目录）；**F3 [Medium]**：clone 源名补校验；**F4 [Low]**：`get` 读路径补校验（info/jdk use/game 命令族共用入口）；**F5 [Low]**：circuit watch 每实例上限 16；四入口回归测试（tempdir 锁定校验先于 FS 访问）；PoC 复验：穿越被拦截、哨兵存活、正常删除路径可用。存量 85 实例名全部通过新校验（无破坏） | ✅ 已完成 |
+| Alpha 2 | 实例级 stop/kill（生命周期闭环） | `mdl game stop <instance>`（优雅：Despotes 保存退出）与 `mdl game kill <instance> -f`（强制）；补齐 skill 文档已记载但 CLI 缺失的面 | 📋 规划中 |
+| Alpha 3–10 | 待定（按使用反馈） | — | 📋 规划中 |
+
 ## v26.5（主线：自主编排与运行时选择；独立分支开发，起点 ROBUSTNESS_V264.md）
 
 主题：面向 AI agent 的自主编排深化——实例级运行时绑定、编排能力复合与

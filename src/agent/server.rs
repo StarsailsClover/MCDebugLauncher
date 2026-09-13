@@ -1138,6 +1138,14 @@ fn validate_watch_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// v26.6-alpha.1 (ROBUSTNESS_V265 F5): per-instance watch cap. Each watch
+/// costs a local cube scan per poll tick, so an unbounded registry would let
+/// a single agent degrade the host. 16 watches × radius-8 scans stays well
+/// within budget.
+const MAX_WATCHES_PER_INSTANCE: usize = 16;
+
 async fn handle_circuit_watch_add(
     State((state, _)): State<(Arc<RwLock<ServerState>>, broadcast::Sender<ServerEvent>)>,
     Path(instance): Path<String>,
@@ -1159,6 +1167,15 @@ async fn handle_circuit_watch_add(
 
     let mut st = state.write().await;
     let watches = st.watches.entry(instance.clone()).or_default();
+    if watches.len() >= MAX_WATCHES_PER_INSTANCE {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"status": "error", "error": format!(
+                "instance '{}' already has the maximum of {MAX_WATCHES_PER_INSTANCE} watches",
+                instance
+            )})),
+        );
+    }
     let name = request.name.unwrap_or_else(|| format!("circuit-{}", watches.len() + 1));
     if let Err(msg) = validate_watch_name(&name) {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"status": "error", "error": msg})));

@@ -256,6 +256,10 @@ impl InstanceManager {
     }
 
     pub async fn get(&self, name: &str) -> Result<Instance> {
+        // v26.6-alpha.1 (ROBUSTNESS_V265 F4): read paths validate like the
+        // mutating ones - info/jdk use/game commands share this entry.
+        // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+        crate::util::validate::validate_name(name)?;
         let instance_path = self.instances_dir.join(name);
 
         if !instance_path.exists() {
@@ -291,6 +295,11 @@ impl InstanceManager {
     }
 
     pub async fn delete(&self, name: &str) -> Result<()> {
+        // v26.6-alpha.1 hardening (ROBUSTNESS_V265 F1, PoC-confirmed): the
+        // name was joined unchecked, so `mdl delete ..\..\…` deleted
+        // directories outside the instances dir (sentinel PoC verified).
+        // Delete validates like create/clone/rename always did.
+        crate::util::validate::validate_name(name)?;
         let instance_path = self.instances_dir.join(name);
 
         if !instance_path.exists() {
@@ -309,6 +318,10 @@ impl InstanceManager {
     /// matches the "duplicate instance" feature every mainstream launcher
     /// offers.
     pub async fn clone_instance(&self, src_name: &str, dst_name: &str) -> Result<Instance> {
+        // v26.6-alpha.1 (ROBUSTNESS_V265 F3): the SOURCE name was joined
+        // unchecked - a traversal src would copy the whole data dir.
+        // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+        crate::util::validate::validate_name(src_name)?;
         crate::util::validate::validate_name(dst_name)?;
         let src_path = self.instances_dir.join(src_name);
         let dst_path = self.instances_dir.join(dst_name);
@@ -340,6 +353,11 @@ impl InstanceManager {
     /// Rename an instance: move its directory and rewrite `instance.json`.
     /// v26.1-alpha.4: matches mainstream launcher rename support.
     pub async fn rename(&self, old_name: &str, new_name: &str) -> Result<Instance> {
+        // v26.6-alpha.1 (ROBUSTNESS_V265 F2): the SOURCE name was joined
+        // unchecked - `mdl instance rename .. x` could MOVE the whole mdl
+        // data dir into the instances area. Both sides validate now.
+        // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+        crate::util::validate::validate_name(old_name)?;
         crate::util::validate::validate_name(new_name)?;
         let old_path = self.instances_dir.join(old_name);
         let new_path = self.instances_dir.join(new_name);
@@ -440,6 +458,34 @@ mod tests {
         make_instance(&manager, "src").await;
         make_instance(&manager, "dst").await;
         assert!(manager.clone_instance("src", "dst").await.is_err());
+    }
+
+    // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+    /// v26.6-alpha.1 (ROBUSTNESS_V265 F1, PoC-confirmed): delete used to
+    /// join the raw name unchecked, so `mdl delete ..\..\…` deleted
+    /// directories OUTSIDE the instances dir. All four entry points validate
+    /// now; traversal names must fail before any filesystem access.
+    #[tokio::test]
+    async fn test_hostile_names_rejected_before_fs_access() {
+        let dir = tempdir().unwrap();
+        let manager = InstanceManager::with_dir(dir.path().to_path_buf());
+        make_instance(&manager, "src").await;
+
+        for hostile in ["..", "../evil", "..\\evil", ".", "a/b", "C:x"] {
+            // Delete: must fail with a validation error, never remove dirs.
+            let err = manager.delete(hostile).await.err().unwrap_or_else(
+                || panic!("delete must reject {hostile}"),
+            );
+            assert!(!err.to_string().contains("not found"),
+                "delete({hostile}) must fail validation, not existence: {err}");
+            // Rename source, clone source, and get: same guarantee.
+            assert!(manager.rename(hostile, "new").await.is_err(), "rename src {hostile}");
+            assert!(manager.clone_instance(hostile, "new").await.is_err(), "clone src {hostile}");
+            assert!(manager.get(hostile).await.is_err(), "get {hostile}");
+        }
+        // The real instance survives untouched.
+        assert!(manager.get("src").await.is_ok());
     }
 
     #[tokio::test]
