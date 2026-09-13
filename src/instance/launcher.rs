@@ -403,13 +403,39 @@ impl InstanceLauncher {
         let version_metadata = self.load_version_metadata(&version_dir, &config.version).await?;
         let required_java = version_metadata.required_java_version();
 
-        // Resolve a suitable Java runtime. A user-supplied --java-path wins;
-        // otherwise auto-download one from Adoptium when the system lacks a
-        // runtime meeting the version requirement.
+        // Resolve a suitable Java runtime. Priority (v26.5-alpha.3):
+        //   1. Launch-time --java-path / --jdk (explicit, one-shot)
+        //   2. Instance-level binding (instance.json "jdk", via `mdl jdk use`)
+        //      - unresolvable bindings degrade to the standard chain with a
+        //        warning, mirroring the CLI Adoptium fallback
+        //   3. Automatic selection: system runtime meeting the requirement,
+        //      else Eclipse Adoptium provisioning
         let java_path: std::path::PathBuf;
         if let Some(custom) = &options.java_path {
             java_path = std::path::PathBuf::from(custom);
             tracing::info!("Using custom Java: {}", java_path.display());
+        } else if let Some(binding) = &config.jdk {
+            // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+            let hint = binding.strip_prefix("aprism").map(|r| r.trim_start_matches('@'));
+            match crate::loader::aprism_jdk::resolve(hint) {
+                Ok((tag, java)) => {
+                    tracing::info!(
+                        "Using instance-bound AprismJDK {tag}: {}",
+                        java.display()
+                    );
+                    java_path = java;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Instance JDK binding '{binding}' unavailable ({e:#}); \
+                         falling back to system Java / Eclipse Adoptium provisioning"
+                    );
+                    let java_runtime = crate::version::java::JavaRuntime::ensure_version(required_java)
+                        .await
+                        .context("Failed to obtain a suitable Java runtime")?;
+                    java_path = java_runtime.path.clone();
+                }
+            }
         } else {
             let java_runtime = crate::version::java::JavaRuntime::ensure_version(required_java)
                 .await

@@ -40,6 +40,25 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 | Alpha 9 | Agent launch 支持 jdk + 文档刷新 | execute `launch` 新增 `jdk aprism[@ver]` 选项（与 java-path 互斥校验、解析失败回退 Adoptium 并记入事件流）；capabilities 清单与 AGENT_API.md 同步；README/README_CN 状态区与亮点刷新至 v26.4（新增 Aprism 生态条目、跨平台 CI/fuzz、MANIFEST 自动注入） | ✅ 已完成 |
 | Alpha 10 | LTS 收敛 | 版本转正 26.4.0；CHANGELOG 官方条目（Alpha 1–9 全记录）；回归验证：28 lib + 174 bin 测试、三平台 CI 绿、fuzz 三目标预算内零崩溃、capabilities 完整性断言通过 | ✅ 已完成 |
 
+## v26.5（主线：自主编排与运行时选择；独立分支开发，起点 ROBUSTNESS_V264.md）
+
+主题：面向 AI agent 的自主编排深化——实例级运行时绑定、编排能力复合与
+Agent API 一致性；ROBUSTNESS_V264 全部发现（F1–F6）作为鲁棒性工作纳入；
+自本版起执行分支开发与开发水印规范（GitHub@NDBlockConnect）。
+
+| Alpha | 主题 | 内容 | 状态 |
+|---|---|---|---|
+| Alpha 1 | jdk 删除穿越修复（F1/F2） | **F1 [Medium-High]**：`jdk remove` 路径穿越（PoC 确证缓存外哨兵被删）——tag 仅允许匹配 `installed()` 枚举条目 + 拒绝分隔符/父级组件；**F2 [Low-Medium]**：下载归档名 `archives.join(asset.name)` 拒绝含路径分隔符的资产名；两者均带回归测试 + 水印合规 | ✅ 已完成 |
+| Alpha 2 | Agent API 错误面收敛（F3/F4/F5）+ bench 基线（F6） | 提取器拒绝统一 JSON envelope；input 校验错误 4xx 归类；redstone 坏 body 显式 400；空闲环境落 `perf-bench.ps1 -Baseline` | 📋 规划中 |
+| Alpha 3 | 实例级 JDK 绑定 | `mdl jdk use <instance> [spec]`：spec = `aprism`/`aprism@<tag\|ver>`/`default`（清除）/省略（查看）；绑定持久化于 instance.json `jdk` 字段（serde default 保证旧配置兼容，round-trip 测试）；launch 决策链升级为三级——`--java-path/--jdk`（单次）→ 实例绑定（不可解析时 WARN 降级 Adoptium，同 alpha.1 语义）→ 自动供给；doctor 新增 `jdk-bindings` 检查（未解析绑定记 WARN 不判 FAIL）；`InstanceManager::update_config` 通用读改写；实测全生命周期（set/show/config 落盘/clear/doctor）。**事故记录**：PowerShell Set-Content 双重编码损坏 main.rs——git 恢复后全用 Edit 工具重做，规范永久禁用该路径（见 FACT.md 2026-08-31） | ✅ 已完成 |
+| Alpha 4 | Despotes v26.11 原语映射 | `mdl game circuit`（立方体元件扫描 radius 1-8，缺省十字准星）、`game redstone-action`（toggle/cycle 元件交互，face/count 可选）、`game screen`（窗口几何块，physical/guiScale=logical 换算）；Agent API 同步：`redstone-action` 输入类型（复用 CLI 构造器校验→400）+ `POST /circuit`（坏 body 显式 400，沿袭 F5 语义）+ `GET /screen`；capabilities + AGENT_API.md 同步；JSON 形状取自 v26.11 官方 Release Notes（实测证据：343 方块扫描、拉杆/音符盒交互） | ✅ 已完成 |
+| Alpha 5 | WS 编排事件流 | agent server 内置 orchestration watcher（5s 轮询 tracked 游戏的 Despotes schedule status，diff 后广播 `schedule_registered`/`schedule_fired`/`schedule_removed`）——agent 从轮询编排状态转为事件驱动响应；响应形状取自 Despotes 源码 `ScheduleManager.statusJson()`（权威证据，pin 测试锁定）；diff 纯函数化 + 快照语义（瞬时失败不产生幻影 removed；游戏失联清空快照自然重注册）；capabilities 事件清单 + AGENT_API.md 同步；watcher 故障绝不拖垮 server | ✅ 已完成 |
+| Alpha 6 | macro 生命周期事件流 | 编排 watcher 扩展至 macro 状态（MacroRecorder.statusJson 形状自 Despotes 源码 pin 测试锁定）：`macro_recorded`（录制完成入列）/`macro_play_started`（含总步数）/`macro_play_finished`/`macro_removed`；播放中换宏 emitting finish+start 保序；与 schedule 轮询同循环同快照语义（瞬时失败不幻影、失联清空）；capabilities + AGENT_API.md 同步 | ✅ 已完成 |
+| Alpha 7 | **Bug 修复**：instance→window 映射穿越 | **字段报告**（alpha.5 期间观察）：openlumin 游戏错误画面被映射到另一实例名——`collect_running_pids` 无条件信任 runtime/pid 文件，游戏崩溃后文件残留 + Windows PID 复用 → 他实例 java 进程持有该 pid → Match 2/Path 1 错误归属（且 `find_for_instance` 强制改写合成名加重错配）。修复三重校验：①pid 存活且为 java/javaw 且命令行含 `instances/<name>` gameDir 标记（边界字符校验防前缀混淆，纯函数测试锁定）；②同 pid 被多实例声明即歧义整体丢弃；③`find_for_instance` Path 1 身份校验失败降级标题匹配。**环境发现**：本机 IPv6 路由失效（ping -6 100% 丢包）+ DNS AAAA 优先 → reqwest 30s 超时而 curl 正常（test_fetch_manifest 本地失败、CI 绿，判定环境非代码） | ✅ 已完成 |
+| Alpha 8 | circuit 变化事件 / watch API | API 内存订阅：`POST/GET/DELETE /game/:instance/watch` 注册命名 cube（x/y/z 必填，radius 1-8）；watcher 仅轮询 tracked 游戏的订阅，WorldProbes.circuit 权威响应形状 pin 测试锁定，按位置 diff 后广播 `circuit_changed`（appeared/changed/removed，变化列表上限 64）；菜单 `inWorld=false` 不制造 mass removals，删除 watch 清理快照确保同名重注册重新触发；不修改游戏配置、server 重启即丢弃订阅 | ✅ 已完成 |
+| Alpha 9 | 编排复合 DSL（flow） | `mdl game flow <instance> --file <flow.json>`：声明式有序复合——`wait-ready`/`wait-condition`（六算子 + 点路径，MDL 侧求值）/`action`/`schedule`/`macro`/`sleep`；严格顺序 + fail-fast，错误带 step 索引与类型；**不发明新执行语义**——每步经既有 Despotes 通道提交（新增 `client::query_raw` 透传 + `flow.rs` 纯逻辑验证/求值，2+3 测试）。**实测中发现并修复真 bug**：PS 5.1 `Set-Content` 写入的 UTF-8 BOM 使 flow 文件解析直接失败——改用 `jsonio::strip_bom` 复用 v26.3 容错路径并加回归测试（BOM 文件现报语义错误而非 JSON 错误） | ✅ 已完成 |
+| Alpha 10 | LTS 收敛 | 版本转正 **26.5.0**（Alpha 10 隐藏并入正式版）；CHANGELOG 官方条目（Alpha 1–9 全记录 + 相对 v26.4.0 的完整更新）；**三轮生产环境测试与可用性评估**：R1 全量回归（28 lib + 194 bin，含网络测试，doctor 10 项全过）、R2 真实 Fabric 26.2 实例 11 步 flow 端到端演练（**挖出并修复两个真 bug**：flow camelCase 字段被静默忽略、条件点路径无法索引数组）、R3 新能力面（watch API 注册/列举/删除 + schedule/macro 事件源查询）；bench 基线复核；README/ROADMAP 状态区定稿 | ✅ 已完成 |
+
 ## v26.3（已完成主线：加固与 Agent 面，收尾于 Alpha 10）
 
 主题：消化 v26.2 鲁棒性评估发现（F1/F3/F4，见 ROBUSTNESS_V262.md），补全 Agent REST/execute 能力面。

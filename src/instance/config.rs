@@ -12,6 +12,14 @@ pub struct InstanceConfig {
     /// `javaagents/` directory; `path` is relative to the instance root.
     #[serde(default)]
     pub javaagents: Vec<JavaAgentEntry>,
+    /// Instance-level Java runtime binding (v26.5-alpha.3): `aprism` or
+    /// `aprism@<tag|version>` (see `mdl jdk use`). Absent/null = automatic
+    /// selection (system Java, else Eclipse Adoptium provisioning). A
+    /// launch-time `--jdk`/`--java-path` still overrides for that launch;
+    /// an unresolvable binding degrades to the standard chain with a
+    /// warning (same as the CLI fallback).
+    #[serde(default)]
+    pub jdk: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,4 +46,27 @@ pub struct JavaAgentEntry {
 
 fn default_enabled() -> bool {
     true
+}
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// v26.5-alpha.3: the jdk binding must default cleanly on configs
+    /// written before the field existed (serde default) and round-trip.
+    #[test]
+    fn test_jdk_binding_backcompat_and_roundtrip() {
+        let old = r#"{"name":"x","version":"26.2","loader":null}"#;
+        let cfg: InstanceConfig = serde_json::from_str(old).unwrap();
+        assert!(cfg.jdk.is_none(), "old configs must parse with jdk=None");
+
+        let mut cfg = cfg;
+        cfg.jdk = Some("aprism@26.2".into());
+        let text = serde_json::to_string(&cfg).unwrap();
+        let back: InstanceConfig = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.jdk.as_deref(), Some("aprism@26.2"));
+        assert_eq!(back.name, "x");
+    }
 }

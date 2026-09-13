@@ -2,10 +2,10 @@
 
 use anyhow::Result;
 use axum::{
-    extract::{Path, State, WebSocketUpgrade},
+    extract::{FromRequest, Path, Request, State, WebSocketUpgrade},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use axum::extract::ws::{WebSocket, Message};
@@ -15,15 +15,48 @@ use tokio::sync::{RwLock, broadcast};
 use std::collections::HashMap;
 use futures_util::{SinkExt, StreamExt};
 
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// JSON extractor that rejects with the agent API error envelope instead of
+/// axum's plain-text body (v26.5-alpha.2, ROBUSTNESS_V264 F3): every client
+/// error on this API now parses as `{"status":"error","error":…}`.
+struct ApiJson<T>(T);
+
+#[axum::async_trait]
+impl<S, T> FromRequest<S> for ApiJson<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, Json<serde_json::Value>);
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(value)) => Ok(ApiJson(value)),
+            Err(rej) => Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": format!("invalid JSON body: {rej}")
+                })),
+            )),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AgentServer {
     state: Arc<RwLock<ServerState>>,
     event_tx: broadcast::Sender<ServerEvent>,
 }
 
-struct ServerState {
-    uptime_start: std::time::Instant,
-    running_instances: HashMap<String, InstanceProcess>,
+pub(super) struct ServerState {
+    pub(super) uptime_start: std::time::Instant,
+    pub(super) running_instances: HashMap<String, InstanceProcess>,
+    /// v26.5-alpha.8: circuit watch subscriptions, keyed by instance. The
+    /// orchestration watcher polls each watch's cube scan and emits
+    /// circuit_changed events on state diffs.
+    pub(super) watches: HashMap<String, Vec<crate::agent::orchestration::CircuitWatch>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -41,12 +74,38 @@ pub enum ServerEvent {
     /// v26.2-alpha.1: broadcast when the idle watchdog terminates a game
     /// process after a configurable period of no log output.
     GameIdleTimeout { instance: String, pid: u32, idle_seconds: u64, last_line: String, timestamp: String },
+    // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+    /// v26.5-alpha.5: orchestration observability - a schedule appeared in
+    /// the game's Despotes schedule manager.
+    ScheduleRegistered { instance: String, name: String, period_ticks: u64, timestamp: String },
+    /// v26.5-alpha.5: the schedule's execution count increased since the
+    /// last poll.
+    ScheduleFired { instance: String, name: String, execution_count: u64, next_run_in: u64, timestamp: String },
+    /// v26.5-alpha.5: the schedule disappeared (removed or game session
+    /// ended; removals are diffed, session ends reset the whole snapshot).
+    ScheduleRemoved { instance: String, name: String, timestamp: String },
+    // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+    /// v26.5-alpha.6: a macro appeared in the game's macro recorder
+    /// (recording finished).
+    MacroRecorded { instance: String, name: String, step_count: u64, timestamp: String },
+    /// v26.5-alpha.6: macro playback started (name + total step count).
+    MacroPlaybackStarted { instance: String, name: String, total_steps: u64, timestamp: String },
+    /// v26.5-alpha.6: macro playback finished.
+    MacroPlaybackFinished { instance: String, name: String, timestamp: String },
+    /// v26.5-alpha.6: the macro was deleted.
+    MacroRemoved { instance: String, name: String, timestamp: String },
+    // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+    /// v26.5-alpha.8: a watched circuit region changed - components appeared,
+    /// disappeared or flipped state (powered/delay/note/facing/locked).
+    /// `changes` carries compact per-component diffs (capped at 64 entries
+    /// with a truncated flag in the payload).
+    CircuitChanged { instance: String, watch: String, changes: Vec<serde_json::Value>, timestamp: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct InstanceProcess {
-    pid: u32,
-    started: String,
+pub(super) struct InstanceProcess {
+    pub(super) pid: u32,
+    pub(super) started: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,6 +206,22 @@ enum GameInputRequest {
     RawAction {
         command: serde_json::Value,
     },
+    /// Redstone component interaction (v26.11): op = toggle | cycle,
+    /// coordinates optional (crosshair fallback), face selects the clicked
+    /// face, count repeats for cycle.
+    RedstoneAction {
+        op: String,
+        #[serde(default)]
+        x: Option<i32>,
+        #[serde(default)]
+        y: Option<i32>,
+        #[serde(default)]
+        z: Option<i32>,
+        #[serde(default)]
+        face: Option<String>,
+        #[serde(default)]
+        count: Option<u32>,
+    },
 }
 
 fn default_action() -> String {
@@ -177,6 +252,7 @@ impl AgentServer {
         let state = ServerState {
             uptime_start: std::time::Instant::now(),
             running_instances: HashMap::new(),
+            watches: HashMap::new(),
         };
 
         let (event_tx, _) = broadcast::channel(1024);
@@ -206,7 +282,17 @@ impl AgentServer {
             // v26.2-alpha.1: idle watchdog status
             .route("/api/v1/game/:instance/idle-status", get(handle_idle_status))
             .route("/api/v1/game/:instance/input", post(handle_game_input))
-.route("/api/v1/game/:instance/redstone", post(handle_game_redstone))
+            .route("/api/v1/game/:instance/redstone", post(handle_game_redstone))
+            .route("/api/v1/game/:instance/circuit", post(handle_game_circuit))
+            .route("/api/v1/game/:instance/screen", get(handle_game_screen))
+            .route(
+                "/api/v1/game/:instance/watch",
+                get(handle_circuit_watch_list).post(handle_circuit_watch_add),
+            )
+            .route(
+                "/api/v1/game/:instance/watch/:name",
+                delete(handle_circuit_watch_remove),
+            )
             // v26.3-alpha.1: instance-scoped observability
             .route("/api/v1/instance/:instance/metrics", get(handle_instance_metrics))
             .route("/api/v1/instance/:instance/disk", get(handle_instance_disk))
@@ -214,6 +300,15 @@ impl AgentServer {
 
         let addr = format!("{}:{}", bind_address, port);
         tracing::info!("Starting agent server on {}", addr);
+
+        // v26.5-alpha.5: orchestration watcher - polls tracked games'
+        // schedule status and emits schedule_* events on the WS stream.
+        {
+            // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+            let watcher_state = self.state.clone();
+            let watcher_tx = self.event_tx.clone();
+            tokio::spawn(super::orchestration::watch_loop(watcher_state, watcher_tx));
+        }
 
         let listener = tokio::net::TcpListener::bind(&addr).await?;
 
@@ -307,7 +402,7 @@ async fn handle_websocket_connection(
 
 async fn handle_execute(
     State((state, event_tx)): State<(Arc<RwLock<ServerState>>, broadcast::Sender<ServerEvent>)>,
-    Json(payload): Json<ExecuteRequest>,
+    ApiJson(payload): ApiJson<ExecuteRequest>,
 ) -> impl IntoResponse {
     tracing::info!("Executing command: {} {:?}", payload.command, payload.args);
 
@@ -376,7 +471,7 @@ fn pid_alive(pid: u32) -> bool {
 }
 
 /// Resolve an instance's directory by name.
-async fn resolve_instance_dir(instance: &str) -> Result<std::path::PathBuf> {
+pub(super) async fn resolve_instance_dir(instance: &str) -> Result<std::path::PathBuf> {
     use crate::instance::InstanceManager;
     let manager = InstanceManager::new()?;
     let inst = manager.get(instance).await?;
@@ -707,7 +802,7 @@ async fn handle_game_screenshot(
 
 async fn handle_game_input(
     Path(instance): Path<String>,
-    Json(payload): Json<GameInputRequest>,
+    ApiJson(payload): ApiJson<GameInputRequest>,
 ) -> impl IntoResponse {
     let dir = match resolve_instance_dir(&instance).await {
         Ok(d) => d,
@@ -718,6 +813,45 @@ async fn handle_game_input(
             );
         }
     };
+
+    // v26.5-alpha.2 (ROBUSTNESS_V264 F4): automation-input validation
+    // failures are CLIENT errors and must surface as 400, not 502. All
+    // automation variants build their protocol payload here - a single
+    // validation site, so the CLI rules and API rules cannot drift.
+    let automation_payload: Option<Result<serde_json::Value, String>> = match &payload {
+        GameInputRequest::Schedule { op, name, period_ticks, commands } => {
+            Some(build_schedule_payload(op, name.as_deref(), *period_ticks, commands))
+        }
+        GameInputRequest::Macro { op, name, step } => {
+            Some(build_macro_payload(op, name.as_deref(), step.as_ref()))
+        }
+        GameInputRequest::Condition { if_query, then_branch, else_branch } => {
+            Some(Ok(crate::game::client::condition_payload(
+                if_query.clone(),
+                serde_json::Value::Array(then_branch.clone()),
+                else_branch.clone().map(serde_json::Value::Array),
+            )))
+        }
+        GameInputRequest::RawAction { command } => Some(Ok(command.clone())),
+        GameInputRequest::RedstoneAction { op, x, y, z, face, count } => {
+            // v26.11 component interaction; offline validation via the same
+            // builder the CLI uses (client errors -> 400, not 502).
+            Some(
+                crate::game::client::redstone_action_payload(
+                    op, *x, *y, *z, face.as_deref(), *count,
+                )
+                .map_err(|e| e.to_string()),
+            )
+        }
+        _ => None,
+    };
+
+    if let Some(Err(msg)) = &automation_payload {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"status": "error", "error": msg})),
+        );
+    }
 
     let result = match payload {
         GameInputRequest::Key { key, action, hold_ms } => {
@@ -731,68 +865,14 @@ async fn handle_game_input(
         }
         GameInputRequest::Scroll { amount } => crate::game::client::scroll(&dir, amount).await,
         GameInputRequest::Chat { message } => crate::game::client::chat(&dir, &message).await,
-        GameInputRequest::Schedule { op, name, period_ticks, commands } => {
-            let op = op.to_ascii_lowercase();
-            let payload = match op.as_str() {
-                "add" => {
-                    if name.is_none() || period_ticks.is_none() || commands.is_empty() {
-                        Err(anyhow::anyhow!(
-                            "schedule add requires name, periodTicks and at least one command"
-                        ))
-                    } else {
-                        Ok(crate::game::client::schedule_payload(
-                            "add",
-                            name.as_deref(),
-                            period_ticks,
-                            Some(serde_json::Value::Array(commands)),
-                        ))
-                    }
-                }
-                "status" => Ok(crate::game::client::schedule_payload("status", None, None, None)),
-                "remove" => match name {
-                    Some(n) => Ok(crate::game::client::schedule_payload("remove", Some(n.as_str()), None, None)),
-                    None => Err(anyhow::anyhow!("schedule remove requires a name")),
-                },
-                other => Err(anyhow::anyhow!(
-                    "Unknown schedule op '{other}'. Supported: add / status / remove"
-                )),
-            };
-            match payload {
-                Ok(p) => crate::game::client::automation_action(&dir, p).await,
-                Err(e) => Err(e),
-            }
-        }
-        GameInputRequest::Macro { op, name, step } => {
-            const OPS: &[&str] = &[
-                "start-recording", "record-step", "stop-recording",
-                "play", "stop", "delete", "status",
-            ];
-            let validated = if !OPS.contains(&op.as_str()) {
-                Err(anyhow::anyhow!("Unknown macro op '{}'. Supported: {}", op, OPS.join(", ")))
-            } else {
-                let needs_name = !matches!(op.as_str(), "stop-recording" | "status" | "stop");
-                if needs_name && name.is_none() {
-                    Err(anyhow::anyhow!("macro {} requires a name", op))
-                } else if op == "record-step" && step.is_none() {
-                    Err(anyhow::anyhow!("macro record-step requires a step action"))
-                } else {
-                    Ok(crate::game::client::macro_payload(&op, name.as_deref(), step))
-                }
-            };
-            match validated {
-                Ok(p) => crate::game::client::automation_action(&dir, p).await,
-                Err(e) => Err(e),
-            }
-        }
-        GameInputRequest::Condition { if_query, then_branch, else_branch } => {
-            crate::game::client::automation_action(
-                &dir,
-                crate::game::client::condition_payload(if_query, serde_json::Value::Array(then_branch), else_branch.map(serde_json::Value::Array)),
-            )
-            .await
-        }
-        GameInputRequest::RawAction { command } => {
-            crate::game::client::automation_action(&dir, command).await
+        GameInputRequest::Schedule { .. }
+        | GameInputRequest::Macro { .. }
+        | GameInputRequest::Condition { .. }
+        | GameInputRequest::RawAction { .. }
+        | GameInputRequest::RedstoneAction { .. } => {
+            // Validation passed above; the payload is guaranteed present.
+            let p = automation_payload.unwrap().expect("validated payload");
+            crate::game::client::automation_action(&dir, p).await
         }
     };
 
@@ -803,6 +883,69 @@ async fn handle_game_input(
             Json(serde_json::json!({"status": "error", "error": e.to_string()})),
         ),
     }
+}
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// Validate and build a schedule action payload (API-side twin of the CLI
+/// `mdl game schedule` rules). `Err` carries the client-facing message.
+fn build_schedule_payload(
+    op: &str,
+    name: Option<&str>,
+    period_ticks: Option<u64>,
+    commands: &[serde_json::Value],
+) -> Result<serde_json::Value, String> {
+    let op = op.to_ascii_lowercase();
+    match op.as_str() {
+        "add" => {
+            if name.is_none() || period_ticks.is_none() || commands.is_empty() {
+                Err("schedule add requires name, periodTicks and at least one command".into())
+            } else {
+                Ok(crate::game::client::schedule_payload(
+                    "add",
+                    name,
+                    period_ticks,
+                    Some(serde_json::Value::Array(commands.to_vec())),
+                ))
+            }
+        }
+        "status" => Ok(crate::game::client::schedule_payload("status", None, None, None)),
+        "remove" => match name {
+            Some(n) => Ok(crate::game::client::schedule_payload("remove", Some(n), None, None)),
+            None => Err("schedule remove requires a name".into()),
+        },
+        other => Err(format!(
+            "Unknown schedule op '{other}'. Supported: add / status / remove"
+        )),
+    }
+}
+
+/// Validate and build a macro action payload (API-side twin of the CLI
+/// `mdl game macro` rules).
+fn build_macro_payload(
+    op: &str,
+    name: Option<&str>,
+    step: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    const OPS: &[&str] = &[
+        "start-recording", "record-step", "stop-recording",
+        "play", "stop", "delete", "status",
+    ];
+    if !OPS.contains(&op) {
+        return Err(format!(
+            "Unknown macro op '{}'. Supported: {}",
+            op,
+            OPS.join(", ")
+        ));
+    }
+    let needs_name = !matches!(op, "stop-recording" | "status" | "stop");
+    if needs_name && name.is_none() {
+        return Err(format!("macro {op} requires a name"));
+    }
+    if op == "record-step" && step.is_none() {
+        return Err("macro record-step requires a step action".into());
+    }
+    Ok(crate::game::client::macro_payload(op, name, step.cloned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -821,9 +964,31 @@ struct GameRedstoneRequest {
     z: Option<i32>,
 }
 
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// Parse the redstone request body (v26.5-alpha.2, ROBUSTNESS_V264 F5).
+///
+/// The body is genuinely optional (empty = crosshair probe), but a body that
+/// EXISTS and is malformed must surface as a client error - the previous
+/// `Option<Json<…>>` extractor swallowed rejections and turned typos into a
+/// misleading crosshair probe (which then failed with "Cannot reach
+/// Despotes"). Pure function for testability.
+fn parse_redstone_body(bytes: &[u8]) -> Result<Option<(i32, i32, i32)>, String> {
+    if bytes.iter().all(|b| b.is_ascii_whitespace()) {
+        return Ok(None);
+    }
+    let req: GameRedstoneRequest = serde_json::from_slice(bytes)
+        .map_err(|e| format!("invalid redstone body: {e}"))?;
+    match (req.x, req.y, req.z) {
+        (None, None, None) => Ok(None),
+        (Some(x), Some(y), Some(z)) => Ok(Some((x, y, z))),
+        _ => Err("x, y and z must be given together (or all omitted for crosshair probe)".into()),
+    }
+}
+
 async fn handle_game_redstone(
     Path(instance): Path<String>,
-    payload: Option<Json<GameRedstoneRequest>>,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
     let dir = match resolve_instance_dir(&instance).await {
         Ok(d) => d,
@@ -834,9 +999,19 @@ async fn handle_game_redstone(
             );
         }
     };
-    let (x, y, z) = payload
-        .map(|Json(p)| (p.x, p.y, p.z))
-        .unwrap_or((None, None, None));
+    let coords = match parse_redstone_body(&body) {
+        Ok(c) => c,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"status": "error", "error": msg})),
+            );
+        }
+    };
+    let (x, y, z) = match coords {
+        Some((x, y, z)) => (Some(x), Some(y), Some(z)),
+        None => (None, None, None),
+    };
     match crate::game::client::redstone_query(&dir, x, y, z).await {
         Ok(response) => (StatusCode::OK, Json(response)),
         Err(e) => (
@@ -844,6 +1019,199 @@ async fn handle_game_redstone(
             Json(serde_json::json!({"status": "error", "error": e.to_string()})),
         ),
     }
+}
+
+/// v26.11 circuit-scan request body (all fields optional; empty = crosshair
+/// probe with the agent-default radius).
+#[derive(Debug, Deserialize, Default)]
+struct GameCircuitRequest {
+    #[serde(default)]
+    x: Option<i32>,
+    #[serde(default)]
+    y: Option<i32>,
+    #[serde(default)]
+    z: Option<i32>,
+    #[serde(default)]
+    radius: Option<u8>,
+}
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// Parse the circuit-scan body (v26.5-alpha.4). Mirrors parse_redstone_body:
+/// an existing-but-malformed body must be a client error, never a silent
+/// crosshair probe. Pure function for testability.
+fn parse_circuit_body(bytes: &[u8]) -> Result<(Option<i32>, Option<i32>, Option<i32>, Option<u8>), String> {
+    if bytes.iter().all(|b| b.is_ascii_whitespace()) {
+        return Ok((None, None, None, None));
+    }
+    let req: GameCircuitRequest = serde_json::from_slice(bytes)
+        .map_err(|e| format!("invalid circuit body: {e}"))?;
+    if req.x.is_some() != req.y.is_some() || req.x.is_some() != req.z.is_some() {
+        return Err("x, y and z must be given together (or all omitted for crosshair probe)".into());
+    }
+    if let Some(r) = req.radius {
+        if !(1..=8).contains(&r) {
+            return Err("radius must be within 1-8".into());
+        }
+    }
+    Ok((req.x, req.y, req.z, req.radius))
+}
+
+async fn handle_game_circuit(
+    Path(instance): Path<String>,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let dir = match resolve_instance_dir(&instance).await {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+            );
+        }
+    };
+    let (x, y, z, radius) = match parse_circuit_body(&body) {
+        Ok(c) => c,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"status": "error", "error": msg})),
+            );
+        }
+    };
+    match crate::game::client::circuit_query(&dir, x, y, z, radius).await {
+        Ok(response) => (StatusCode::OK, Json(response)),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+        ),
+    }
+}
+
+async fn handle_game_screen(
+    Path(instance): Path<String>,
+) -> impl IntoResponse {
+    let dir = match resolve_instance_dir(&instance).await {
+        Ok(d) => d,
+        Err(e) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+            );
+        }
+    };
+    match crate::game::client::screen_query(&dir).await {
+        Ok(response) => (StatusCode::OK, Json(response)),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+        ),
+    }
+}
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// Register a circuit cube for event-driven state-change observation
+/// (v26.5-alpha.8). Watches live in the agent server's memory: restart the
+/// server to discard them; the game itself is never modified.
+#[derive(Debug, Deserialize)]
+struct CircuitWatchRequest {
+    #[serde(default)]
+    name: Option<String>,
+    x: i32,
+    y: i32,
+    z: i32,
+    #[serde(default)]
+    radius: Option<u8>,
+}
+
+fn validate_watch_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.len() > 64
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.chars().any(char::is_control)
+    {
+        return Err("watch name must be 1-64 printable characters without path separators".into());
+    }
+    Ok(())
+}
+
+async fn handle_circuit_watch_add(
+    State((state, _)): State<(Arc<RwLock<ServerState>>, broadcast::Sender<ServerEvent>)>,
+    Path(instance): Path<String>,
+    ApiJson(request): ApiJson<CircuitWatchRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = resolve_instance_dir(&instance).await {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"status": "error", "error": e.to_string()})),
+        );
+    }
+    let radius = request.radius.unwrap_or(4);
+    if !(1..=8).contains(&radius) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"status": "error", "error": "radius must be within 1-8"})),
+        );
+    }
+
+    let mut st = state.write().await;
+    let watches = st.watches.entry(instance.clone()).or_default();
+    let name = request.name.unwrap_or_else(|| format!("circuit-{}", watches.len() + 1));
+    if let Err(msg) = validate_watch_name(&name) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"status": "error", "error": msg})));
+    }
+    if watches.iter().any(|w| w.name == name) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"status": "error", "error": format!("watch '{}' already exists", name)})),
+        );
+    }
+    let watch = super::orchestration::CircuitWatch {
+        name,
+        x: request.x,
+        y: request.y,
+        z: request.z,
+        radius,
+    };
+    watches.push(watch.clone());
+    (StatusCode::CREATED, Json(serde_json::json!({"status": "success", "data": watch})))
+}
+
+async fn handle_circuit_watch_list(
+    State((state, _)): State<(Arc<RwLock<ServerState>>, broadcast::Sender<ServerEvent>)>,
+    Path(instance): Path<String>,
+) -> impl IntoResponse {
+    let st = state.read().await;
+    let watches = st.watches.get(&instance).cloned().unwrap_or_default();
+    (StatusCode::OK, Json(serde_json::json!({"status": "success", "data": watches})))
+}
+
+async fn handle_circuit_watch_remove(
+    State((state, _)): State<(Arc<RwLock<ServerState>>, broadcast::Sender<ServerEvent>)>,
+    Path((instance, name)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let mut st = state.write().await;
+    let Some(watches) = st.watches.get_mut(&instance) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"status": "error", "error": format!("watch '{}' not found", name)})),
+        );
+    };
+    let before = watches.len();
+    watches.retain(|w| w.name != name);
+    if watches.len() == before {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"status": "error", "error": format!("watch '{}' not found", name)})),
+        );
+    }
+    if watches.is_empty() {
+        st.watches.remove(&instance);
+    }
+    (StatusCode::OK, Json(serde_json::json!({"status": "success", "data": {"removed": name}})))
 }
 
 async fn execute_command(
@@ -894,6 +1262,7 @@ async fn execute_command(
                 version: version.to_string(),
                 loader: None,
                 javaagents: Vec::new(),
+                jdk: None,
             };
 
             let manager = InstanceManager::new()?;
@@ -1312,5 +1681,120 @@ async fn execute_command(
         _ => {
             anyhow::bail!("Unknown command: {}", command)
         }
+    }
+}
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // v26.5-alpha.2 (ROBUSTNESS_V264 F5): malformed redstone bodies must be
+    // client errors, never silent crosshair probes.
+    #[test]
+    fn test_parse_redstone_body() {
+        // Empty / whitespace-only body = crosshair probe.
+        assert_eq!(parse_redstone_body(b""), Ok(None));
+        assert_eq!(parse_redstone_body(b"  \r\n\t"), Ok(None));
+
+        // Full coordinates parse.
+        assert_eq!(
+            parse_redstone_body(br#"{"x":-517,"y":72,"z":-87}"#),
+            Ok(Some((-517, 72, -87)))
+        );
+
+        // Partial coordinates are a client error, not a probe.
+        assert!(parse_redstone_body(br#"{"x":1}"#).is_err());
+        assert!(parse_redstone_body(br#"{"x":1,"y":2}"#).is_err());
+
+        // Malformed JSON / wrong types are client errors with a message.
+        let e = parse_redstone_body(br#"{"x":"abc"}"#).unwrap_err();
+        assert!(e.contains("invalid redstone body"), "{e}");
+        let e = parse_redstone_body(b"not json").unwrap_err();
+        assert!(e.contains("invalid redstone body"), "{e}");
+        let e = parse_redstone_body(b"{").unwrap_err();
+        assert!(e.contains("invalid redstone body"), "{e}");
+    }
+
+    // v26.5-alpha.2 (ROBUSTNESS_V264 F4): validation rules for the
+    // automation inputs, exercised without a live agent server.
+    #[test]
+    fn test_build_schedule_payload_validation() {
+        // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+        let cmd = serde_json::json!({"type": "chat", "text": "hi"});
+
+        assert!(build_schedule_payload("add", Some("hb"), Some(100), &[cmd.clone()]).is_ok());
+        assert!(build_schedule_payload("status", None, None, &[]).is_ok());
+        assert!(build_schedule_payload("remove", Some("hb"), None, &[]).is_ok());
+
+        // add requires name + periodTicks + at least one command
+        assert!(build_schedule_payload("add", None, Some(100), &[cmd.clone()]).is_err());
+        assert!(build_schedule_payload("add", Some("hb"), None, &[cmd.clone()]).is_err());
+        assert!(build_schedule_payload("add", Some("hb"), Some(100), &[]).is_err());
+
+        // remove requires a name
+        assert!(build_schedule_payload("remove", None, None, &[]).is_err());
+
+        // op whitelist
+        assert!(build_schedule_payload("boom", Some("x"), Some(1), &[cmd]).is_err());
+    }
+
+    #[test]
+    fn test_build_macro_payload_validation() {
+        assert!(build_macro_payload("start-recording", Some("m"), None).is_ok());
+        assert!(build_macro_payload(
+            "record-step",
+            Some("m"),
+            Some(&serde_json::json!({"type": "ping"}))
+        )
+        .is_ok());
+        assert!(build_macro_payload("status", None, None).is_ok());
+
+        // record-step requires a step
+        assert!(build_macro_payload("record-step", Some("m"), None).is_err());
+        // most ops require a name
+        assert!(build_macro_payload("start-recording", None, None).is_err());
+        assert!(build_macro_payload("play", None, None).is_err());
+        // op whitelist
+        assert!(build_macro_payload("rewind", Some("m"), None).is_err());
+    }
+}
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+#[cfg(test)]
+mod circuit_tests {
+    use super::*;
+
+    /// v26.5-alpha.4 (Despotes v26.11 mapping): circuit body parsing.
+    #[test]
+    fn test_parse_circuit_body() {
+        // Empty / whitespace-only = crosshair probe with default radius.
+        assert_eq!(parse_circuit_body(b""), Ok((None, None, None, None)));
+        assert_eq!(parse_circuit_body(b" \r\n"), Ok((None, None, None, None)));
+
+        // Full body parses.
+        assert_eq!(
+            parse_circuit_body(br#"{"x":-516,"y":71,"z":-87,"radius":3}"#),
+            Ok((Some(-516), Some(71), Some(-87), Some(3)))
+        );
+
+        // Radius-only is valid (crosshair + explicit radius).
+        assert_eq!(
+            parse_circuit_body(br#"{"radius":8}"#),
+            Ok((None, None, None, Some(8)))
+        );
+
+        // Partial coordinates are a client error.
+        assert!(parse_circuit_body(br#"{"x":1,"y":2}"#).is_err());
+
+        // Radius out of range is a client error.
+        assert!(parse_circuit_body(br#"{"radius":9}"#).is_err());
+        assert!(parse_circuit_body(br#"{"radius":0}"#).is_err());
+
+        // Malformed JSON is a client error with a message.
+        let e = parse_circuit_body(b"{").unwrap_err();
+        assert!(e.contains("invalid circuit body"), "{e}");
     }
 }

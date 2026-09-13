@@ -91,15 +91,26 @@ async def listen():
 
 ## 状态
 
-**当前版本**: v26.4（Alpha 1–8 已发布）
+**当前版本**: v26.5
 
-v26.4 主线主题：**实测驱动修复 + Aprism 生态深化**——每个 Alpha 均由真实使用反馈或 CI 首验落地。
+v26.5 主线主题：**自主编排与运行时选择**——agent 以事件而非轮询观察并驱动活游戏、按实例绑定 Java 运行时、以声明式方式表达多步意图。依据 v26.4.0 强制鲁棒性评估规划，并在独立 `v26.5` 分支开发。
+
+v26.5 亮点（Alpha 1–9）：
+- ✅ 安全：`mdl jdk remove` 路径穿越修复（PoC 确证）、下载资产名写入守卫
+- ✅ Agent API 错误面统一：全 JSON 错误信封、客户端错误 400（非 502）、不再静默降级为十字准星探测
+- ✅ 实例级 JDK 绑定：`mdl jdk use <instance> aprism[@ver]|default`，Adoptium 回退 + doctor 检查
+- ✅ Despotes v26.11 原语：`game circuit`（立方体扫描）、`game redstone-action`（toggle/cycle）、`game screen`（窗口几何）
+- ✅ 事件驱动编排：WebSocket 事件流推送 `schedule_*` 与 `macro_*` 生命周期事件
+- ✅ 电路变化订阅：`POST/GET/DELETE /game/:instance/watch` → `circuit_changed` 事件
+- ✅ 声明式 flow：`mdl game flow <instance> --file flow.json`——既有原语的有序 fail-fast 复合
+- ✅ 修复跨实例窗口错配（陈旧 PID 文件 + Windows PID 复用）
 
 历史主线：
 - ✅ v26.0：核心启动器、实例/模组管理、Agent 游戏控制（Despotes）、整合包导入、JE/基岩专用服、Aprism 产品矩阵、下载进度条、`mdl doctor`
 - ✅ v26.1：能力清单、agent 错误码与 stop 命令、BDS 全生命周期、实例克隆/重命名
 - ✅ v26.2：空闲看门狗、流式下载（峰值 ~1.9GB→<100MB）、OOM 自保护、JavaAgent 启动/热附加注册表、mrpack 导出往返、服务端 RCON 自动化、Aprism 生态视图、启动指标 + JSON 日志
 - ✅ v26.3：输入加固与 BOM 容错、OOM 二次确认 + 误杀修复、看门狗竞态修复、结构化 properties 编辑、凭据 ACL 收紧、性能基线 `mdl bench`、对抗性解析套件
+- ✅ v26.4：status 性能优化、JVM 目标注入路由、Forge/NeoForge 判定修复、跨平台 CI 矩阵、cargo-fuzz、NeoForge MANIFEST 注入、AprismJDK（AJR）供给、Despotes v26.9 映射
 
 v26.4 亮点（Alpha 1–8）：
 - ✅ status 单快照性能优化（p95 ~1.7s → ~0.2s）

@@ -535,3 +535,31 @@ OpenLumin 项目（工作区位于 \...\Domain-Projects\Minecraft\OpenLumin\）�
 - 默认零配置生效（内置清单）。
 - 追加自定义排除：编辑 %APPDATA%\\mdl\\oom_excludes.txt，例如添加 \mycustomtool\。
 - 注意：内置 "gradle" 排除意味着通过 \gradlew runClient\ 启动的残留 MC 实例也不会被 stale 清理——需手动处理或加入用户清单反向管理。
+
+---
+
+## 2026-08-31 PowerShell Set-Content 编码事故（v26.5-alpha.3 会话）
+
+**实施者：** Starsails（主会话 Agent）
+
+<!-- GitHub@NDBlockConnect | BlockConnect@StarsailsClover -->
+
+### 事故
+
+用 `Get-Content -Raw` + `-replace` + `Set-Content -Encoding UTF8` 对
+main.rs / server.rs 做"插入一行字段"的机械修改。PS 5.1 的
+Get-Content 在无 BOM 文件上按系统 ANSI（GBK）解码，Set-Content 再
+以 UTF-8 写回——全部中文字符串与注释被双重编码损坏（如
+`杩戞洿鏂帮細`），cargo 报 unknown token。
+
+### 处置
+
+`git checkout -- <两个文件>` 恢复到 HEAD（alpha.2 提交），全部改动
+改用 Edit 工具重做。alpha.3 的其余文件改动均为 Edit 工具所写，未受
+影响。
+
+### 规范结论（永久生效）
+
+**本仓库源码文件一律使用 Edit/Write 工具修改，禁止 PowerShell
+Set-Content/Add-Content -Raw 管道做内容替换**；Add-Content 追加
+纯 ASCII 段落可接受（不触碰既有字节）。

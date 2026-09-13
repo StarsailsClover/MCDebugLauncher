@@ -93,15 +93,29 @@ See [docs/specification.md](docs/specification.md) for complete API documentatio
 
 ## Status
 
-**Current Version**: v26.3
+**Current Version**: v26.5
 
-v26.3 mainline theme: **hardening & agent surface completion** — driven by a
-workspace-wide blocker scan and the v26.2 robustness assessment.
+v26.5 mainline theme: **autonomous orchestration & runtime selection** — agents
+observe and drive a live game through events instead of polling, pin the Java
+runtime per instance, and express multi-step intent declaratively. Planned from
+the mandatory robustness assessment of v26.4.0 and developed on the dedicated
+`v26.5` branch.
+
+v26.5 highlights (Alpha 1–9):
+- ✅ Security: `mdl jdk remove` path traversal fixed (PoC-confirmed), download asset-name guard
+- ✅ Agent API error surface: JSON error envelope everywhere, client errors as 400 (not 502), no silent crosshair probes
+- ✅ Instance-level JDK binding: `mdl jdk use <instance> aprism[@ver]|default` with Adoptium fallback + doctor check
+- ✅ Despotes v26.11 primitives: `game circuit` (cube scan), `game redstone-action` (toggle/cycle), `game screen` (window geometry)
+- ✅ Event-driven orchestration: `schedule_*` and `macro_*` lifecycle events on the WebSocket stream
+- ✅ Circuit change watches: `POST/GET/DELETE /game/:instance/watch` → `circuit_changed` events
+- ✅ Declarative flows: `mdl game flow <instance> --file flow.json` — ordered, fail-fast composition of existing primitives
+- ✅ Fixed cross-instance window misattribution (stale PID files + Windows PID reuse)
 
 Prior lines:
 - ✅ v26.0: core launcher, instance/mod management, agent game control (Despotes), modpack import, JE/Bedrock dedicated servers, Aprism product matrix, download progress, `mdl doctor`
 - ✅ v26.1: capability manifest, agent error codes & stop command, full BDS lifecycle, instance clone/rename
 - ✅ v26.2: idle watchdog, streaming downloads (~1.9GB→<100MB peak), OOM self-protection, JavaAgent launch/hot-attach registry, mrpack export roundtrip, server RCON automation, Aprism ecosystem status, per-launch metrics + JSON logging
+- ✅ v26.4: status performance (p95 ~0.2s), JVM-target inject routing, Forge/NeoForge detection fix, cross-platform CI matrix, cargo-fuzz, NeoForge MANIFEST injection, AprismJDK (AJR) provisioning, Despotes v26.9 mapping
 
 v26.3 highlights (Alpha 1–9):
 - ✅ Input hardening: instance-name validation (reserved Windows device stems, separators), BOM-tolerant JSON configs with file-path errors
