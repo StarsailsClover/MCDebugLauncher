@@ -19,12 +19,22 @@ pub struct Flow {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum FlowStep {
-    WaitReady { #[serde(default = "default_ready_timeout")] timeout_secs: u64 },
+    // NOTE (v26.5-alpha.10 bug fix): `rename_all = "kebab-case"` applies ONLY
+    // to the tag value, not to the variant fields. Every camelCase field the
+    // documented DSL uses must therefore carry an explicit rename, otherwise
+    // serde silently falls back to the `default` and the parameter is ignored
+    // (a flow asking for timeoutSecs:30 quietly waited the 120s default).
+    WaitReady {
+        #[serde(default = "default_ready_timeout", rename = "timeoutSecs")]
+        timeout_secs: u64,
+    },
     WaitCondition {
         #[serde(rename = "if")]
         r#if: Value,
-        #[serde(default = "default_condition_timeout")] timeout_secs: u64,
-        #[serde(default = "default_poll_ms")] poll_ms: u64,
+        #[serde(default = "default_condition_timeout", rename = "timeoutSecs")]
+        timeout_secs: u64,
+        #[serde(default = "default_poll_ms", rename = "pollMs")]
+        poll_ms: u64,
     },
     Action { command: Value },
     Schedule {
@@ -84,7 +94,17 @@ pub fn validate(flow: &Flow) -> Result<()> {
 pub enum CompareOp { Exists, Eq, Ne, Gt, Lt, Contains }
 
 pub fn condition_matches(value: &Value, field: &str, op: CompareOp, expected: Option<&Value>) -> bool {
-    let actual = field.split('.').fold(Some(value), |cur, key| cur?.get(key));
+    let actual = field.split('.').fold(Some(value), |cur, key| {
+        let cur = cur?;
+        // v26.5-alpha.10 (e2e finding): point paths must address array
+        // elements too - `schedules.0.executionCount` is the natural way to
+        // pin a schedule in the status response. serde_json's str-indexed
+        // `get` returns None for arrays, so numeric keys index by position.
+        match cur {
+            Value::Array(items) => key.parse::<usize>().ok().and_then(|i| items.get(i)),
+            _ => cur.get(key),
+        }
+    });
     match op {
         CompareOp::Exists => actual.is_some(),
         CompareOp::Eq => actual == expected,
@@ -130,6 +150,62 @@ mod tests {
         assert!(parse_and_validate(&String::from_utf8(raw.to_vec()).unwrap()).is_err());
     }
 
+    /// Field regression (v26.5-alpha.10): `rename_all` on the enum does NOT
+    /// rename variant fields, so camelCase DSL keys must be explicit. Before
+    /// the fix, `timeoutSecs`/`pollMs` were silently dropped and the defaults
+    /// took over (an e2e flow asking for 30s waited 120s and timed out).
+    #[test]
+    fn camel_case_step_fields_are_not_silently_ignored() {
+        let f = parse_and_validate(
+            r#"{"name":"x","steps":[
+                {"type":"wait-ready","timeoutSecs":30},
+                {"type":"wait-condition","timeoutSecs":45,"pollMs":250,
+                 "if":{"field":"inGame","op":"exists"}},
+                {"type":"schedule","op":"add","name":"s","periodTicks":40,
+                 "commands":[{"type":"ping"}]}
+            ]}"#,
+        )
+        .unwrap();
+
+        match &f.steps[0] {
+            FlowStep::WaitReady { timeout_secs } => assert_eq!(*timeout_secs, 30, "timeoutSecs ignored"),
+            other => panic!("wrong step: {other:?}"),
+        }
+        match &f.steps[1] {
+            FlowStep::WaitCondition { timeout_secs, poll_ms, .. } => {
+                assert_eq!(*timeout_secs, 45, "timeoutSecs ignored");
+                assert_eq!(*poll_ms, 250, "pollMs ignored");
+            }
+            other => panic!("wrong step: {other:?}"),
+        }
+        match &f.steps[2] {
+            FlowStep::Schedule { period_ticks, .. } => {
+                assert_eq!(*period_ticks, Some(40), "periodTicks ignored")
+            }
+            other => panic!("wrong step: {other:?}"),
+        }
+    }
+
+    /// Defaults still apply when the optional fields are absent.
+    #[test]
+    fn omitted_optional_fields_fall_back_to_defaults() {
+        let f = parse_and_validate(
+            r#"{"name":"x","steps":[{"type":"wait-ready"},{"type":"wait-condition","if":{"field":"a"}}]}"#,
+        )
+        .unwrap();
+        match &f.steps[0] {
+            FlowStep::WaitReady { timeout_secs } => assert_eq!(*timeout_secs, 120),
+            other => panic!("wrong step: {other:?}"),
+        }
+        match &f.steps[1] {
+            FlowStep::WaitCondition { timeout_secs, poll_ms, .. } => {
+                assert_eq!(*timeout_secs, 60);
+                assert_eq!(*poll_ms, 500);
+            }
+            other => panic!("wrong step: {other:?}"),
+        }
+    }
+
     #[test]
     fn evaluates_six_condition_operators() {
         let value = json!({"result":{"inGame":true,"name":"alpha","n":4},"items":["a","b"]});
@@ -141,5 +217,21 @@ mod tests {
         assert!(condition_matches(&value, "result.name", CompareOp::Contains, Some(&json!("lph"))));
         assert!(condition_matches(&value, "items", CompareOp::Contains, Some(&json!("b"))));
         assert!(!condition_matches(&value, "result.missing", CompareOp::Exists, None));
+    }
+
+    /// e2e regression (v26.5-alpha.10): array indexing in point paths.
+    /// Found by the alpha.10 production e2e flow - `schedules.0.executionCount`
+    /// never matched because serde_json's str-indexed get() returns None for
+    /// arrays.
+    #[test]
+    fn point_paths_index_into_arrays() {
+        let value = json!({"count":1,"schedules":[
+            {"name":"a10hb","executionCount":4,"periodTicks":40}
+        ]});
+        assert!(condition_matches(&value, "schedules.0.executionCount", CompareOp::Gt, Some(&json!(0))));
+        assert!(condition_matches(&value, "schedules.0.name", CompareOp::Eq, Some(&json!("a10hb"))));
+        assert!(condition_matches(&value, "schedules.1.executionCount", CompareOp::Exists, None) == false);
+        assert!(condition_matches(&value, "schedules.abc", CompareOp::Exists, None) == false,
+            "non-numeric key on an array must not resolve");
     }
 }

@@ -5,6 +5,80 @@ All notable changes to MCDebugLauncher will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [26.5.0] - 2026-09-13
+
+### v26.5 Official Release
+
+Sixth official release. Collapses the v26.5 mainline (Alpha 1 through
+Alpha 9; Alpha 10 is the hidden LTS increment). Developed on the
+dedicated `v26.5` branch as required by the BC development
+specification, planned from the mandatory robustness assessment of
+v26.4.0 (ROBUSTNESS_V264.md).
+
+Theme: autonomous orchestration and runtime selection - agents observe
+and drive a live game through events instead of polling, pin the Java
+runtime per instance, and express multi-step intent declaratively.
+
+Highlights across the line:
+- **Alpha 1 - jdk remove traversal fix** (ROBUSTNESS_V264 F1, PoC
+  confirmed during the assessment): a hostile tag could delete
+  directories outside the java cache. Tags are now a single path
+  component; asset names steering the download write path are refused.
+- **Alpha 2 - agent API error surface**: JSON-body rejections return
+  the standard error envelope instead of plain text; automation-input
+  validation maps to 400 (not 502); malformed redstone bodies are
+  explicit client errors instead of silently becoming crosshair probes;
+  performance baseline saved for regression gating.
+- **Alpha 3 - instance-level JDK binding**: `mdl jdk use <instance>
+  aprism[@ver]|default`, persisted in instance.json and honoured by
+  every launch path, with graceful Eclipse Adoptium fallback; doctor
+  reports bindings that cannot currently resolve.
+- **Alpha 4 - Despotes v26.11 primitives**: `game circuit` (cube scan,
+  radius 1-8, powered state and properties), `game redstone-action`
+  (toggle/cycle via useItemOn) and `game screen` (window geometry for
+  physical/guiScale=logical click-space conversion), plus the matching
+  agent API endpoints.
+- **Alpha 5 - schedule lifecycle events**: a watcher diffs Despotes
+  schedule status and broadcasts schedule_registered / schedule_fired /
+  schedule_removed, so agents react to orchestration instead of polling.
+- **Alpha 6 - macro lifecycle events**: the same watcher covers
+  MacroRecorder state (macro_recorded / macro_play_started /
+  macro_play_finished / macro_removed), including the playback-swap
+  ordering edge case.
+- **Alpha 7 - cross-instance window misattribution fix** (field bug
+  report): stale runtime/pid files combined with Windows PID reuse made
+  one instance's error screen appear under another instance's name.
+  Attribution now requires a live java process whose command line
+  carries the instance's gameDir marker; ambiguous PIDs claimed by
+  several instances are dropped.
+- **Alpha 8 - circuit change events**: `POST/GET/DELETE
+  /game/:instance/watch` registers in-memory cube watches; the watcher
+  emits circuit_changed when components appear, disappear or change
+  powered/delay/note/facing/locked state.
+- **Alpha 9 - declarative flows**: `mdl game flow <instance> --file
+  flow.json` runs an ordered, fail-fast composition of wait-ready /
+  wait-condition / action / schedule / macro / sleep steps through the
+  existing Despotes channel - sequencing and validation, not a second
+  protocol.
+
+Production evaluation fixes (official-release regression rounds):
+- **flow camelCase fields were silently ignored**: `rename_all` on the
+  step enum renames only the tag, so `timeoutSecs` / `pollMs` /
+  `periodTicks` fell back to defaults (a 30s timeout waited 120s).
+  Explicit renames added, locked by tests.
+- **condition point paths could not index arrays**: the natural
+  `schedules.0.executionCount` never matched because str-indexed
+  lookups return None for arrays; numeric keys now index by position.
+- **flow files with a UTF-8 BOM** (PowerShell Set-Content) are accepted
+  via the shared BOM-tolerant reader (same class as the v26.3 config
+  work).
+
+Verification for this release: 28 lib + 194 bin tests green, three
+production-environment rounds on a live Fabric 26.2 instance (full
+regression, an 11-step flow end-to-end, and the new watch/event
+surface), doctor 10 checks, three-platform CI green, fuzz targets
+clean within budget.
+
 ## [26.4.0] - 2026-08-26
 
 ### v26.4 Official Release
