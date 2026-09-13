@@ -174,7 +174,16 @@ pub fn manifest() -> Capabilities {
             },
             ExecCommand {
                 command: "stop",
-                description: "Stop a running instance (kills its game process tree)",
+                description: "Stop a running instance: graceful close first (WM_CLOSE/SIGTERM, world save), force fallback after the 20s grace window",
+                args: vec![
+                    ArgSpec { name: "name", required: true, description: "Instance name" },
+                ],
+                options: vec![],
+            },
+            // v26.6-alpha.2: force-only lifecycle path.
+            ExecCommand {
+                command: "kill",
+                description: "Force-kill a running instance's game process immediately (no grace window)",
                 args: vec![
                     ArgSpec { name: "name", required: true, description: "Instance name" },
                 ],

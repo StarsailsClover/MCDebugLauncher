@@ -563,3 +563,47 @@ Get-Content 在无 BOM 文件上按系统 ANSI（GBK）解码，Set-Content 再
 **本仓库源码文件一律使用 Edit/Write 工具修改，禁止 PowerShell
 Set-Content/Add-Content -Raw 管道做内容替换**；Add-Content 追加
 纯 ASCII 段落可接受（不触碰既有字节）。
+
+---
+
+## 2026-09-14 实例级 stop/kill（v26.6-alpha.2 会话）
+
+**实施者：** Starsails（主会话 Agent）
+
+<!-- GitHub@NDBlockConnect | BlockConnect@StarsailsClover -->
+
+### 缺口（文档 vs 实际）
+
+BC 技能文档记载顶层 `mdl kill <name> [-f]`（生命周期命令），但 CLI 从未
+实现——实测 `mdl kill`/`mdl stop` 均报 unrecognized subcommand。Agent
+execute 侧仅有 force-only 的 "stop"（无优雅阶段）。用户只能手跑 taskkill。
+
+### 修复内容
+
+1. **新模块 `game/lifecycle.rs`**：`stop_instance(dir, force)`——优雅优先
+   （Windows WM_CLOSE / unix SIGTERM，20s 宽限轮询）→ 强杀兜底
+   （`kill_pid` = taskkill /T /F）；`--force` 跳过优雅阶段。
+2. **`window::post_close_to_pid(pid)`**：PostMessageW WM_CLOSE 到目标进程
+   全部顶层窗口（windows-sys 新增 Win32_UI_WindowsAndMessaging 特性），
+   等价用户点窗口 X——Minecraft 执行正常关闭路径并存世界。
+3. **顶层 `mdl kill <name> [-f]`**（cmd_kill）：复用既有
+   `running_pid`（含存活检查与陈旧清理）/`kill_pid`/`is_pid_alive`。
+4. **Agent execute**：`stop` 升级为同语义（优雅优先）；新增 `kill`
+   force-only 分支；两分支均清理 running_instances 表并广播
+   InstanceStopped；响应 data 含 graceful 标志。
+
+### 验证状态
+
+- cargo check/test 全绿（28 lib + 197 bin，零 warning）
+- 实测优雅停止：launch despotes-test-26.2（Despotes ping 200）→
+  `mdl kill` → "stopped gracefully (pid 26240)" → Despotes 不可达（游戏
+  正常保存退出）→ runtime/pid 已清理
+- 教训：测试编排中同实例双次 launch 会造成 pid 文件指向已死进程
+  （stale 清理删文件），存活游戏失去 pid 文件——单次 launch 重测后通过
+
+### 使用说明
+
+- `mdl kill <instance>`：优雅优先（存世界），20s 未退出自动强杀
+- `mdl kill <instance> -f`：立即强杀
+- Agent：`POST /execute {"command":"stop","args":["<instance>"]}` 同语义；
+  `{"command":"kill",...}` 为 force-only

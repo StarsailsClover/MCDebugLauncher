@@ -119,7 +119,8 @@ Response: `{"status","exit_code","stdout","error_code?","data?"}`.
 | `create` | `<name> [version]` | – |
 | `info` | `<name>` | – |
 | `launch` | `<name>` | username, server, fullscreen, width, height, agent, agent-port, java-path, **jdk aprism[@ver]**, memory, aprism, enter-test-world, no-queue, idle-timeout, no-idle-timeout, **oom-confirm auto\|always\|never**, **oom-list-only**, javaagents |
-| `stop` | `<name>` | – |
+| `stop` | `<name>` | graceful first (WM_CLOSE/SIGTERM, world save), force after 20s grace window |
+| `kill` | `<name>` | force-kill immediately, no grace window |
 | `metrics` | `<name>` | history=true |
 | `disk` | `<name>` | – |
 | `inject-agent` | `<name> <jar>` | params, java-path |

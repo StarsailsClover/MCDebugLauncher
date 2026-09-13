@@ -1,6 +1,6 @@
 [package]
 name = "mcdebug-launcher"
-version = "26.6.0-alpha.1"
+version = "26.6.0-alpha.2"
 edition = "2021"
 authors = ["Sails <sails@example.com>"]
 license = "Apache-2.0"
@@ -81,7 +81,7 @@ base64 = "0.22"
 # High-performance window capture via Windows.Graphics.Capture
 windows-capture = "2"
 # Win32 API for process termination in the idle watchdog
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_LibraryLoader"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

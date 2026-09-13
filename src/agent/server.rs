@@ -1557,8 +1557,11 @@ async fn execute_command(
             Ok((format!("Instance '{}' launch started (background)", name), Some(data)))
         }
         // v26.1-alpha.2: the agent can launch instances but previously had no
-        // way to stop them. `stop` kills the game process tree of a running
-        // instance (resolved via its runtime/pid file) and cleans up state.
+        // way to stop them. v26.6-alpha.2: `stop` is graceful-first
+        // (WM_CLOSE / SIGTERM, Minecraft saves the world) with a force
+        // fallback after the 20s grace window; `kill` is the force-only path
+        // for agents that must not wait. Both clean up the server's
+        // running-instance table and broadcast InstanceStopped.
         "stop" => {
             if args.is_empty() {
                 anyhow::bail!("Instance name required");
@@ -1566,14 +1569,38 @@ async fn execute_command(
             let name = &args[0];
             let manager = InstanceManager::new()?;
             let instance = manager.get(name).await?;
-            let pid_file = instance.path.join("runtime").join("pid");
-            let Some(pid) = crate::loader::server::running_pid(&instance.path) else {
-                anyhow::bail!("Instance '{}' is not running", name);
+            let outcome = crate::game::lifecycle::stop_instance(&instance.path, false).await?;
+            {
+                let mut s = state.write().await;
+                s.running_instances.remove(name);
+            }
+            let _ = event_tx.send(ServerEvent::InstanceStopped {
+                instance: name.to_string(),
+                exit_code: None,
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            });
+            let message = if outcome.graceful {
+                format!("Instance '{}' stopped gracefully (pid {})", name, outcome.pid)
+            } else {
+                format!("Instance '{}' force-killed after the grace window (pid {})", name, outcome.pid)
             };
-            crate::loader::server::kill_pid(pid)?;
-            let _ = tokio::fs::remove_file(&pid_file).await;
-            let _ = pid_file;
-            // Drop it from the server's running-instance table too.
+            let data = serde_json::json!({
+                "instance": name,
+                "pid": outcome.pid,
+                "graceful": outcome.graceful,
+                "status": "stopped"
+            });
+            Ok((message, Some(data)))
+        }
+        "kill" => {
+            // Force-only path for agents that must not wait the grace window.
+            if args.is_empty() {
+                anyhow::bail!("Instance name required");
+            }
+            let name = &args[0];
+            let manager = InstanceManager::new()?;
+            let instance = manager.get(name).await?;
+            let outcome = crate::game::lifecycle::stop_instance(&instance.path, true).await?;
             {
                 let mut s = state.write().await;
                 s.running_instances.remove(name);
@@ -1585,10 +1612,11 @@ async fn execute_command(
             });
             let data = serde_json::json!({
                 "instance": name,
-                "pid": pid,
-                "status": "stopped"
+                "pid": outcome.pid,
+                "graceful": false,
+                "status": "killed"
             });
-            Ok((format!("Instance '{}' stopped (PID {})", name, pid), Some(data)))
+            Ok((format!("Instance '{}' force-killed (pid {})", name, outcome.pid), Some(data)))
         }
         // v26.3-alpha.1: observability + lifecycle mappings.
         "metrics" => {

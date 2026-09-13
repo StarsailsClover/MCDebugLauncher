@@ -150,6 +150,33 @@ pub fn window_title_for_pid(pid: u32) -> Option<String> {
     None
 }
 
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// Post WM_CLOSE to every top-level window owned by `pid` (v26.6-alpha.2).
+/// This is the graceful stop signal for the instance lifecycle: Minecraft
+/// runs its normal close path (world save) exactly as if the user clicked
+/// the window X. Returns true when at least one window received the message.
+pub fn post_close_to_pid(pid: u32) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+
+    let windows = match Window::enumerate() {
+        Ok(w) => w,
+        Err(_) => return false,
+    };
+    let mut sent = false;
+    for window in windows {
+        if window.process_id().ok() != Some(pid) || !window.is_valid() {
+            continue;
+        }
+        let hwnd = window.as_raw_hwnd() as *mut std::ffi::c_void;
+        // SAFETY: hwnd comes from a live, valid top-level window; WM_CLOSE
+        // carries no pointers, so the NULL w/l params are well-formed.
+        let ok = unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) != 0 };
+        sent = sent || ok;
+    }
+    sent
+}
+
 /// Locate the game window for a specific instance.
 ///
 /// Resolution order:

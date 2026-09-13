@@ -1232,6 +1232,18 @@ enum Commands {
         name: String,
     },
 
+    /// Stop a running instance's game process (v26.6-alpha.2): graceful
+    /// close first (WM_CLOSE / SIGTERM — Minecraft saves the world), force
+    /// fallback after the 20s grace window.
+    Kill {
+        /// Instance name
+        name: String,
+
+        /// Skip the graceful phase and force-kill immediately
+        #[arg(short, long)]
+        force: bool,
+    },
+
     /// Show detailed instance information
     InstanceInfo {
         /// Instance name
@@ -1633,6 +1645,9 @@ async fn run() -> Result<()> {
         }
         Commands::Delete { name } => {
             cmd_delete(&name).await?;
+        }
+        Commands::Kill { name, force } => {
+            cmd_kill(&name, force).await?;
         }
         Commands::Clone { name, new_name } => {
             cmd_clone(&name, &new_name).await?;
@@ -2826,6 +2841,31 @@ async fn cmd_delete(name: &str) -> Result<()> {
     manager.delete(name).await?;
 
     println!("Instance '{}' deleted", name);
+    Ok(())
+}
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// Stop a running instance's game process (v26.6-alpha.2): graceful close
+/// first (WM_CLOSE / SIGTERM — Minecraft saves the world), force fallback
+/// after the 20s grace window; `--force` skips the graceful phase.
+async fn cmd_kill(name: &str, force: bool) -> Result<()> {
+    use instance::InstanceManager;
+
+    let manager = InstanceManager::new()?;
+    let instance = manager.get(name).await?;
+    let outcome = game::lifecycle::stop_instance(&instance.path, force).await?;
+
+    if outcome.graceful {
+        println!("Instance '{}' stopped gracefully (pid {})", name, outcome.pid);
+    } else {
+        println!(
+            "Instance '{}' force-killed (pid {}){}",
+            name,
+            outcome.pid,
+            if force { "" } else { " — did not exit within the 20s grace window" }
+        );
+    }
     Ok(())
 }
 
