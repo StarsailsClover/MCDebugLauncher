@@ -1089,6 +1089,12 @@ enum Commands {
         /// Can be repeated to attach multiple agents.
         #[arg(long = "javaagent")]
         javaagents: Vec<String>,
+
+        /// Extra JVM argument passed through verbatim (v26.6-alpha.3), e.g.
+        /// --jvm-arg "-Dfoo=bar" --jvm-arg "-XX:+UseG1GC". Appended after
+        /// MDL's own JVM flags so it can override defaults. Repeatable.
+        #[arg(long = "jvm-arg")]
+        jvm_args: Vec<String>,
     },
 
     /// Diagnose instance issues
@@ -1475,7 +1481,7 @@ async fn run() -> Result<()> {
         Commands::List { version, loader, sort } => {
             cmd_list(&cli.format, version.as_deref(), loader.as_deref(), &sort).await?;
         }
-        Commands::Launch { name, username, server, fullscreen, width, height, detach, no_queue, agent, agent_port, java_path, jdk, memory, dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive, oom_confirm, oom_list_only, javaagents } => {
+        Commands::Launch { name, username, server, fullscreen, width, height, detach, no_queue, agent, agent_port, java_path, jdk, memory, dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive, oom_confirm, oom_list_only, javaagents, jvm_args } => {
             if java_path.is_some() && jdk.is_some() {
                 anyhow::bail!("--jdk and --java-path are mutually exclusive");
             }
@@ -1510,7 +1516,7 @@ async fn run() -> Result<()> {
                     }
                 }
             };
-            cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach, no_queue, agent, agent_port, resolved_java.as_deref(), memory.as_deref(), dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive, &oom_confirm, oom_list_only, &javaagents).await?;
+            cmd_launch(&name, username.as_deref(), server.as_deref(), fullscreen, width, height, detach, no_queue, agent, agent_port, resolved_java.as_deref(), memory.as_deref(), dynamic_memory, aprism, enter_test_world, wait_ready, idle_timeout, no_idle_timeout, oom_protect, oom_aggressive, &oom_confirm, oom_list_only, &javaagents, &jvm_args).await?;
         }
         Commands::Diagnose { name, export, analyze } => {
             cmd_diagnose(&name, export.as_deref(), analyze).await?;
@@ -2073,6 +2079,7 @@ async fn cmd_launch(
     oom_confirm: &str,
     oom_list_only: bool,
     javaagents: &[String],
+    jvm_args: &[String],
 ) -> Result<()> {
     use instance::{InstanceLauncher, launcher::LaunchOptions};
 
@@ -2099,6 +2106,7 @@ async fn cmd_launch(
         oom_confirm: Some(oom_confirm.to_string()),
         oom_list_only,
         javaagents: javaagents.to_vec(),
+        jvm_args: jvm_args.to_vec(),
     };
 
     let launcher = InstanceLauncher::new()?;

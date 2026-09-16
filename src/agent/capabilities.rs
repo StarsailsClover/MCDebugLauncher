@@ -170,6 +170,7 @@ pub fn manifest() -> Capabilities {
                     OptionSpec { key: "oom-confirm", values: "auto|always|never", description: "Second-confirmation policy before killing stale processes (default auto)" },
                     OptionSpec { key: "oom-list-only", values: "true", description: "List OOM sweep candidates without terminating" },
                     OptionSpec { key: "javaagent", values: "<jar>[,<jar=params>...]", description: "Ad-hoc JavaAgent JAR(s) to attach at launch (comma-separated)" },
+                    OptionSpec { key: "jvm-arg", values: "<arg>[|<arg>...]", description: "Extra JVM arguments passed through verbatim (v26.6-alpha.3; pipe-delimited, appended after MDL's own JVM flags)" },
                 ],
             },
             ExecCommand {

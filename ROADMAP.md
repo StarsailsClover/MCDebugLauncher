@@ -50,7 +50,7 @@ MCDebugLauncher 后续规划。版本命名沿用 Aprism 家族方案：每年�
 |---|---|---|---|
 | Alpha 1 | 实例名称校验统一（F1–F5） | **F1 [Serious]**：`mdl delete` 路径穿越（PoC 确证实例目录外哨兵被删、exit 0）——delete 入口补 `validate_name`（create/clone-dst/rename-new 一直有，delete 遗漏）；**F2 [Serious]**：rename 源名补校验（`rename .. x` 可移动整个数据目录）；**F3 [Medium]**：clone 源名补校验；**F4 [Low]**：`get` 读路径补校验（info/jdk use/game 命令族共用入口）；**F5 [Low]**：circuit watch 每实例上限 16；四入口回归测试（tempdir 锁定校验先于 FS 访问）；PoC 复验：穿越被拦截、哨兵存活、正常删除路径可用。存量 85 实例名全部通过新校验（无破坏） | ✅ 已完成 |
 | Alpha 2 | 实例级 stop/kill（生命周期闭环） | 顶层 `mdl kill <name> [-f]`（严格贴合 BC 技能记载面）：优雅优先——Windows WM_CLOSE（Minecraft 走正常关闭路径存世界）/unix SIGTERM，20s 宽限轮询后 taskkill /T /F 兜底，`-f` 跳过优雅阶段；新模块 `game/lifecycle.rs`（复用 `running_pid`/`kill_pid`/`is_pid_alive`）+ `window::post_close_to_pid`（windows-sys WindowsAndMessaging）；Agent execute `stop` 升级为同语义 + 新增 `kill` force-only 分支（均清理 running_instances 表 + 广播 InstanceStopped）；capabilities + AGENT_API.md 同步；实测优雅停止 Fabric 26.2 实例（世界保存退出） | ✅ 已完成 |
-| Alpha 3–10 | 待定（按使用反馈） | — | 📋 规划中 |
+| Alpha 3 | 下游指认修复专场（调研报告 §一.1/§二.A） | **F-A [High]** Aprism × Fabric ≥0.19.3 重复 ASM 冲突：**本机实测复现**（fabric 0.19.3 + `--aprism` 崩于 `Knot.<clinit>`，冲突双方为库 asm-9.10.1 与 Aprism-v26.8 agent jar；对照实验证实由 `-javaagent` 引入）+ `attach_aprism` 预检拒绝并给出两条已验证出路（vanilla 宿主 / Aprism `-fabric-host` 重定位变体）——**验证中修正自身缺陷**：首版以原版 profile id 判宿主致检查静默失效，改以 instance config `loader_type`；**F-B [Medium]** 新增可重复 `--jvm-arg` 透传（CLI + agent `jvm-arg` 选项，替代 JAVA_TOOL_OPTIONS 全局泄漏）；**F-C [Low]** agent 缓存由"存在即复用"改为 size+sha256 校验（下游"the filename lies"，实测同目录 4 个不同版本 jar 大小完全相同）；**F-D [Low]** `mdl kill` 的 stale-pid 回退（命令行 gameDir 归因，修复实测复现的"游戏存活却报 not running"）——**验证中再修正自身缺陷**：强杀与退出中 JVM 竞态致 taskkill 硬错误，改为存活复检、进程消失即成功 | ✅ 已完成 |
 
 ## v26.5（主线：自主编排与运行时选择；独立分支开发，起点 ROBUSTNESS_V264.md）
 

@@ -318,6 +318,12 @@ pub struct LaunchOptions {
     /// Ad-hoc JavaAgent JARs to attach at launch (from `--javaagent` CLI
     /// flags). Each entry is either a bare path or `path=params`.
     pub javaagents: Vec<String>,
+    /// Extra JVM arguments passed through verbatim (v26.6-alpha.3), from
+    /// repeated `--jvm-arg` flags. Appended after MDL's own JVM arguments and
+    /// before the main class, so they can override MDL defaults.
+    /// Downstream request (Aprism/AprismRefract FACT.md): the alternative was
+    /// JAVA_TOOL_OPTIONS, which leaks into every JVM on the machine.
+    pub jvm_args: Vec<String>,
 }
 
 /// Result of a successful launch.
@@ -730,7 +736,7 @@ impl InstanceLauncher {
                     "Cannot launch with --aprism: this instance has AprismPrismate installed                      in mods/. The Aprism javaagent and AprismPrismate are mutually exclusive                      in one instance. Remove the Prismate jar or drop --aprism."
                 );
             }
-            match attach_aprism(&mut cmd, &version_metadata.id, instance_dir).await {
+            match attach_aprism(&mut cmd, &version_metadata.id, instance_dir, &config).await {
                 Ok(info) => tracing::info!("Attached Aprism JE Native loader: {}", info),
                 Err(e) => anyhow::bail!("Failed to attach Aprism loader: {e}"),
             }
@@ -767,6 +773,15 @@ impl InstanceLauncher {
 
         cmd.arg("-cp");
         cmd.arg(&classpath);
+
+        // Extra JVM arguments (v26.6-alpha.3, `--jvm-arg`): passed verbatim
+        // after MDL's own JVM flags so callers can override defaults
+        // (system properties, GC tuning, -D flags) without JAVA_TOOL_OPTIONS.
+        // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+        for arg in &options.jvm_args {
+            tracing::info!("Extra JVM arg: {}", arg);
+            cmd.arg(arg);
+        }
 
         // Main class
         cmd.arg(&main_class);
@@ -1718,16 +1733,99 @@ impl InstanceLauncher {
 }
 
 /// Download (cache) and attach the Aprism JE javaagent for a MC version.
+///
+/// v26.6-alpha.3 (ROBUSTNESS_V265-adjacent, downstream §1.1): before
+/// attaching, detect the Fabric-Loader duplicate-ASM conflict. Agent jars
+/// are visible to `ClassLoader.getResources`, so an Aprism jar embedding
+/// unrelocated ASM plus the game classpath's `asm-*` library makes Fabric
+/// >= 0.19.3 abort in `Knot.<clinit>`. MDL cannot dedupe a signed agent
+/// jar, so it fails fast with the two verified workarounds instead.
 async fn attach_aprism(
     cmd: &mut Command,
     mc_version: &str,
     instance_dir: &std::path::Path,
+    config: &InstanceConfig,
 ) -> Result<String> {
     let releases = crate::loader::aprism::fetch_releases().await?;
     let (release, asset) = crate::loader::aprism::select_release(&releases, mc_version, true)
         .context("No applicable Aprism JE artifact for this Minecraft version")?;
     let jar = crate::loader::aprism::download_asset(&asset).await?;
+
+    // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+    if let Some(conflict) = fabric_asm_conflict(config, &jar) {
+        anyhow::bail!("{conflict}");
+    }
+
     let arg = crate::loader::aprism::javaagent_arg(&jar, &release.tag, mc_version, instance_dir);
     cmd.arg(&arg);
     Ok(format!("{} ({})", release.tag, jar.display()))
+}
+
+/// Detect the Fabric-Loader duplicate-ASM conflict for an Aprism agent jar.
+/// Returns a ready-to-print diagnostic when the combination is known to be
+/// fatal, else None. Pure IO inspection: no JVM is started.
+///
+/// The host identity comes from the INSTANCE CONFIG (`loader_type`), not the
+/// version metadata: `do_launch` holds the vanilla profile (id "26.2") while
+/// the Fabric profile lives in the separate `version.json`. Deriving the host
+/// from the vanilla id silently disabled the first version of this check
+/// (found while verifying alpha.3 - the launch still reached Knot and died).
+fn fabric_asm_conflict(
+    config: &InstanceConfig,
+    agent_jar: &std::path::Path,
+) -> Option<String> {
+    // Only Fabric hosts are affected (its LoaderUtil.verifyClasspath gained
+    // the duplicate-ASM check); vanilla/NeoForge/Forge hosts are fine.
+    let loader = config.loader.as_ref()?;
+    if !loader.loader_type.eq_ignore_ascii_case("fabric") {
+        return None;
+    }
+    if !crate::loader::aprism::fabric_rejects_duplicate_asm(&loader.version) {
+        return None;
+    }
+    if !crate::loader::aprism::jar_embeds_asm(agent_jar) {
+        return None;
+    }
+    // The game classpath must also carry ASM for the duplicate to exist.
+    if !classpath_has_asm_library() {
+        return None;
+    }
+    Some(format!(
+        "Refusing --aprism on this Fabric host: duplicate ASM classes.\n\
+         The Aprism agent jar {} embeds unrelocated ASM, and Fabric Loader {} \
+         rejects any classpath with more than one ASM source (the game \
+         classpath already provides the mdl library asm). The JVM would abort \
+         in Knot.<clinit> with 'duplicate ASM classes found on classpath'.\n\
+         Verified workarounds:\n\
+         1. Launch a vanilla-host instance instead (--loader none): Aprism \
+         runs as the host loader there.\n\
+         2. Use an Aprism build with relocated ASM. Aprism publishes a \
+         '-fabric-host' variant for exactly this case.\n\
+         Tracked upstream: Aprism ASM relocation.",
+        agent_jar.display(),
+        loader.version
+    ))
+}
+
+/// True when the shared library cache carries an ObjectWeb ASM jar (the
+/// second ASM source Fabric counts).
+fn classpath_has_asm_library() -> bool {
+    let Ok(libs) = crate::util::paths::get_libraries_cache_dir() else {
+        return false;
+    };
+    let asm_dir = libs.join("org").join("ow2").join("asm").join("asm");
+    let Ok(entries) = std::fs::read_dir(&asm_dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.path().is_dir()
+            && std::fs::read_dir(e.path())
+                .map(|files| {
+                    files.flatten().any(|f| {
+                        let name = f.file_name().to_string_lossy().to_lowercase();
+                        name.starts_with("asm-") && name.ends_with(".jar")
+                    })
+                })
+                .unwrap_or(false)
+    })
 }

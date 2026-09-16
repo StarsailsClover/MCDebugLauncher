@@ -347,6 +347,33 @@ fn pid_belongs_to_instance(pid: u32, instance: &str) -> bool {
     identity_matches(&name, &cmd_line, instance)
 }
 
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// Find the live game PID for an instance by command-line attribution
+/// (v26.6-alpha.3). Used as a fallback when `runtime/pid` is missing or
+/// stale - the field case that made `mdl kill` report "not running" while
+/// the game was alive (a crashed/replaced process left the pid file
+/// pointing at nothing). Returns None when no java process carries this
+/// instance's gameDir marker, or when several do (ambiguous: never guess).
+pub fn find_pid_by_instance_identity(instance: &str) -> Option<u32> {
+    use sysinfo::{ProcessRefreshKind, System};
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessRefreshKind::everything());
+    let mut hits: Vec<u32> = Vec::new();
+    for (pid, proc) in sys.processes() {
+        let name = proc.name().to_string();
+        let cmd_line = proc.cmd().join(" ");
+        if identity_matches(&name, &cmd_line, instance) {
+            hits.push(pid.as_u32());
+        }
+    }
+    if hits.len() == 1 {
+        Some(hits[0])
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

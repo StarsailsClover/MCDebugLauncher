@@ -32,9 +32,33 @@ pub struct StopOutcome {
 
 /// Stop the instance's game process: graceful first, force fallback.
 /// `force` skips the graceful phase entirely.
+///
+/// v26.6-alpha.3: when `runtime/pid` is missing or stale (the field case
+/// where `mdl kill` reported "not running" while the game was alive),
+/// fall back to command-line attribution of the live java process.
 pub async fn stop_instance(instance_dir: &Path, force: bool) -> Result<StopOutcome> {
-    let pid = crate::loader::server::running_pid(instance_dir)
-        .ok_or_else(|| anyhow::anyhow!("Instance is not running (no live pid)"))?;
+    let pid = match crate::loader::server::running_pid(instance_dir) {
+        Some(pid) => pid,
+        None => {
+            // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+            let name = instance_dir
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let found = crate::game::window::find_pid_by_instance_identity(&name).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Instance is not running (no live pid in runtime/pid and no \
+                     java process carries its gameDir)"
+                )
+            })?;
+            tracing::info!(
+                "runtime/pid missing or stale for '{}'; resolved live game pid {} by command line",
+                name,
+                found
+            );
+            found
+        }
+    };
 
     if !force && graceful_signal(pid) {
         // Poll for exit within the grace window.
@@ -48,9 +72,37 @@ pub async fn stop_instance(instance_dir: &Path, force: bool) -> Result<StopOutco
         }
     }
 
+    // v26.6-alpha.3 (found while verifying this alpha): the process may exit
+    // on its own between the last liveness poll and the force call - or exit
+    // before we even signalled (window already gone). The goal state is
+    // "process gone", so a dead PID here is success, not a taskkill error
+    // ("The process ... not found" surfaced as a hard failure in the field
+    // test).
+    if !crate::loader::server::is_pid_alive(pid) {
+        cleanup_pid_file(instance_dir).await;
+        return Ok(StopOutcome { pid, graceful: true });
+    }
+
     // Force fallback (also the immediate path under --force).
-    crate::loader::server::kill_pid(pid)
-        .with_context(|| format!("Failed to force-kill game process {pid}"))?;
+    if let Err(e) = crate::loader::server::kill_pid(pid) {
+        // v26.6-alpha.3 (found while verifying this alpha): the graceful
+        // WM_CLOSE may have started a JVM shutdown that outlives the 20s
+        // grace window; taskkill then races a dying process and reports
+        // "could not be terminated" / "process not found" while the game is
+        // in fact exiting. Re-poll briefly and treat a gone process as
+        // success - only a still-alive process after the retry is an error.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if !crate::loader::server::is_pid_alive(pid) {
+                cleanup_pid_file(instance_dir).await;
+                return Ok(StopOutcome { pid, graceful: true });
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        return Err(e).with_context(|| {
+            format!("Failed to force-kill game process {pid} (still alive after retry)")
+        });
+    }
     cleanup_pid_file(instance_dir).await;
     Ok(StopOutcome { pid, graceful: false })
 }

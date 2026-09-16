@@ -1413,6 +1413,18 @@ async fn execute_command(
                     }
                 }
             }
+            // v26.6-alpha.3: verbatim JVM argument passthrough (same contract
+            // as the CLI --jvm-arg; pipe-delimited so values may contain
+            // commas, e.g. -XX:OnError="a,b").
+            // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+            if let Some(args) = options.get("jvm-arg") {
+                for arg in args.split('|') {
+                    let arg = arg.trim();
+                    if !arg.is_empty() {
+                        launch_options.jvm_args.push(arg.to_string());
+                    }
+                }
+            }
 
             // Validate the instance exists before handing off.
             let manager = InstanceManager::new()?;

@@ -125,14 +125,55 @@ fn cache_dir() -> Result<PathBuf> {
 }
 
 /// Download and cache an Aprism artifact.
+///
+/// v26.6-alpha.3 (downstream report, AprismRefract FACT.md: "the filename
+/// lies"): the cache used to be a bare name-exists check, so a same-named
+/// stale/truncated/overwritten jar was reused silently forever - and the
+/// agent cache selector picks by filename, so launches attached the wrong
+/// bytes. Cached files are now validated against the release metadata
+/// (size, plus GitHub's sha256 digest when present) and re-downloaded on
+/// mismatch.
 pub async fn download_asset(asset: &AprismAsset) -> Result<PathBuf> {
     let dir = cache_dir()?;
     let dest = dir.join(&asset.name);
-    if dest.exists() {
+    if dest.exists() && cached_asset_is_valid(&dest, asset) {
         return Ok(dest);
+    }
+    if dest.exists() {
+        tracing::warn!(
+            "Cached Aprism artifact {} failed validation (size/digest); re-downloading",
+            asset.name
+        );
     }
     crate::version::downloader::download_file(&asset.url, &dest, None).await?;
     Ok(dest)
+}
+
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// Validate a cached artifact against release metadata. A size of 0 in the
+/// metadata means "unknown" (older API payloads), in which case only the
+/// digest is checked when present, else the file is accepted.
+fn cached_asset_is_valid(path: &Path, asset: &AprismAsset) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if asset.size > 0 && meta.len() != asset.size {
+        return false;
+    }
+    if let Some(expected) = &asset.digest {
+        let Some(expected) = expected.strip_prefix("sha256:") else {
+            // Unknown digest algorithm: size check (above) is all we have.
+            return true;
+        };
+        let Ok(bytes) = std::fs::read(path) else {
+            return false;
+        };
+        use sha2::Digest as _;
+        let actual = format!("{:x}", sha2::Sha256::digest(&bytes));
+        return actual.eq_ignore_ascii_case(expected);
+    }
+    true
 }
 
 /// Build the `-javaagent` argument for launching with Aprism.
@@ -146,8 +187,116 @@ pub fn javaagent_arg(jar: &Path, aprism_version: &str, mc_version: &str, game_ro
     )
 }
 
+// GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+/// True when the JAR carries unrelocated ObjectWeb ASM classes
+/// (v26.6-alpha.3).
+///
+/// Field evidence (2026-09-26 crash log, reproduced 2026-09-14 by MDL):
+/// the Aprism JE agent jar embeds ASM 9.9. Fabric Loader >= 0.19.3 scans the
+/// classpath with `ClassLoader.getResources(ClassReader.class)` and
+/// **hard-fails when more than one ASM source is visible** - agent jars
+/// attached via `-javaagent` are visible to that lookup, so
+/// `--aprism` on a modern Fabric host dies in `Knot.<clinit>` with
+/// "duplicate ASM classes found on classpath". MDL cannot dedupe an agent
+/// jar's embedded classes without rewriting a signed artifact
+/// (Aprism ships `.jar.sig`), so the launch path detects the conflict
+/// up-front and fails with actionable guidance instead of an obscure
+/// Knot stack trace.
+pub fn jar_embeds_asm(jar: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(jar) else {
+        return false;
+    };
+    let Ok(mut zip) = zip::ZipArchive::new(file) else {
+        return false;
+    };
+    // Scope the borrow so the ZipFile temporary is dropped before `zip`.
+    let found = match zip.by_name("org/objectweb/asm/ClassReader.class") {
+        Ok(_entry) => true,
+        Err(_) => false,
+    };
+    found
+}
+
+/// True when the Fabric Loader version rejects duplicate ASM sources
+/// (>= 0.19.3, per LoaderUtil.verifyClasspath). Unparseable versions
+/// (e.g. the literal "latest") are treated as strict: 0.19.3+ is what
+/// current 26.x hosts resolve to, and the failure mode is fatal.
+pub fn fabric_rejects_duplicate_asm(loader_version: &str) -> bool {
+    let mut parts = loader_version
+        .trim()
+        .split(['.', '-', '+'])
+        .filter_map(|p| p.parse::<u64>().ok());
+    let (major, minor, patch) = (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    );
+    if major == 0 && minor == 0 && patch == 0 {
+        // Unparseable ("latest", a hash, ...): assume strict.
+        return true;
+    }
+    (major, minor, patch) >= (0, 19, 3)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    // GitHub@NDBlockConnect | BlockConnect@StarsailsClover
+
+    /// v26.6-alpha.3 (downstream §1.1): the Fabric duplicate-ASM gate.
+    #[test]
+    fn test_fabric_rejects_duplicate_asm_versions() {
+        // Strict lines reject (the reproduced crash was 0.19.3).
+        assert!(fabric_rejects_duplicate_asm("0.19.3"));
+        assert!(fabric_rejects_duplicate_asm("0.19.4"));
+        assert!(fabric_rejects_duplicate_asm("0.20.0"));
+        assert!(fabric_rejects_duplicate_asm("1.0.0"));
+        // Unparseable values are treated as strict (current hosts).
+        assert!(fabric_rejects_duplicate_asm("latest"));
+        assert!(fabric_rejects_duplicate_asm(""));
+        // Older loaders tolerate duplicates.
+        assert!(!fabric_rejects_duplicate_asm("0.19.2"));
+        assert!(!fabric_rejects_duplicate_asm("0.18.4"));
+        assert!(!fabric_rejects_duplicate_asm("0.16.14"));
+    }
+
+    /// The agent jar ASM probe: a JAR carrying ClassReader.class is flagged,
+    /// one without it is not.
+    #[test]
+    fn test_jar_embeds_asm_detection() {
+        use std::io::Write as _;
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let with_asm = dir.path().join("with-asm.jar");
+        {
+            let f = std::fs::File::create(&with_asm).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            z.start_file("org/objectweb/asm/ClassReader.class", opts).unwrap();
+            z.write_all(b"fake").unwrap();
+            z.finish().unwrap();
+        }
+        assert!(jar_embeds_asm(&with_asm));
+
+        let without = dir.path().join("plain.jar");
+        {
+            let f = std::fs::File::create(&without).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            z.start_file("net/example/Mod.class", opts).unwrap();
+            z.write_all(b"fake").unwrap();
+            z.finish().unwrap();
+        }
+        assert!(!jar_embeds_asm(&without));
+
+        // Missing/corrupt files never panic.
+        assert!(!jar_embeds_asm(&dir.path().join("nope.jar")));
+        let junk = dir.path().join("junk.jar");
+        std::fs::write(&junk, b"not a zip").unwrap();
+        assert!(!jar_embeds_asm(&junk));
+    }
     // Network-dependent integration test: the --aprism launch path must
     // resolve and download the JE javaagent artifact from GitHub Releases.
     // Disabled by default; run with --ignored.
