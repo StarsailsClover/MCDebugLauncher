@@ -45,12 +45,15 @@ pub async fn stop_instance(instance_dir: &Path, force: bool) -> Result<StopOutco
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let found = crate::game::window::find_pid_by_instance_identity(&name).ok_or_else(|| {
-                anyhow::anyhow!(
+            let found =
+                crate::game::process_identity::find_pid_by_instance_identity(&name).ok_or_else(
+                    || {
+                        anyhow::anyhow!(
                     "Instance is not running (no live pid in runtime/pid and no \
                      java process carries its gameDir)"
                 )
-            })?;
+                    },
+                )?;
             tracing::info!(
                 "runtime/pid missing or stale for '{}'; resolved live game pid {} by command line",
                 name,

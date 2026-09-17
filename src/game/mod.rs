@@ -19,6 +19,7 @@ pub mod flow;
 pub mod lifecycle;
 pub mod oom_guard;
 pub mod options;
+pub mod process_identity;
 pub mod watchdog;
 
 #[cfg(windows)]
